@@ -292,7 +292,7 @@ export function findOrCreateAccountByMint(
   const accountToFind = mint.toBase58();
   const account = cache
     .byParser(TokenAccountParser)
-    .map(id => cache.get(id))
+    .map(id => cache.get(id) as TokenAccount | undefined)
     .find(
       acc =>
         acc !== undefined &&

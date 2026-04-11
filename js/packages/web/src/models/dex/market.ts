@@ -38,10 +38,10 @@ export const DexMarketParser = (
     info: decoded,
   } as ParsedAccountBase;
 
-  cache.registerParser(details.info.baseMint, MintParser);
-  cache.registerParser(details.info.quoteMint, MintParser);
-  cache.registerParser(details.info.bids, OrderBookParser);
-  cache.registerParser(details.info.asks, OrderBookParser);
+  cache.registerParser(decoded.baseMint, MintParser);
+  cache.registerParser(decoded.quoteMint, MintParser);
+  cache.registerParser(decoded.bids, OrderBookParser);
+  cache.registerParser(decoded.asks, OrderBookParser);
 
   return details;
 };

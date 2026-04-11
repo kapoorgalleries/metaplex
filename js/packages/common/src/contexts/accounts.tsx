@@ -28,7 +28,7 @@ const mintCache = new Map<string, MintInfo>();
 export interface ParsedAccountBase {
   pubkey: PublicKey;
   account: AccountInfo<Buffer>;
-  info: any; // TODO: change to unkown
+  info: unknown;
 }
 
 export type AccountParser = (
@@ -300,7 +300,7 @@ export const getCachedAccount = (
   predicate: (account: TokenAccount) => boolean,
 ) => {
   for (const account of genericCache.values()) {
-    if (predicate(account)) {
+    if (predicate(account as TokenAccount)) {
       return account as TokenAccount;
     }
   }
@@ -390,7 +390,10 @@ export function AccountsProvider({ children = null as any }) {
       .byParser(TokenAccountParser)
       .map(id => cache.get(id))
       .filter(
-        a => a && a.info.owner.toBase58() === wallet?.publicKey?.toBase58(),
+        a =>
+          a &&
+          (a as TokenAccount).info.owner.toBase58() ===
+            wallet?.publicKey?.toBase58(),
       )
       .map(a => a as TokenAccount);
   }, [wallet]);
