@@ -461,3 +461,577 @@ impl BidderPot {
         Ok(bidder_pot)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use borsh::{BorshDeserialize, BorshSerialize};
+
+    fn test_pubkey(seed: u8) -> Pubkey {
+        let mut bytes = [0u8; 32];
+        bytes[0] = seed;
+        Pubkey::new_from_array(bytes)
+    }
+
+    // ── AuctionState transitions ──
+
+    #[test]
+    fn created_can_start() {
+        assert_eq!(
+            AuctionState::Created.start().unwrap(),
+            AuctionState::Started
+        );
+    }
+
+    #[test]
+    fn started_can_end() {
+        assert_eq!(AuctionState::Started.end().unwrap(), AuctionState::Ended);
+    }
+
+    #[test]
+    fn started_cannot_start() {
+        assert!(AuctionState::Started.start().is_err());
+    }
+
+    #[test]
+    fn ended_cannot_end() {
+        assert!(AuctionState::Ended.end().is_err());
+    }
+
+    #[test]
+    fn created_cannot_end() {
+        assert!(AuctionState::Created.end().is_err());
+    }
+
+    #[test]
+    fn ended_cannot_start() {
+        assert!(AuctionState::Ended.start().is_err());
+    }
+
+    // ── BidState::new_english / new_open_edition ──
+
+    #[test]
+    fn new_english_starts_empty() {
+        let state = BidState::new_english(3);
+        match state {
+            BidState::EnglishAuction { bids, max } => {
+                assert!(bids.is_empty());
+                assert_eq!(max, 3);
+            }
+            _ => panic!("expected EnglishAuction"),
+        }
+    }
+
+    #[test]
+    fn new_open_edition_starts_empty() {
+        let state = BidState::new_open_edition();
+        match state {
+            BidState::OpenEdition { bids, max } => {
+                assert!(bids.is_empty());
+                assert_eq!(max, 0);
+            }
+            _ => panic!("expected OpenEdition"),
+        }
+    }
+
+    // ── BidState::place_bid ──
+
+    #[test]
+    fn place_bid_on_empty() {
+        let mut state = BidState::new_english(3);
+        state.place_bid(Bid(test_pubkey(1), 100)).unwrap();
+        assert_eq!(state.amount(0), 100);
+    }
+
+    #[test]
+    fn place_bid_maintains_sorted_order() {
+        let mut state = BidState::new_english(3);
+        state.place_bid(Bid(test_pubkey(1), 100)).unwrap();
+        state.place_bid(Bid(test_pubkey(2), 300)).unwrap();
+        state.place_bid(Bid(test_pubkey(3), 200)).unwrap();
+
+        assert_eq!(state.amount(0), 300);
+        assert_eq!(state.amount(1), 200);
+        assert_eq!(state.amount(2), 100);
+    }
+
+    #[test]
+    fn place_bid_handles_equal_amounts() {
+        let mut state = BidState::new_english(5);
+        state.place_bid(Bid(test_pubkey(1), 100)).unwrap();
+        state.place_bid(Bid(test_pubkey(2), 100)).unwrap();
+        state.place_bid(Bid(test_pubkey(3), 100)).unwrap();
+
+        match &state {
+            BidState::EnglishAuction { bids, .. } => {
+                assert_eq!(bids.len(), 3);
+                assert!(bids.iter().all(|b| b.1 == 100));
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn place_bid_prunes_when_exceeding_max_array_size() {
+        let mut state = BidState::new_english(1);
+        let max_size = BidState::max_array_size_for(1);
+
+        for i in 0..(max_size + 2) {
+            state
+                .place_bid(Bid(test_pubkey(i as u8), i as u64))
+                .unwrap();
+        }
+
+        match &state {
+            BidState::EnglishAuction { bids, .. } => {
+                assert!(bids.len() <= max_size);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn place_bid_open_edition_always_succeeds() {
+        let mut state = BidState::new_open_edition();
+        assert!(state.place_bid(Bid(test_pubkey(1), 100)).is_ok());
+    }
+
+    // ── BidState::cancel_bid ──
+
+    #[test]
+    fn cancel_bid_removes_from_list() {
+        let mut state = BidState::new_english(3);
+        let bidder = test_pubkey(1);
+        state.place_bid(Bid(bidder, 100)).unwrap();
+        state.place_bid(Bid(test_pubkey(2), 200)).unwrap();
+
+        state.cancel_bid(bidder).unwrap();
+
+        match &state {
+            BidState::EnglishAuction { bids, .. } => {
+                assert_eq!(bids.len(), 1);
+                assert_eq!(bids[0].0, test_pubkey(2));
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn cancel_bid_noop_for_nonexistent_bidder() {
+        let mut state = BidState::new_english(3);
+        state.place_bid(Bid(test_pubkey(1), 100)).unwrap();
+        state.cancel_bid(test_pubkey(99)).unwrap();
+
+        match &state {
+            BidState::EnglishAuction { bids, .. } => assert_eq!(bids.len(), 1),
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn cancel_bid_open_edition_is_noop() {
+        let mut state = BidState::new_open_edition();
+        assert!(state.cancel_bid(test_pubkey(1)).is_ok());
+    }
+
+    // ── BidState::is_winner ──
+
+    #[test]
+    fn is_winner_returns_index_for_winner() {
+        let mut state = BidState::new_english(2);
+        let a = test_pubkey(1);
+        let b = test_pubkey(2);
+        state.place_bid(Bid(a, 100)).unwrap();
+        state.place_bid(Bid(b, 200)).unwrap();
+
+        assert_eq!(state.is_winner(&b, 0), Some(0));
+        assert_eq!(state.is_winner(&a, 0), Some(1));
+    }
+
+    #[test]
+    fn is_winner_returns_none_for_non_bidder() {
+        let state = BidState::new_english(2);
+        assert_eq!(state.is_winner(&test_pubkey(99), 0), None);
+    }
+
+    #[test]
+    fn is_winner_respects_minimum_price() {
+        let mut state = BidState::new_english(2);
+        let bidder = test_pubkey(1);
+        state.place_bid(Bid(bidder, 50)).unwrap();
+
+        assert_eq!(state.is_winner(&bidder, 100), None);
+        assert_eq!(state.is_winner(&bidder, 50), Some(0));
+    }
+
+    #[test]
+    fn is_winner_returns_none_outside_max() {
+        let mut state = BidState::new_english(1);
+        let a = test_pubkey(1);
+        let b = test_pubkey(2);
+        state.place_bid(Bid(a, 100)).unwrap();
+        state.place_bid(Bid(b, 200)).unwrap();
+
+        assert_eq!(state.is_winner(&b, 0), Some(0));
+        assert_eq!(state.is_winner(&a, 0), None);
+    }
+
+    #[test]
+    fn is_winner_open_edition_always_none() {
+        let state = BidState::new_open_edition();
+        assert_eq!(state.is_winner(&test_pubkey(1), 0), None);
+    }
+
+    // ── BidState::num_winners ──
+
+    #[test]
+    fn num_winners_counts_qualifying_bids() {
+        let mut state = BidState::new_english(5);
+        state.place_bid(Bid(test_pubkey(1), 50)).unwrap();
+        state.place_bid(Bid(test_pubkey(2), 100)).unwrap();
+        state.place_bid(Bid(test_pubkey(3), 150)).unwrap();
+
+        assert_eq!(state.num_winners(0), 3);
+        assert_eq!(state.num_winners(100), 2);
+        assert_eq!(state.num_winners(200), 0);
+    }
+
+    #[test]
+    fn num_winners_capped_by_max() {
+        let mut state = BidState::new_english(2);
+        state.place_bid(Bid(test_pubkey(1), 100)).unwrap();
+        state.place_bid(Bid(test_pubkey(2), 200)).unwrap();
+        state.place_bid(Bid(test_pubkey(3), 300)).unwrap();
+
+        assert_eq!(state.num_winners(0), 2);
+    }
+
+    #[test]
+    fn num_winners_open_edition_is_zero() {
+        let state = BidState::new_open_edition();
+        assert_eq!(state.num_winners(0), 0);
+    }
+
+    // ── BidState::winner_at ──
+
+    #[test]
+    fn winner_at_returns_highest_first() {
+        let mut state = BidState::new_english(3);
+        let a = test_pubkey(1);
+        let b = test_pubkey(2);
+        let c = test_pubkey(3);
+        state.place_bid(Bid(a, 100)).unwrap();
+        state.place_bid(Bid(b, 200)).unwrap();
+        state.place_bid(Bid(c, 300)).unwrap();
+
+        assert_eq!(state.winner_at(0, 0), Some(c));
+        assert_eq!(state.winner_at(1, 0), Some(b));
+        assert_eq!(state.winner_at(2, 0), Some(a));
+    }
+
+    #[test]
+    fn winner_at_respects_min() {
+        let mut state = BidState::new_english(3);
+        state.place_bid(Bid(test_pubkey(1), 50)).unwrap();
+        state.place_bid(Bid(test_pubkey(2), 200)).unwrap();
+
+        assert_eq!(state.winner_at(0, 0), Some(test_pubkey(2)));
+        assert_eq!(state.winner_at(1, 100), None);
+    }
+
+    #[test]
+    fn winner_at_returns_none_past_max() {
+        let mut state = BidState::new_english(1);
+        state.place_bid(Bid(test_pubkey(1), 100)).unwrap();
+        state.place_bid(Bid(test_pubkey(2), 200)).unwrap();
+
+        assert_eq!(state.winner_at(0, 0), Some(test_pubkey(2)));
+        assert_eq!(state.winner_at(1, 0), None);
+    }
+
+    #[test]
+    fn winner_at_open_edition_always_none() {
+        let state = BidState::new_open_edition();
+        assert_eq!(state.winner_at(0, 0), None);
+    }
+
+    // ── BidState::amount ──
+
+    #[test]
+    fn amount_returns_correct_value_by_index() {
+        let mut state = BidState::new_english(3);
+        state.place_bid(Bid(test_pubkey(1), 100)).unwrap();
+        state.place_bid(Bid(test_pubkey(2), 200)).unwrap();
+        state.place_bid(Bid(test_pubkey(3), 300)).unwrap();
+
+        assert_eq!(state.amount(0), 300);
+        assert_eq!(state.amount(1), 200);
+        assert_eq!(state.amount(2), 100);
+    }
+
+    #[test]
+    fn amount_returns_zero_for_out_of_bounds() {
+        let state = BidState::new_english(3);
+        assert_eq!(state.amount(0), 0);
+        assert_eq!(state.amount(999), 0);
+    }
+
+    #[test]
+    fn amount_open_edition_always_zero() {
+        let state = BidState::new_open_edition();
+        assert_eq!(state.amount(0), 0);
+    }
+
+    // ── BidState::max_array_size_for ──
+
+    #[test]
+    fn max_array_size_minimum_is_8() {
+        assert_eq!(BidState::max_array_size_for(1), 8);
+        assert_eq!(BidState::max_array_size_for(7), 8);
+    }
+
+    #[test]
+    fn max_array_size_doubles_for_8_and_above() {
+        assert_eq!(BidState::max_array_size_for(8), 16);
+        assert_eq!(BidState::max_array_size_for(10), 20);
+        assert_eq!(BidState::max_array_size_for(100), 200);
+    }
+
+    // ── AuctionData.ended() ──
+
+    #[test]
+    fn ended_returns_false_with_no_end_time() {
+        let auction = AuctionData {
+            authority: test_pubkey(0),
+            token_mint: test_pubkey(1),
+            last_bid: None,
+            ended_at: None,
+            end_auction_at: None,
+            end_auction_gap: None,
+            price_floor: PriceFloor::None([0u8; 32]),
+            state: AuctionState::Started,
+            bid_state: BidState::new_english(3),
+        };
+        assert_eq!(auction.ended(99999).unwrap(), false);
+    }
+
+    #[test]
+    fn ended_returns_true_after_end_time() {
+        let auction = AuctionData {
+            authority: test_pubkey(0),
+            token_mint: test_pubkey(1),
+            last_bid: None,
+            ended_at: Some(100),
+            end_auction_at: Some(100),
+            end_auction_gap: None,
+            price_floor: PriceFloor::None([0u8; 32]),
+            state: AuctionState::Started,
+            bid_state: BidState::new_english(3),
+        };
+        assert_eq!(auction.ended(101).unwrap(), true);
+        assert_eq!(auction.ended(99).unwrap(), false);
+    }
+
+    #[test]
+    fn ended_with_gap_extends_past_last_bid() {
+        let auction = AuctionData {
+            authority: test_pubkey(0),
+            token_mint: test_pubkey(1),
+            last_bid: Some(90),
+            ended_at: Some(100),
+            end_auction_at: Some(100),
+            end_auction_gap: Some(20),
+            price_floor: PriceFloor::None([0u8; 32]),
+            state: AuctionState::Started,
+            bid_state: BidState::new_english(3),
+        };
+        // end=100, gap=20, last_bid=90 => next_bid_time=110
+        // At 105: past end(100) but not past next_bid_time(110)
+        assert_eq!(auction.ended(105).unwrap(), false);
+        // At 111: past both
+        assert_eq!(auction.ended(111).unwrap(), true);
+    }
+
+    #[test]
+    fn ended_with_gap_but_no_bids() {
+        let auction = AuctionData {
+            authority: test_pubkey(0),
+            token_mint: test_pubkey(1),
+            last_bid: None,
+            ended_at: Some(100),
+            end_auction_at: Some(100),
+            end_auction_gap: Some(20),
+            price_floor: PriceFloor::None([0u8; 32]),
+            state: AuctionState::Started,
+            bid_state: BidState::new_english(3),
+        };
+        assert_eq!(auction.ended(101).unwrap(), true);
+    }
+
+    // ── AuctionData winner helpers ──
+
+    #[test]
+    fn is_winner_with_minimum_price_floor() {
+        let bidder = test_pubkey(1);
+        let mut bid_state = BidState::new_english(2);
+        bid_state.place_bid(Bid(bidder, 200)).unwrap();
+
+        let auction = AuctionData {
+            authority: test_pubkey(0),
+            token_mint: test_pubkey(2),
+            last_bid: Some(100),
+            ended_at: Some(200),
+            end_auction_at: Some(200),
+            end_auction_gap: None,
+            price_floor: PriceFloor::MinimumPrice([150, 0, 0, 0]),
+            state: AuctionState::Ended,
+            bid_state,
+        };
+
+        assert_eq!(auction.is_winner(&bidder), Some(0));
+
+        let loser = test_pubkey(99);
+        assert_eq!(auction.is_winner(&loser), None);
+    }
+
+    #[test]
+    fn num_winners_with_price_floor() {
+        let mut bid_state = BidState::new_english(5);
+        bid_state.place_bid(Bid(test_pubkey(1), 50)).unwrap();
+        bid_state.place_bid(Bid(test_pubkey(2), 100)).unwrap();
+        bid_state.place_bid(Bid(test_pubkey(3), 200)).unwrap();
+
+        let auction = AuctionData {
+            authority: test_pubkey(0),
+            token_mint: test_pubkey(10),
+            last_bid: None,
+            ended_at: None,
+            end_auction_at: None,
+            end_auction_gap: None,
+            price_floor: PriceFloor::MinimumPrice([100, 0, 0, 0]),
+            state: AuctionState::Ended,
+            bid_state,
+        };
+
+        assert_eq!(auction.num_winners(), 2);
+    }
+
+    #[test]
+    fn winner_at_with_no_price_floor() {
+        let mut bid_state = BidState::new_english(3);
+        bid_state.place_bid(Bid(test_pubkey(1), 100)).unwrap();
+        bid_state.place_bid(Bid(test_pubkey(2), 200)).unwrap();
+
+        let auction = AuctionData {
+            authority: test_pubkey(0),
+            token_mint: test_pubkey(10),
+            last_bid: None,
+            ended_at: None,
+            end_auction_at: None,
+            end_auction_gap: None,
+            price_floor: PriceFloor::None([0u8; 32]),
+            state: AuctionState::Ended,
+            bid_state,
+        };
+
+        assert_eq!(auction.winner_at(0), Some(test_pubkey(2)));
+        assert_eq!(auction.winner_at(1), Some(test_pubkey(1)));
+        assert_eq!(auction.winner_at(2), None);
+    }
+
+    // ── Borsh round-trip serialization ──
+
+    #[test]
+    fn bid_state_english_borsh_round_trip() {
+        let mut state = BidState::new_english(3);
+        state.place_bid(Bid(test_pubkey(1), 100)).unwrap();
+        state.place_bid(Bid(test_pubkey(2), 200)).unwrap();
+
+        let data = state.try_to_vec().unwrap();
+        let decoded = BidState::try_from_slice(&data).unwrap();
+        assert_eq!(state, decoded);
+    }
+
+    #[test]
+    fn bid_state_open_edition_borsh_round_trip() {
+        let state = BidState::new_open_edition();
+        let data = state.try_to_vec().unwrap();
+        let decoded = BidState::try_from_slice(&data).unwrap();
+        assert_eq!(state, decoded);
+    }
+
+    #[test]
+    fn auction_data_borsh_round_trip() {
+        let mut bid_state = BidState::new_english(2);
+        bid_state.place_bid(Bid(test_pubkey(1), 500)).unwrap();
+
+        let auction = AuctionData {
+            authority: test_pubkey(10),
+            token_mint: test_pubkey(20),
+            last_bid: Some(1234567890),
+            ended_at: None,
+            end_auction_at: Some(9999999999),
+            end_auction_gap: Some(300),
+            price_floor: PriceFloor::MinimumPrice([100, 0, 0, 0]),
+            state: AuctionState::Started,
+            bid_state,
+        };
+
+        let data = auction.try_to_vec().unwrap();
+        let decoded = AuctionData::try_from_slice(&data).unwrap();
+        assert_eq!(auction, decoded);
+    }
+
+    #[test]
+    fn auction_data_extended_borsh_round_trip() {
+        let ext = AuctionDataExtended {
+            total_uncancelled_bids: 5,
+            tick_size: Some(1000),
+            gap_tick_size_percentage: Some(10),
+        };
+
+        let data = ext.try_to_vec().unwrap();
+        let decoded = AuctionDataExtended::try_from_slice(&data).unwrap();
+        assert_eq!(ext, decoded);
+    }
+
+    #[test]
+    fn bidder_metadata_borsh_round_trip() {
+        let meta = BidderMetadata {
+            bidder_pubkey: test_pubkey(1),
+            auction_pubkey: test_pubkey(2),
+            last_bid: 5000,
+            last_bid_timestamp: 1234567890,
+            cancelled: false,
+        };
+
+        let data = meta.try_to_vec().unwrap();
+        let decoded = BidderMetadata::try_from_slice(&data).unwrap();
+        assert_eq!(meta, decoded);
+    }
+
+    #[test]
+    fn price_floor_variants_borsh_round_trip() {
+        let none = PriceFloor::None([0u8; 32]);
+        let min = PriceFloor::MinimumPrice([42, 0, 0, 0]);
+        let blinded = PriceFloor::BlindedPrice(Hash::new_from_array([0xAB; 32]));
+
+        for original in &[none, min, blinded] {
+            let data = original.try_to_vec().unwrap();
+            let decoded = PriceFloor::try_from_slice(&data).unwrap();
+            assert_eq!(original, &decoded);
+        }
+    }
+
+    #[test]
+    fn winner_limit_variants_borsh_round_trip() {
+        let unlimited = WinnerLimit::Unlimited(0);
+        let capped = WinnerLimit::Capped(5);
+
+        for original in &[unlimited, capped] {
+            let data = original.try_to_vec().unwrap();
+            let decoded = WinnerLimit::try_from_slice(&data).unwrap();
+            assert_eq!(original, &decoded);
+        }
+    }
+}
