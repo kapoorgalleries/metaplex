@@ -192,6 +192,17 @@
     toastTimer = setTimeout(() => (toastEl.className = "toast"), 3200);
   };
 
+  /* ---------- Offline banner ---------- */
+  const offline = el(`<div class="offline-banner" id="offlineBanner" hidden>You're offline — showing a saved copy.</div>`);
+  document.body.appendChild(offline);
+  const syncOnline = () => (offline.hidden = navigator.onLine);
+  window.addEventListener("online", () => {
+    syncOnline();
+    if (window.toast) window.toast("Back online ✓", "ok");
+  });
+  window.addEventListener("offline", syncOnline);
+  syncOnline();
+
   /* ---------- Concierge ---------- */
   injectConcierge();
   function injectConcierge() {

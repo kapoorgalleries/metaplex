@@ -21,14 +21,39 @@
   lightbox.querySelector(".lightbox__close").addEventListener("click", closeLightbox);
   document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeLightbox(); });
 
+  const loved = new Set(JSON.parse(localStorage.getItem("lovedPhotos") || "[]"));
+  function rememberLove(id) {
+    loved.add(id);
+    localStorage.setItem("lovedPhotos", JSON.stringify([...loved]));
+  }
+
   function addTile(photo, prepend) {
     const tile = document.createElement("div");
     tile.className = "gallery__tile gallery__tile--photo visible";
     tile.style.backgroundImage = `url("${photo.url}")`;
     const cap = photo.caption || "";
     const who = photo.uploader ? `— ${photo.uploader}` : "";
-    tile.innerHTML = `<span class="gallery__caption">${window.escapeHtml(cap)} ${window.escapeHtml(who)}</span>`;
+    const isLoved = loved.has(photo.id);
+    tile.innerHTML =
+      `<button class="gallery__love${isLoved ? " is-loved" : ""}" aria-label="Love this photo">` +
+      `<span class="gallery__heart">♥</span><span class="gallery__loves">${photo.loves || 0}</span></button>` +
+      `<span class="gallery__caption">${window.escapeHtml(cap)} ${window.escapeHtml(who)}</span>`;
     tile.addEventListener("click", () => openPhoto(photo));
+
+    const loveBtn = tile.querySelector(".gallery__love");
+    const lovesEl = tile.querySelector(".gallery__loves");
+    loveBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      if (loved.has(photo.id)) return;
+      rememberLove(photo.id);
+      loveBtn.classList.add("is-loved");
+      lovesEl.textContent = (photo.loves || 0) + 1; // optimistic
+      fetch(`/api/photos/${encodeURIComponent(photo.id)}/love`, { method: "POST" })
+        .then((r) => (r.ok ? r.json() : null))
+        .then((d) => { if (d) { photo.loves = d.loves; lovesEl.textContent = d.loves; } })
+        .catch(() => {});
+    });
+
     if (prepend) grid.insertBefore(tile, grid.firstChild);
     else grid.appendChild(tile);
     count++;

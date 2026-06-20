@@ -38,6 +38,14 @@ function localStorage() {
       fs.writeFileSync(MANIFEST, JSON.stringify(list, null, 2));
       return entry;
     },
+    async writeManifest(list) {
+      fs.writeFileSync(MANIFEST, JSON.stringify(list, null, 2));
+    },
+    async remove(key) {
+      try {
+        fs.unlinkSync(path.join(UPLOAD_DIR, key));
+      } catch (_) {/* already gone */}
+    },
   };
 }
 
@@ -46,7 +54,7 @@ function localStorage() {
 // or Cloudflare R2 (set PHOTO_S3_ENDPOINT to the R2 S3 API endpoint).
 function s3Storage() {
   // Lazily required so the dependency is only needed when this backend is used.
-  const { S3Client, PutObjectCommand, GetObjectCommand } = require("@aws-sdk/client-s3");
+  const { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand } = require("@aws-sdk/client-s3");
 
   const Bucket = process.env.PHOTO_S3_BUCKET;
   const endpoint = process.env.PHOTO_S3_ENDPOINT || undefined; // R2: https://<acct>.r2.cloudflarestorage.com
@@ -104,6 +112,10 @@ function s3Storage() {
     async appendManifest(entry) {
       const list = await this.readManifest();
       list.push(entry);
+      await this.writeManifest(list);
+      return entry;
+    },
+    async writeManifest(list) {
       await client.send(
         new PutObjectCommand({
           Bucket,
@@ -112,7 +124,11 @@ function s3Storage() {
           ContentType: "application/json",
         })
       );
-      return entry;
+    },
+    async remove(key) {
+      try {
+        await client.send(new DeleteObjectCommand({ Bucket, Key: key }));
+      } catch (_) {/* already gone */}
     },
   };
 }

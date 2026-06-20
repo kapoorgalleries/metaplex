@@ -39,6 +39,20 @@
     lines.push("END:VCALENDAR");
     return lines.join("\r\n");
   }
+  // Live, PII-free guest count.
+  const statsEl = document.getElementById("heroStats");
+  if (statsEl) {
+    fetch("/api/stats")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((s) => {
+        if (s && s.guests > 0) {
+          statsEl.textContent = `💛 ${s.guests} guest${s.guests === 1 ? "" : "s"} celebrating with us`;
+          statsEl.hidden = false;
+        }
+      })
+      .catch(() => {});
+  }
+
   const btn = document.getElementById("addCalendar");
   if (btn)
     btn.addEventListener("click", () => {

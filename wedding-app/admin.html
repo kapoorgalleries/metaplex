@@ -40,6 +40,7 @@
           <button class="admin__tab is-active" data-tab="rsvps">RSVPs</button>
           <button class="admin__tab" data-tab="guestbook">Guestbook</button>
           <button class="admin__tab" data-tab="songs">Song Requests</button>
+          <button class="admin__tab" data-tab="photos">Photos</button>
         </div>
 
         <div class="admin__toolbar">
@@ -48,20 +49,31 @@
           <span id="tabCount" style="color:var(--muted)"></span>
         </div>
 
-        <div class="table-wrap"><table class="admin__table" id="tableRsvps" data-tab="rsvps">
-          <thead><tr><th>Name</th><th>Email</th><th>Attending</th><th>Guests</th><th>Events</th><th>Meal</th><th>Hotel</th><th>Note</th><th>When</th></tr></thead>
-          <tbody></tbody>
-        </table></div>
+        <div class="admin__pane" data-tab="rsvps">
+          <div class="table-wrap"><table class="admin__table" id="tableRsvps">
+            <thead><tr><th>Name</th><th>Email</th><th>Attending</th><th>Guests</th><th>Events</th><th>Meal</th><th>Hotel</th><th>Note</th><th>When</th></tr></thead>
+            <tbody></tbody>
+          </table></div>
+        </div>
 
-        <div class="table-wrap" hidden><table class="admin__table" id="tableGuestbook" data-tab="guestbook">
-          <thead><tr><th>Name</th><th>Message</th><th>When</th></tr></thead>
-          <tbody></tbody>
-        </table></div>
+        <div class="admin__pane" data-tab="guestbook" hidden>
+          <div class="table-wrap"><table class="admin__table" id="tableGuestbook">
+            <thead><tr><th>Name</th><th>Message</th><th>When</th></tr></thead>
+            <tbody></tbody>
+          </table></div>
+        </div>
 
-        <div class="table-wrap" hidden><table class="admin__table" id="tableSongs" data-tab="songs">
-          <thead><tr><th>Song</th><th>Artist</th><th>Requested by</th><th>Dedication</th><th>When</th></tr></thead>
-          <tbody></tbody>
-        </table></div>
+        <div class="admin__pane" data-tab="songs" hidden>
+          <div class="table-wrap"><table class="admin__table" id="tableSongs">
+            <thead><tr><th>Song</th><th>Artist</th><th>Requested by</th><th>Dedication</th><th>When</th></tr></thead>
+            <tbody></tbody>
+          </table></div>
+        </div>
+
+        <div class="admin__pane" data-tab="photos" hidden>
+          <p style="color:var(--muted);margin-bottom:1rem">Tap 🗑 to remove an inappropriate photo from the gallery.</p>
+          <div class="admin__photos" id="adminPhotos"></div>
+        </div>
       </div>
     </section>
   </main>

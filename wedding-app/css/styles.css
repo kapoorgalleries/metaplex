@@ -667,3 +667,34 @@ body.app .concierge { bottom: calc(var(--tabbar-h) + 14px + env(safe-area-inset-
   font-size: 0.82rem; letter-spacing: 0.03em;
 }
 .admin__tab.is-active { background: var(--maroon); color: var(--cream); border-color: var(--maroon); }
+
+/* Hero live stats */
+.hero__stats { margin-top: 1rem; color: var(--maroon); font-family: var(--serif); font-size: 1.15rem; font-style: italic; }
+
+/* Photo loves */
+.gallery__love {
+  position: absolute; top: 8px; right: 8px; z-index: 2; display: inline-flex; align-items: center; gap: 4px;
+  background: rgba(44,26,22,0.5); border: none; border-radius: 999px; padding: 4px 9px; cursor: pointer;
+  color: #fff; font-size: 0.78rem; backdrop-filter: blur(3px);
+}
+.gallery__heart { color: #ff9bb0; font-size: 0.95rem; line-height: 1; transition: transform 0.15s ease; }
+.gallery__love.is-loved { background: rgba(194,90,107,0.85); }
+.gallery__love.is-loved .gallery__heart { color: #fff; transform: scale(1.15); }
+.gallery__love:active .gallery__heart { transform: scale(1.4); }
+
+/* Offline banner */
+.offline-banner {
+  position: fixed; left: 0; right: 0; top: calc(var(--appbar-h) + env(safe-area-inset-top)); z-index: 55;
+  background: var(--ink); color: var(--cream); text-align: center; font-size: 0.82rem; padding: 0.4rem 1rem;
+}
+
+/* Admin photo moderation grid */
+.admin__photos { display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 0.9rem; }
+.admin__photo { position: relative; margin: 0; border-radius: 12px; overflow: hidden; box-shadow: var(--shadow); background: var(--white); }
+.admin__photo img { width: 100%; aspect-ratio: 1; object-fit: cover; display: block; }
+.admin__photo figcaption { font-size: 0.72rem; color: var(--muted); padding: 0.4rem 0.5rem; }
+.admin__photo-del {
+  position: absolute; top: 6px; right: 6px; width: 32px; height: 32px; border-radius: 50%; border: none;
+  background: rgba(74,14,24,0.8); color: #fff; font-size: 0.95rem; cursor: pointer;
+}
+.admin__photo-del:hover { background: var(--rose); }

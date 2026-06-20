@@ -34,6 +34,17 @@
       if (window.toast) window.toast(`${ev.title} added to calendar`, "ok");
     });
 
+    const gcal = document.createElement("a");
+    gcal.className = "btn btn--outline";
+    gcal.target = "_blank";
+    gcal.rel = "noopener";
+    gcal.href =
+      "https://calendar.google.com/calendar/render?action=TEMPLATE" +
+      "&text=" + encodeURIComponent(`Priya & Sanjay — ${ev.title}`) +
+      "&dates=" + ev.start + "/" + ev.end +
+      "&location=" + encodeURIComponent(ev.loc);
+    gcal.textContent = "📅 Google";
+
     const map = document.createElement("a");
     map.className = "btn btn--outline";
     map.target = "_blank";
@@ -42,6 +53,7 @@
     map.textContent = "📍 Map";
 
     box.appendChild(cal);
+    box.appendChild(gcal);
     box.appendChild(map);
   });
 })();

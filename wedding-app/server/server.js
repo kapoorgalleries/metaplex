@@ -216,9 +216,11 @@ app.post("/api/photos", (req, res) => {
 
       const entry = {
         id,
+        key,
         url,
         uploader: trim(req.body.uploader, 80) || "A guest",
         caption,
+        loves: 0,
         uploadedAt: new Date().toISOString(),
       };
       await storage.appendManifest(entry);
@@ -227,6 +229,41 @@ app.post("/api/photos", (req, res) => {
       console.error("Photo upload error:", e?.message || e);
       res.status(502).json({ error: "Upload failed. Please try again." });
     }
+  });
+});
+
+// Heart a photo (no auth — simple engagement; client de-dupes per device).
+app.post("/api/photos/:id/love", async (req, res) => {
+  try {
+    const list = await storage.readManifest();
+    const entry = list.find((p) => p.id === req.params.id);
+    if (!entry) return res.status(404).json({ error: "Photo not found." });
+    entry.loves = (entry.loves || 0) + 1;
+    await storage.writeManifest(list);
+    res.json({ id: entry.id, loves: entry.loves });
+  } catch (e) {
+    console.error("Love error:", e?.message || e);
+    res.status(502).json({ error: "Could not record that." });
+  }
+});
+
+/* =========================================================
+   Public aggregate stats (no PII)
+   ========================================================= */
+app.get("/api/stats", async (_req, res) => {
+  const rsvps = readJson("rsvps.json");
+  const accepting = rsvps.filter((x) => x.attending === "yes");
+  const guests = accepting.reduce((n, x) => n + (parseInt(x.guests, 10) || 1), 0);
+  let photos = 0;
+  try {
+    photos = (await storage.readManifest()).length;
+  } catch (_) {}
+  res.json({
+    households: accepting.length,
+    guests,
+    photos,
+    songs: readJson("songs.json").length,
+    messages: readJson("guestbook.json").length,
   });
 });
 
@@ -328,6 +365,21 @@ app.get("/api/admin/guestbook", requireAdmin, (_req, res) => {
 });
 app.get("/api/admin/songs", requireAdmin, (_req, res) => {
   res.json(readJson("songs.json"));
+});
+
+// Remove an inappropriate photo (moderation).
+app.delete("/api/photos/:id", requireAdmin, async (req, res) => {
+  try {
+    const list = await storage.readManifest();
+    const entry = list.find((p) => p.id === req.params.id);
+    if (!entry) return res.status(404).json({ error: "Photo not found." });
+    if (entry.key) await storage.remove(entry.key);
+    await storage.writeManifest(list.filter((p) => p.id !== entry.id));
+    res.json({ ok: true });
+  } catch (e) {
+    console.error("Photo delete error:", e?.message || e);
+    res.status(502).json({ error: "Could not delete the photo." });
+  }
 });
 
 /* ========================================================= */

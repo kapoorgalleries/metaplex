@@ -14,7 +14,7 @@
   const esc = (v) => window.escapeHtml(v == null ? "" : v);
   let token = sessionStorage.getItem("adminToken") || "";
   let active = "rsvps";
-  const data = { rsvps: [], guestbook: [], songs: [] };
+  const data = { rsvps: [], guestbook: [], songs: [], photos: [] };
 
   const headers = () => ({ "x-admin-token": token });
 
@@ -27,14 +27,16 @@
   }
 
   async function loadAll() {
-    const [rsvps, guestbook, songs] = await Promise.all([
+    const [rsvps, guestbook, songs, photos] = await Promise.all([
       get("/api/rsvp"),
       get("/api/admin/guestbook"),
       get("/api/admin/songs"),
+      fetch("/api/photos").then((r) => (r.ok ? r.json() : [])),
     ]);
     data.rsvps = rsvps;
     data.guestbook = guestbook;
     data.songs = songs;
+    data.photos = Array.isArray(photos) ? photos : [];
   }
 
   function renderStats() {
@@ -52,6 +54,7 @@
       ...EVENTS.map((ev) => [ev, perEvent[ev]]),
       ["Guestbook", data.guestbook.length],
       ["Song requests", data.songs.length],
+      ["Photos", data.photos.length],
     ];
     statsEl.innerHTML = stats.map(([l, v]) => `<div class="admin__stat"><strong>${v}</strong><span>${esc(l)}</span></div>`).join("");
   }
@@ -74,13 +77,48 @@
       `<tr><td>${esc(x.song)}</td><td>${esc(x.artist)}</td><td>${esc(x.by)}</td><td>${esc(x.note)}</td><td>${esc(when(x.at))}</td></tr>`
     ).join("");
 
+    renderPhotos();
     countEl.textContent = `${data[active].length} record${data[active].length === 1 ? "" : "s"}`;
+  }
+
+  const photosEl = document.getElementById("adminPhotos");
+  function renderPhotos() {
+    if (!data.photos.length) {
+      photosEl.innerHTML = `<p class="guestbook__empty">No photos uploaded yet.</p>`;
+      return;
+    }
+    photosEl.innerHTML = data.photos.slice().reverse().map((p) =>
+      `<figure class="admin__photo">
+        <img loading="lazy" src="${esc(p.url)}" alt="" />
+        <figcaption>${esc(p.uploader || "A guest")} · ♥ ${esc(p.loves || 0)}</figcaption>
+        <button class="admin__photo-del" data-id="${esc(p.id)}" aria-label="Delete photo">🗑</button>
+      </figure>`
+    ).join("");
+    photosEl.querySelectorAll(".admin__photo-del").forEach((btn) =>
+      btn.addEventListener("click", () => deletePhoto(btn.dataset.id))
+    );
+  }
+
+  async function deletePhoto(id) {
+    if (!confirm("Remove this photo from the gallery? This can't be undone.")) return;
+    try {
+      const r = await fetch(`/api/photos/${encodeURIComponent(id)}`, { method: "DELETE", headers: headers() });
+      if (!r.ok) throw new Error("Delete failed.");
+      data.photos = data.photos.filter((p) => p.id !== id);
+      renderPhotos();
+      renderStats();
+      countEl.textContent = `${data.photos.length} record${data.photos.length === 1 ? "" : "s"}`;
+      if (window.toast) window.toast("Photo removed", "ok");
+    } catch (e) {
+      if (window.toast) window.toast(e.message, "err");
+    }
   }
 
   function showTab(tab) {
     active = tab;
     tabsEl.querySelectorAll(".admin__tab").forEach((b) => b.classList.toggle("is-active", b.dataset.tab === tab));
-    document.querySelectorAll("table.admin__table").forEach((t) => (t.closest(".table-wrap").hidden = t.dataset.tab !== tab));
+    document.querySelectorAll(".admin__pane").forEach((p) => (p.hidden = p.dataset.tab !== tab));
+    document.getElementById("exportCsv").style.display = tab === "photos" ? "none" : "";
     countEl.textContent = `${data[active].length} record${data[active].length === 1 ? "" : "s"}`;
   }
   tabsEl.addEventListener("click", (e) => {
