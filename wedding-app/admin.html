@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="robots" content="noindex" />
+  <meta name="description" content="Private RSVP dashboard." />
+  <title>RSVP Dashboard · Priya &amp; Sanjay</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,400;0,500;0,600;1,400&family=Marcellus&family=Jost:wght@300;400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="css/styles.css" />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🪔</text></svg>" />
+</head>
+<body>
+  <div id="site-header"></div>
+  <main class="page">
+    <section class="subhero">
+      <p class="subhero__kicker">Couple &amp; family only</p>
+      <h1>RSVP Dashboard</h1>
+      <p>Live responses, headcounts, and meal tallies.</p>
+    </section>
+
+    <section class="section">
+      <!-- Login gate -->
+      <div class="admin__gate reveal" id="adminGate">
+        <h3 style="font-family:var(--display);color:var(--maroon);font-size:1.4rem;margin-bottom:0.6rem">Enter dashboard password</h3>
+        <form id="adminLogin">
+          <label class="field"><input type="password" id="adminPassword" placeholder="Password" autocomplete="current-password" /></label>
+          <button type="submit" class="btn btn--solid" style="width:100%">Unlock</button>
+          <p class="rsvp__status" id="adminStatus"></p>
+        </form>
+      </div>
+
+      <!-- Dashboard -->
+      <div class="admin" id="adminPanel" hidden>
+        <div class="admin__stats" id="adminStats"></div>
+
+        <h2 class="section__title" style="font-size:1.6rem;margin-bottom:1rem">RSVPs</h2>
+        <div class="admin__toolbar">
+          <button class="btn btn--outline btn--sm" id="exportCsv">⬇ Export CSV</button>
+          <button class="btn btn--outline btn--sm" id="refreshBtn">↻ Refresh</button>
+          <span id="rsvpCount" style="color:var(--muted)"></span>
+        </div>
+        <div class="table-wrap">
+          <table class="admin__table" id="rsvpTable">
+            <thead>
+              <tr><th>Name</th><th>Email</th><th>Attending</th><th>Guests</th><th>Events</th><th>Meal</th><th>Hotel</th><th>Note</th><th>When</th></tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+  </main>
+  <div id="site-footer"></div>
+  <script src="js/site.js"></script>
+  <script src="js/admin.js"></script>
+</body>
+</html>

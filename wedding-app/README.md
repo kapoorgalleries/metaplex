@@ -1,11 +1,19 @@
 # Priya &amp; Sanjay — Wedding App (2026)
 
-A wedding website for **Priya &amp; Sanjay**, October 17, 2026 · Udaipur, India.
+A **phone app** for **Priya &amp; Sanjay**, October 17, 2026 · Udaipur, India.
 
-The site itself is a **build-free static app** (HTML/CSS/JS). Two optional features —
-a **Claude-powered wedding concierge** and **guest photo sharing** — are served by a
-tiny Node/Express backend. The static site works on its own; those two features simply
-stay hidden / inert when the backend isn't running.
+It's an **installable PWA** (Progressive Web App): on a phone, open it in the browser and
+choose **Add to Home Screen** — it then launches full-screen with its own icon, a native
+**top app bar + bottom tab bar**, and works **offline** (app shell cached by a service
+worker). No app store, no build step — just HTML/CSS/JS plus a tiny Node/Express backend
+for the dynamic features.
+
+**App tabs:** Home · Schedule · Photos · Guestbook · RSVP — with Our Story, Travel, Things
+to Do, Wedding Party and FAQ in the **More** sheet (⋯).
+
+Dynamic features (concierge, RSVP storage, guestbook, photo uploads, admin dashboard) are
+served by the backend; the app still browses fine without it (those features degrade
+gracefully).
 
 ## Quick start
 
@@ -40,44 +48,59 @@ chat stays hidden.
 - **Events** — Mehndi &amp; Haldi, Sangeet, Ceremony, Reception, each with time, venue and dress code.
 - **Add to calendar** — generates a downloadable `.ics` with all four events.
 - **Travel &amp; Stay** — airport info, hotel room block, venue map links.
-- **Gallery** with a click-to-expand lightbox (placeholder tiles — drop in real photos).
-- **Wedding concierge** — a Claude-powered chat widget that answers guest questions
-  (events, dress codes, travel, FAQ) from the wedding details. Appears only when the
-  backend is running with an `ANTHROPIC_API_KEY`.
-- **Guest photo sharing** — guests upload photos from the weekend; they appear in the
-  gallery for everyone. Stored under `server/uploads/`.
-- **RSVP form** — validation, per-event selection, meal preferences, hotel-block request and
-  a song-request/note field. Saves submissions to `localStorage` by default.
+- **Installable + offline** — web app manifest (`manifest.json`), app icons (`icons/`), and
+  a service worker (`sw.js`) that caches the app shell so it opens offline.
+- **Mobile app chrome** — top app bar (back / title / More) and a bottom tab bar, rendered
+  on every page by `js/site.js`.
+- **Photos** — browse a shared gallery and upload your own from the weekend.
+- **Guestbook** — guests leave public well-wishes (optionally screened by Claude).
+- **RSVP** — saved to the backend; per-event selection, meal prefs, hotel-block, notes.
+- **RSVP admin dashboard** (`admin.html`) — password-protected page with live headcounts,
+  per-event tallies, the full response table, and CSV export.
+- **Wedding concierge** — a Claude-powered chat bubble (on every screen) that answers guest
+  questions from the wedding details. Appears only when the backend has an `ANTHROPIC_API_KEY`.
 - **FAQ** accordion and a gift **registry** section.
-- Fully **responsive** with a mobile menu and `prefers-reduced-motion` support.
+- Fully **responsive** with `prefers-reduced-motion` support and iOS safe-area insets.
 
 ## Project structure
 
 ```
 wedding-app/
-├── index.html        # all markup / content
-├── css/styles.css    # theme + layout (marigold / maroon / gold)
-├── js/main.js        # countdown, reveal, gallery, RSVP, .ics export
-├── js/api.js         # concierge chat + guest photo sharing (talks to the backend)
-├── assets/           # drop real photos / logo here
-├── server/           # optional Node/Express backend
-│   ├── server.js     # static hosting + /api/concierge (Claude) + /api/photos
-│   ├── package.json
-│   └── uploads/      # guest-submitted photos (git-ignored)
+├── index.html  schedule.html  story.html  travel.html  things-to-do.html
+├── party.html  gallery.html   guestbook.html  rsvp.html  faq.html  admin.html
+├── manifest.json     # PWA manifest (installable)
+├── sw.js             # service worker (offline app shell)
+├── icons/            # app icons (192 / 512 / maskable)
+├── css/styles.css    # theme + app-shell layout (marigold / maroon / gold)
+├── js/
+│   ├── site.js       # app shell: top bar, bottom tabs, More sheet, PWA, concierge
+│   ├── home.js       # countdown + .ics export
+│   ├── gallery.js    # photo browse + upload + lightbox
+│   ├── rsvp.js       # RSVP form → /api/rsvp
+│   ├── guestbook.js  # guestbook → /api/guestbook
+│   └── admin.js      # password-gated dashboard → /api/rsvp
+├── server/           # Node/Express backend (concierge, RSVP, guestbook, photos, admin)
+│   ├── server.js  storage.js  moderation.js  package.json
+│   └── uploads/      # guest photos on the local backend (git-ignored)
 └── README.md
 ```
 
 ## The backend
 
-A minimal Express server (`server/server.js`) that:
+A minimal Express server (`server/server.js`) that serves the app and the API from one
+process:
 
-- **Serves the static site** — so the whole app runs from one process.
 - **`POST /api/concierge`** — proxies guest questions to Claude (`claude-opus-4-8`) via the
-  official `@anthropic-ai/sdk`. The system prompt pins it to the wedding facts so it won't
-  invent details, and falls back to the contact email when it doesn't know. The API key
-  stays server-side and is never exposed to the browser.
-- **`GET/POST /api/photos`** — lists and accepts guest photo uploads (`multer`, images only,
-  15 MB cap), stored on disk under `server/uploads/`.
+  official `@anthropic-ai/sdk`, pinned to the wedding facts. The API key stays server-side.
+- **`GET/POST /api/photos`** — list + accept guest photo uploads (`multer`, images only, 15 MB).
+- **`POST /api/rsvp`** — store an RSVP; **`GET /api/rsvp`** (admin-only) returns all of them.
+- **`GET/POST /api/guestbook`** — public well-wishes (optionally screened by Claude).
+- **Admin dashboard** (`admin.html`) — gated by `ADMIN_PASSWORD`; sends it as an
+  `x-admin-token` header to read RSVPs, with stats + CSV export computed client-side.
+
+> RSVPs and guestbook entries are stored as JSON under `server/data/` (git-ignored). For
+> production you'd point these at a database; the read/write helpers in `server.js` are the
+> single place to swap.
 
 ### Photo storage (local disk → S3 / Cloudflare R2)
 
@@ -108,7 +131,8 @@ guest) and skips image types vision can't read (e.g. HEIC). Disable it with `PHO
 
 | Env var | Purpose |
 |---|---|
-| `ANTHROPIC_API_KEY` | Enables the concierge **and** photo moderation |
+| `ANTHROPIC_API_KEY` | Enables the concierge **and** photo/guestbook moderation |
+| `ADMIN_PASSWORD` | Enables the RSVP admin dashboard (`/admin.html`) |
 | `PHOTO_MODERATION=off` | Turn moderation off even when the key is set |
 | `PHOTO_S3_BUCKET` | Switch photo storage to S3/R2 (else local disk) |
 | `PHOTO_S3_ENDPOINT` | R2 (or custom) S3 endpoint; omit for AWS S3 |

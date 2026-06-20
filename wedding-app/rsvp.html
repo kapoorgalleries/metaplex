@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="description" content="RSVP for Priya & Sanjay's wedding." />
+  <title>RSVP · Priya &amp; Sanjay</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,400;0,500;0,600;1,400&family=Marcellus&family=Jost:wght@300;400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="css/styles.css" />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🪔</text></svg>" />
+</head>
+<body>
+  <div id="site-header"></div>
+  <main class="page">
+    <section class="subhero">
+      <p class="subhero__kicker">We can't wait to celebrate with you</p>
+      <h1>RSVP</h1>
+      <p>Kindly respond by <strong>August 15, 2026</strong>. One submission per household is perfect.</p>
+    </section>
+
+    <section class="section">
+      <form class="rsvp" id="rsvpForm" novalidate>
+        <div class="rsvp__row">
+          <label class="field"><span>Full name <em>*</em></span><input type="text" name="name" required autocomplete="name" /></label>
+          <label class="field"><span>Email <em>*</em></span><input type="email" name="email" required autocomplete="email" /></label>
+        </div>
+        <div class="rsvp__row">
+          <label class="field"><span>Will you attend? <em>*</em></span>
+            <select name="attending" required>
+              <option value="">Please choose…</option>
+              <option value="yes">Joyfully accepts</option>
+              <option value="no">Regretfully declines</option>
+            </select>
+          </label>
+          <label class="field"><span>Number of guests (incl. you)</span><input type="number" name="guests" min="1" max="10" value="1" /></label>
+        </div>
+
+        <fieldset class="field field--group" data-when="yes">
+          <legend>Which events will you join?</legend>
+          <div class="checks">
+            <label><input type="checkbox" name="events" value="Mehndi & Haldi" /> Mehndi &amp; Haldi</label>
+            <label><input type="checkbox" name="events" value="Sangeet" /> Sangeet</label>
+            <label><input type="checkbox" name="events" value="Ceremony" /> Ceremony</label>
+            <label><input type="checkbox" name="events" value="Reception" /> Reception</label>
+          </div>
+        </fieldset>
+
+        <div class="rsvp__row" data-when="yes">
+          <label class="field"><span>Meal preference</span>
+            <select name="meal">
+              <option value="">No preference</option>
+              <option>Vegetarian</option><option>Vegan</option><option>Jain</option>
+              <option>Non-vegetarian</option><option>Gluten-free</option>
+            </select>
+          </label>
+          <label class="field field--check"><input type="checkbox" name="hotelBlock" /><span>I'd like a room in the hotel block</span></label>
+        </div>
+
+        <label class="field" data-when="yes"><span>Song request &amp; a note for the couple</span>
+          <textarea name="note" rows="3" placeholder="Anything you'd like us to know — dietary needs, a song to play, a message…"></textarea>
+        </label>
+
+        <button type="submit" class="btn btn--solid rsvp__submit">Send RSVP</button>
+        <p class="rsvp__status" id="rsvpStatus" role="status" aria-live="polite"></p>
+      </form>
+
+      <div class="registry reveal">
+        <h3>Gifts &amp; blessings</h3>
+        <p>Your presence is the only present we need. If you wish to give, we've set up a registry and a honeymoon fund.</p>
+        <div class="registry__links">
+          <a class="btn btn--outline btn--sm" href="#" onclick="return false">View registry</a>
+          <a class="btn btn--outline btn--sm" href="#" onclick="return false">Honeymoon fund</a>
+        </div>
+      </div>
+    </section>
+  </main>
+  <div id="site-footer"></div>
+  <script src="js/site.js"></script>
+  <script src="js/rsvp.js"></script>
+</body>
+</html>

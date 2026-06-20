@@ -9,11 +9,12 @@
 "use strict";
 
 const path = require("path");
+const fs = require("fs");
 const express = require("express");
 const multer = require("multer");
 const Anthropic = require("@anthropic-ai/sdk");
 const { createStorage } = require("./storage");
-const { moderatePhoto, isEnabled: moderationEnabled } = require("./moderation");
+const { moderatePhoto, moderateText, isEnabled: moderationEnabled } = require("./moderation");
 
 const app = express();
 const PORT = process.env.PORT || 8080;
@@ -22,6 +23,24 @@ app.use(express.json({ limit: "1mb" }));
 
 // ---------- Paths ----------
 const SITE_ROOT = path.join(__dirname, ".."); // the wedding-app/ static site
+
+// ---------- Simple JSON data store (RSVPs, guestbook) ----------
+const DATA_DIR = path.join(__dirname, "data");
+fs.mkdirSync(DATA_DIR, { recursive: true });
+function readJson(name) {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(DATA_DIR, name), "utf8"));
+  } catch (_) {
+    return [];
+  }
+}
+function appendJson(name, entry) {
+  const list = readJson(name);
+  list.push(entry);
+  fs.writeFileSync(path.join(DATA_DIR, name), JSON.stringify(list, null, 2));
+  return entry;
+}
+const trimStr = (v, n) => (typeof v === "string" ? v.trim().slice(0, n) : "");
 
 // ---------- Photo storage (local disk by default; S3/R2 via env) ----------
 const storage = createStorage();
@@ -211,6 +230,75 @@ app.post("/api/photos", (req, res) => {
   });
 });
 
+/* =========================================================
+   RSVP
+   ========================================================= */
+app.post("/api/rsvp", (req, res) => {
+  const b = req.body || {};
+  const name = trimStr(b.name, 120);
+  const email = trimStr(b.email, 160);
+  const attending = b.attending === "yes" || b.attending === "no" ? b.attending : "";
+  if (!name || !email || !attending) {
+    return res.status(400).json({ error: "Name, email and attendance are required." });
+  }
+  const entry = {
+    name,
+    email,
+    attending,
+    guests: Math.max(1, Math.min(20, parseInt(b.guests, 10) || 1)),
+    events: Array.isArray(b.events) ? b.events.map((e) => trimStr(e, 60)).filter(Boolean).slice(0, 10) : [],
+    meal: trimStr(b.meal, 40),
+    hotelBlock: Boolean(b.hotelBlock),
+    note: trimStr(b.note, 1000),
+    submittedAt: new Date().toISOString(),
+  };
+  appendJson("rsvps.json", entry);
+  res.status(201).json({ ok: true });
+});
+
+/* =========================================================
+   Guestbook
+   ========================================================= */
+app.get("/api/guestbook", (_req, res) => {
+  // Only expose public fields.
+  res.json(readJson("guestbook.json").map((e) => ({ name: e.name, message: e.message, at: e.at })));
+});
+
+app.post("/api/guestbook", async (req, res) => {
+  const name = trimStr(req.body && req.body.name, 80);
+  const message = trimStr(req.body && req.body.message, 600);
+  if (!name || !message) return res.status(400).json({ error: "Please add your name and a message." });
+
+  try {
+    const verdict = await moderateText(anthropic, message);
+    if (!verdict.allowed) {
+      return res.status(422).json({ error: "Thanks! That message wasn't approved for the public guestbook." });
+    }
+  } catch (_) {/* fail open */}
+
+  const entry = { name, message, at: new Date().toISOString() };
+  appendJson("guestbook.json", entry);
+  res.status(201).json({ name: entry.name, message: entry.message, at: entry.at });
+});
+
+/* =========================================================
+   Admin (RSVP dashboard) — protected by ADMIN_PASSWORD
+   ========================================================= */
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "";
+
+function requireAdmin(req, res, next) {
+  if (!ADMIN_PASSWORD) {
+    return res.status(503).json({ error: "Admin dashboard is not configured (set ADMIN_PASSWORD)." });
+  }
+  const token = req.get("x-admin-token") || "";
+  if (token !== ADMIN_PASSWORD) return res.status(401).json({ error: "Wrong password." });
+  next();
+}
+
+app.get("/api/rsvp", requireAdmin, (_req, res) => {
+  res.json(readJson("rsvps.json"));
+});
+
 /* ========================================================= */
 
 app.listen(PORT, () => {
@@ -218,4 +306,5 @@ app.listen(PORT, () => {
   console.log(hasApiKey ? "Concierge: enabled (Claude)" : "Concierge: disabled (set ANTHROPIC_API_KEY to enable)");
   console.log(`Photo storage: ${storage.kind}`);
   console.log(`Photo moderation: ${moderationEnabled(anthropic) ? "on (Claude vision)" : "off"}`);
+  console.log(`Admin dashboard: ${ADMIN_PASSWORD ? "enabled (/admin.html)" : "disabled (set ADMIN_PASSWORD)"}`);
 });

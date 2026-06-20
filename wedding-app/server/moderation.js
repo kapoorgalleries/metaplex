@@ -81,4 +81,31 @@ async function moderatePhoto(anthropic, { buffer, mediaType, caption }) {
   }
 }
 
-module.exports = { moderatePhoto, isEnabled };
+const TEXT_SYSTEM = `
+You moderate short public messages on a family wedding guestbook.
+ALLOW ordinary well-wishes, congratulations, memories, and friendly notes.
+BLOCK only: hate or harassment, sexual content, threats or violence, or obvious spam/advertising.
+When uncertain, allow. Keep the reason to one short sentence.
+`.trim();
+
+async function moderateText(anthropic, text) {
+  if (!isEnabled(anthropic) || !text) return { allowed: true, reason: "moderation skipped" };
+  try {
+    const response = await anthropic.messages.create({
+      model: "claude-opus-4-8",
+      max_tokens: 256,
+      system: TEXT_SYSTEM,
+      messages: [{ role: "user", content: `Message: ${JSON.stringify(text)}\nIs this appropriate to publish?` }],
+      output_config: { format: { type: "json_schema", schema: SCHEMA } },
+    });
+    if (response.stop_reason === "refusal") return { allowed: false, reason: "Flagged by content review." };
+    const out = response.content.find((b) => b.type === "text")?.text || "{}";
+    const verdict = JSON.parse(out);
+    return { allowed: verdict.allowed !== false, reason: typeof verdict.reason === "string" ? verdict.reason : "" };
+  } catch (err) {
+    console.error("Text moderation error (allowing):", err?.message || err);
+    return { allowed: true, reason: "moderation unavailable" };
+  }
+}
+
+module.exports = { moderatePhoto, moderateText, isEnabled };

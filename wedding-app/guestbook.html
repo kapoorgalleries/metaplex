@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="description" content="Leave a note for Priya & Sanjay in the guestbook." />
+  <title>Guestbook · Priya &amp; Sanjay</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,400;0,500;0,600;1,400&family=Marcellus&family=Jost:wght@300;400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="css/styles.css" />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🪔</text></svg>" />
+</head>
+<body>
+  <div id="site-header"></div>
+  <main class="page">
+    <section class="subhero">
+      <p class="subhero__kicker">Leave us a note</p>
+      <h1>Guestbook</h1>
+      <p>Share a memory, a blessing, or a bit of advice for married life. We'll treasure every word.</p>
+    </section>
+
+    <section class="section">
+      <div class="guestbook">
+        <form class="guestbook__form" id="guestbookForm">
+          <div class="rsvp__row">
+            <label class="field"><span>Your name <em>*</em></span><input type="text" name="name" required autocomplete="name" /></label>
+          </div>
+          <label class="field"><span>Your message <em>*</em></span>
+            <textarea name="message" rows="4" maxlength="600" required placeholder="Wishing you a lifetime of love and laughter…"></textarea>
+          </label>
+          <button type="submit" class="btn btn--solid">Sign the guestbook</button>
+          <p class="rsvp__status" id="guestbookStatus" role="status" aria-live="polite"></p>
+        </form>
+
+        <div class="guestbook__entries" id="guestbookEntries"></div>
+        <p class="guestbook__empty" id="guestbookEmpty" hidden>No messages yet — be the first to sign! ✍️</p>
+      </div>
+    </section>
+  </main>
+  <div id="site-footer"></div>
+  <script src="js/site.js"></script>
+  <script src="js/guestbook.js"></script>
+</body>
+</html>
