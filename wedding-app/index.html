@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="description" content="Join us as Priya & Sanjay celebrate their wedding — October 2026. RSVP, schedule, travel & more." />
+  <title>Priya &amp; Sanjay · 2026</title>
+
+  <!-- Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,400;0,500;0,600;1,400&family=Marcellus&family=Jost:wght@300;400;500&display=swap" rel="stylesheet" />
+
+  <link rel="stylesheet" href="css/styles.css" />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🪔</text></svg>" />
+</head>
+<body>
+  <!-- ===== Navigation ===== -->
+  <header class="nav" id="nav">
+    <a class="nav__brand" href="#home">P <span>&amp;</span> S</a>
+    <button class="nav__toggle" aria-label="Open menu" aria-expanded="false" id="navToggle">
+      <span></span><span></span><span></span>
+    </button>
+    <nav class="nav__links" id="navLinks">
+      <a href="#story">Our Story</a>
+      <a href="#events">Events</a>
+      <a href="#travel">Travel</a>
+      <a href="#gallery">Gallery</a>
+      <a href="#faq">FAQ</a>
+      <a href="#rsvp" class="nav__cta">RSVP</a>
+    </nav>
+  </header>
+
+  <!-- ===== Hero ===== -->
+  <section class="hero" id="home">
+    <div class="hero__mandala" aria-hidden="true"></div>
+    <div class="hero__inner">
+      <p class="hero__eyebrow">Together with their families</p>
+      <h1 class="hero__names">Priya <span class="amp">&amp;</span> Sanjay</h1>
+      <p class="hero__tag">are getting married</p>
+      <div class="hero__date">
+        <span>Saturday</span>
+        <strong>October 17, 2026</strong>
+        <span>Udaipur, India</span>
+      </div>
+
+      <div class="countdown" id="countdown" aria-label="Countdown to the wedding">
+        <div class="countdown__unit"><span id="cd-days">--</span><label>Days</label></div>
+        <div class="countdown__unit"><span id="cd-hours">--</span><label>Hours</label></div>
+        <div class="countdown__unit"><span id="cd-mins">--</span><label>Minutes</label></div>
+        <div class="countdown__unit"><span id="cd-secs">--</span><label>Seconds</label></div>
+      </div>
+
+      <a href="#rsvp" class="btn btn--solid hero__btn">RSVP by Aug 15</a>
+    </div>
+    <a href="#story" class="hero__scroll" aria-label="Scroll down">&#x2193;</a>
+  </section>
+
+  <!-- ===== Our Story ===== -->
+  <section class="section" id="story">
+    <div class="section__head reveal">
+      <p class="section__kicker">How it began</p>
+      <h2 class="section__title">Our Story</h2>
+    </div>
+    <ol class="timeline">
+      <li class="timeline__item reveal">
+        <div class="timeline__dot"></div>
+        <h3>2019 — A chance meeting</h3>
+        <p>We were seated next to each other at a friend's Diwali party in Mumbai. Sanjay spilled chai on Priya's dupatta within the first ten minutes. She forgave him by dessert.</p>
+      </li>
+      <li class="timeline__item reveal">
+        <div class="timeline__dot"></div>
+        <h3>2021 — Long distance &amp; longer phone calls</h3>
+        <p>Two cities, three time zones over the years, and a shared spreadsheet of restaurants we wanted to try. We made it work, one video call at a time.</p>
+      </li>
+      <li class="timeline__item reveal">
+        <div class="timeline__dot"></div>
+        <h3>2025 — The proposal</h3>
+        <p>On a rooftop in Udaipur overlooking Lake Pichola, Sanjay finally asked. Priya said yes before he finished the sentence.</p>
+      </li>
+      <li class="timeline__item reveal">
+        <div class="timeline__dot"></div>
+        <h3>2026 — Forever begins</h3>
+        <p>And now we'd love for you to join us as we tie the knot, dance until our feet hurt, and start the next chapter — together.</p>
+      </li>
+    </ol>
+  </section>
+
+  <!-- ===== Events ===== -->
+  <section class="section section--alt" id="events">
+    <div class="section__head reveal">
+      <p class="section__kicker">Three days of celebration</p>
+      <h2 class="section__title">Wedding Events</h2>
+      <p class="section__lede">Wear comfortable shoes, bring your dancing energy, and don't be shy with the buffet.</p>
+    </div>
+
+    <div class="events">
+      <article class="event-card reveal">
+        <div class="event-card__icon">🌿</div>
+        <h3>Mehndi &amp; Haldi</h3>
+        <p class="event-card__when">Fri, Oct 16 · 11:00 AM</p>
+        <p class="event-card__where">The Courtyard, Hotel Lakend</p>
+        <p class="event-card__desc">Henna, turmeric, music and brunch. An intimate, colourful kick-off to the weekend.</p>
+        <p class="event-card__dress"><strong>Dress code:</strong> Bright florals &amp; yellows</p>
+      </article>
+
+      <article class="event-card reveal">
+        <div class="event-card__icon">🎶</div>
+        <h3>Sangeet</h3>
+        <p class="event-card__when">Fri, Oct 16 · 7:00 PM</p>
+        <p class="event-card__where">Grand Ballroom, Hotel Lakend</p>
+        <p class="event-card__desc">An evening of choreographed chaos — family performances, a live DJ, and a dance floor that stays open late.</p>
+        <p class="event-card__dress"><strong>Dress code:</strong> Indian festive / cocktail</p>
+      </article>
+
+      <article class="event-card event-card--feature reveal">
+        <div class="event-card__icon">🪔</div>
+        <h3>Wedding Ceremony</h3>
+        <p class="event-card__when">Sat, Oct 17 · 5:00 PM</p>
+        <p class="event-card__where">Lakeside Mandap, Lake Pichola</p>
+        <p class="event-card__desc">The main event — the baraat, the pheras, and the vows, all at golden hour by the water.</p>
+        <p class="event-card__dress"><strong>Dress code:</strong> Traditional formal</p>
+      </article>
+
+      <article class="event-card reveal">
+        <div class="event-card__icon">🥂</div>
+        <h3>Reception</h3>
+        <p class="event-card__when">Sat, Oct 17 · 8:30 PM</p>
+        <p class="event-card__where">Terrace Gardens, Lake Pichola</p>
+        <p class="event-card__desc">Dinner, drinks, toasts and one last dance to send us off into married life.</p>
+        <p class="event-card__dress"><strong>Dress code:</strong> Black-tie / formal</p>
+      </article>
+    </div>
+
+    <div class="reveal" style="text-align:center;margin-top:2.5rem">
+      <button class="btn btn--outline" id="addCalendar">＋ Add weekend to calendar</button>
+    </div>
+  </section>
+
+  <!-- ===== Travel ===== -->
+  <section class="section" id="travel">
+    <div class="section__head reveal">
+      <p class="section__kicker">Getting there &amp; staying</p>
+      <h2 class="section__title">Travel &amp; Stay</h2>
+    </div>
+
+    <div class="travel">
+      <div class="travel__card reveal">
+        <h3>✈️ Flying in</h3>
+        <p>The nearest airport is <strong>Maharana Pratap Airport (UDR)</strong>, about 25 minutes from the venues. Many guests connect through Delhi (DEL) or Mumbai (BOM).</p>
+        <p>We'll arrange shuttles from partner hotels to all events.</p>
+      </div>
+      <div class="travel__card reveal">
+        <h3>🏨 Where to stay</h3>
+        <p>We've reserved a room block at <strong>Hotel Lakend</strong> at a discounted rate.</p>
+        <p>Use code <strong>PRIYASANJAY26</strong> when booking, before <strong>Sep 1, 2026</strong>.</p>
+        <a class="btn btn--outline btn--sm" href="#rsvp">Request a room</a>
+      </div>
+      <div class="travel__card reveal">
+        <h3>📍 The venues</h3>
+        <p>All celebrations are within Udaipur, the City of Lakes. Map &amp; directions for each venue will be shared with confirmed guests.</p>
+        <a class="btn btn--outline btn--sm" target="_blank" rel="noopener"
+           href="https://www.google.com/maps/search/?api=1&query=Lake+Pichola+Udaipur">Open in Maps</a>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===== Gallery ===== -->
+  <section class="section section--alt" id="gallery">
+    <div class="section__head reveal">
+      <p class="section__kicker">A few of our favourites</p>
+      <h2 class="section__title">Gallery</h2>
+    </div>
+    <div class="gallery" id="galleryGrid"><!-- populated by JS --></div>
+  </section>
+
+  <!-- ===== RSVP ===== -->
+  <section class="section" id="rsvp">
+    <div class="section__head reveal">
+      <p class="section__kicker">We can't wait to celebrate with you</p>
+      <h2 class="section__title">RSVP</h2>
+      <p class="section__lede">Kindly respond by <strong>August 15, 2026</strong>. One submission per household is perfect.</p>
+    </div>
+
+    <form class="rsvp" id="rsvpForm" novalidate>
+      <div class="rsvp__row">
+        <label class="field">
+          <span>Full name <em>*</em></span>
+          <input type="text" name="name" required autocomplete="name" />
+        </label>
+        <label class="field">
+          <span>Email <em>*</em></span>
+          <input type="email" name="email" required autocomplete="email" />
+        </label>
+      </div>
+
+      <div class="rsvp__row">
+        <label class="field">
+          <span>Will you attend? <em>*</em></span>
+          <select name="attending" required>
+            <option value="">Please choose…</option>
+            <option value="yes">Joyfully accepts</option>
+            <option value="no">Regretfully declines</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>Number of guests (incl. you)</span>
+          <input type="number" name="guests" min="1" max="10" value="1" />
+        </label>
+      </div>
+
+      <fieldset class="field field--group" data-when="yes">
+        <legend>Which events will you join?</legend>
+        <div class="checks">
+          <label><input type="checkbox" name="events" value="Mehndi & Haldi" /> Mehndi &amp; Haldi</label>
+          <label><input type="checkbox" name="events" value="Sangeet" /> Sangeet</label>
+          <label><input type="checkbox" name="events" value="Ceremony" /> Ceremony</label>
+          <label><input type="checkbox" name="events" value="Reception" /> Reception</label>
+        </div>
+      </fieldset>
+
+      <div class="rsvp__row" data-when="yes">
+        <label class="field">
+          <span>Meal preference</span>
+          <select name="meal">
+            <option value="">No preference</option>
+            <option>Vegetarian</option>
+            <option>Vegan</option>
+            <option>Jain</option>
+            <option>Non-vegetarian</option>
+            <option>Gluten-free</option>
+          </select>
+        </label>
+        <label class="field field--check">
+          <input type="checkbox" name="hotelBlock" />
+          <span>I'd like a room in the hotel block</span>
+        </label>
+      </div>
+
+      <label class="field" data-when="yes">
+        <span>Song request &amp; a note for the couple</span>
+        <textarea name="note" rows="3" placeholder="Anything you'd like us to know — dietary needs, a song to play, a message…"></textarea>
+      </label>
+
+      <button type="submit" class="btn btn--solid rsvp__submit">Send RSVP</button>
+      <p class="rsvp__status" id="rsvpStatus" role="status" aria-live="polite"></p>
+    </form>
+
+    <div class="registry reveal">
+      <h3>Gifts &amp; blessings</h3>
+      <p>Your presence is the only present we need. If you wish to give, we've set up a registry and a honeymoon fund.</p>
+      <div class="registry__links">
+        <a class="btn btn--outline btn--sm" href="#" onclick="return false">View registry</a>
+        <a class="btn btn--outline btn--sm" href="#" onclick="return false">Honeymoon fund</a>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===== FAQ ===== -->
+  <section class="section section--alt" id="faq">
+    <div class="section__head reveal">
+      <p class="section__kicker">Good to know</p>
+      <h2 class="section__title">FAQ</h2>
+    </div>
+    <div class="faq" id="faqList">
+      <details class="faq__item">
+        <summary>Can I bring a plus-one?</summary>
+        <p>Your invitation will note how many seats are reserved for your household. If you're unsure, just ask us in the RSVP note and we'll sort it out.</p>
+      </details>
+      <details class="faq__item">
+        <summary>Are children welcome?</summary>
+        <p>Absolutely — we love little ones. Please include them in your guest count so we can plan seating and meals.</p>
+      </details>
+      <details class="faq__item">
+        <summary>What should I wear?</summary>
+        <p>Each event has its own dress code (see the Events section). When in doubt, lean festive and colourful — it's an Indian wedding!</p>
+      </details>
+      <details class="faq__item">
+        <summary>Will there be transport between events?</summary>
+        <p>Yes. Shuttles will run from the partner hotels to every event. Schedules will be shared with confirmed guests closer to the date.</p>
+      </details>
+      <details class="faq__item">
+        <summary>How do I reach the couple?</summary>
+        <p>Email us anytime at <a href="mailto:priyaandsanjay2026@example.com">priyaandsanjay2026@example.com</a>.</p>
+      </details>
+    </div>
+  </section>
+
+  <!-- ===== Footer ===== -->
+  <footer class="footer">
+    <p class="footer__names">Priya &amp; Sanjay</p>
+    <p class="footer__date">October 17, 2026 · Udaipur, India</p>
+    <p class="footer__made">Made with love (and a little chai).</p>
+  </footer>
+
+  <!-- ===== Lightbox ===== -->
+  <div class="lightbox" id="lightbox" aria-hidden="true">
+    <button class="lightbox__close" aria-label="Close">&times;</button>
+    <div class="lightbox__stage" id="lightboxStage"></div>
+  </div>
+
+  <script src="js/main.js"></script>
+</body>
+</html>
