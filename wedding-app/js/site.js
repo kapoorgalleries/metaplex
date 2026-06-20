@@ -251,6 +251,18 @@
     "rg.ch.btn": { en: "Learn more", hi: "और जानें" },
     "rg.ty.t": { en: "Thank you", hi: "धन्यवाद" },
     "rg.ty.p": { en: "However you choose to celebrate with us — being there, a kind note, or a gift — we're endlessly grateful. 💛", hi: "आप हमारे साथ चाहे जैसे भी उत्सव मनाएँ — उपस्थित रहकर, एक स्नेहभरे संदेश से, या उपहार से — हम असीम आभारी हैं। 💛" },
+    "rs.find.toggle": { en: "Already responded? Update your RSVP →", hi: "पहले से जवाब दिया? अपनी उपस्थिति बदलें →" },
+    "rs.find.label": { en: "The email you RSVP'd with", hi: "वह ईमेल जिससे आपने उपस्थिति दर्ज की थी" },
+    "rs.find.btn": { en: "Find my RSVP", hi: "मेरी उपस्थिति खोजें" },
+    "rs.find.searching": { en: "Searching…", hi: "खोज रहे हैं…" },
+    "rs.find.none": { en: "No RSVP found for that email — fill in the form below to respond.", hi: "उस ईमेल के लिए कोई उपस्थिति नहीं मिली — जवाब देने के लिए नीचे फ़ॉर्म भरें।" },
+    "rs.find.loaded": { en: "Found it! Make your changes below, then update.", hi: "मिल गई! नीचे बदलाव करें, फिर अपडेट करें।" },
+    "rs.find.needEmail": { en: "Enter your email.", hi: "अपना ईमेल दर्ज करें।" },
+    "rs.update": { en: "Update RSVP", hi: "उपस्थिति अपडेट करें" },
+    "rs.updated": { en: "Updated! Thanks, {n} — your RSVP is all set.", hi: "अपडेट हो गया! धन्यवाद, {n} — आपकी उपस्थिति दर्ज है।" },
+    "rs.okYes": { en: "Thank you, {n}! We can't wait to celebrate with you. 🎉", hi: "धन्यवाद, {n}! हम आपके साथ उत्सव की प्रतीक्षा में हैं। 🎉" },
+    "rs.okNo": { en: "Thank you for letting us know, {n}. You'll be missed! 💛", hi: "बताने के लिए धन्यवाद, {n}। आपकी कमी खलेगी! 💛" },
+    "rs.fix": { en: "Please fill in the highlighted fields.", hi: "कृपया चिह्नित फ़ील्ड भरें।" },
   };
 
   let lang = localStorage.getItem("lang") || "en";
@@ -259,11 +271,19 @@
     if (!e) return key;
     return e[lang] || e.en || key;
   }
+  // textContent doesn't decode entities, but our dict values were extracted from
+  // HTML and may contain &amp; etc. Decode for the text/placeholder branches.
+  function decodeEntities(s) {
+    return String(s)
+      .replace(/&lt;/g, "<").replace(/&gt;/g, ">")
+      .replace(/&#39;/g, "'").replace(/&quot;/g, '"')
+      .replace(/&amp;/g, "&");
+  }
   function applyI18n() {
     document.documentElement.lang = lang;
-    document.querySelectorAll("[data-i18n]").forEach((el) => { const k = el.getAttribute("data-i18n"); if (k) el.textContent = t(k); });
+    document.querySelectorAll("[data-i18n]").forEach((el) => { const k = el.getAttribute("data-i18n"); if (k) el.textContent = decodeEntities(t(k)); });
     document.querySelectorAll("[data-i18n-html]").forEach((el) => { const k = el.getAttribute("data-i18n-html"); if (k) el.innerHTML = t(k); });
-    document.querySelectorAll("[data-i18n-ph]").forEach((el) => { const k = el.getAttribute("data-i18n-ph"); if (k) el.setAttribute("placeholder", t(k)); });
+    document.querySelectorAll("[data-i18n-ph]").forEach((el) => { const k = el.getAttribute("data-i18n-ph"); if (k) el.setAttribute("placeholder", decodeEntities(t(k))); });
   }
   window.t = t;
   window.applyI18n = applyI18n;

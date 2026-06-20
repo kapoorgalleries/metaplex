@@ -752,3 +752,10 @@ body.app .concierge { bottom: calc(var(--tabbar-h) + 14px + env(safe-area-inset-
 .nowbar__name { font-family: var(--display); font-size: 1.15rem; }
 .nowbar--done { justify-content: center; font-family: var(--serif); font-style: italic; font-size: 1.05rem; }
 .section + #nowBanner .nowbar, #nowBanner .nowbar { margin-left: 0; margin-right: 0; }
+
+/* RSVP: find & update existing response */
+.rsvp-find { max-width: 720px; margin: 0 auto 1.4rem; text-align: center; }
+.rsvp-find__toggle { background: none; border: none; color: var(--maroon); font-family: var(--sans); font-size: 0.9rem; cursor: pointer; text-decoration: underline; text-underline-offset: 3px; }
+.rsvp-find__panel { background: var(--white); border: 1px solid rgba(184,134,11,0.18); border-radius: var(--radius); box-shadow: var(--shadow); padding: 1.2rem 1.4rem; margin-top: 0.8rem; text-align: left; display: grid; gap: 0.7rem; }
+.rsvp-find__panel input { font-family: var(--sans); font-size: 1rem; color: var(--ink); padding: 0.7rem 0.9rem; border: 1.5px solid rgba(110,20,35,0.18); border-radius: 10px; background: var(--cream); }
+.rsvp-find__panel .btn { justify-self: start; }

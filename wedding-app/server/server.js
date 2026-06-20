@@ -346,6 +346,53 @@ app.get("/api/seating", (req, res) => {
 });
 
 /* =========================================================
+   My RSVP — guest self-service lookup & update by email
+   ========================================================= */
+app.get("/api/rsvp/mine", (req, res) => {
+  const email = trimStr(req.query.email, 160).toLowerCase();
+  if (!email) return res.status(400).json({ error: "Enter your email." });
+  const list = readJson("rsvps.json").filter((r) => (r.email || "").toLowerCase() === email);
+  if (!list.length) return res.json({ found: false });
+  const r = list[list.length - 1];
+  res.json({
+    found: true,
+    rsvp: {
+      name: r.name,
+      email: r.email,
+      attending: r.attending,
+      guests: r.guests,
+      events: r.events || [],
+      meal: r.meal || "",
+      hotelBlock: Boolean(r.hotelBlock),
+      note: r.note || "",
+    },
+  });
+});
+
+app.post("/api/rsvp/update", (req, res) => {
+  const b = req.body || {};
+  const email = trimStr(b.email, 160).toLowerCase();
+  if (!email) return res.status(400).json({ error: "Email is required." });
+  const list = readJson("rsvps.json");
+  let idx = -1;
+  for (let i = list.length - 1; i >= 0; i--) {
+    if ((list[i].email || "").toLowerCase() === email) { idx = i; break; }
+  }
+  if (idx < 0) return res.status(404).json({ error: "No RSVP found for that email. Please submit a new one." });
+  const e = list[idx];
+  if (b.name != null && trimStr(b.name, 120)) e.name = trimStr(b.name, 120);
+  if (b.attending === "yes" || b.attending === "no") e.attending = b.attending;
+  e.guests = Math.max(1, Math.min(20, parseInt(b.guests, 10) || e.guests || 1));
+  e.events = Array.isArray(b.events) ? b.events.map((x) => trimStr(x, 60)).filter(Boolean).slice(0, 10) : e.events;
+  e.meal = trimStr(b.meal, 40);
+  e.hotelBlock = Boolean(b.hotelBlock);
+  e.note = trimStr(b.note, 1000);
+  e.updatedAt = new Date().toISOString();
+  writeJsonFile("rsvps.json", list);
+  res.json({ ok: true });
+});
+
+/* =========================================================
    Guestbook
    ========================================================= */
 app.get("/api/guestbook", (_req, res) => {

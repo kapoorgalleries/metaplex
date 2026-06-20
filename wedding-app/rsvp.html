@@ -21,6 +21,17 @@
     </section>
 
     <section class="section">
+      <div class="rsvp-find" id="rsvpFind">
+        <button type="button" class="rsvp-find__toggle" id="findToggle" data-i18n="rs.find.toggle">Already responded? Update your RSVP →</button>
+        <div class="rsvp-find__panel" id="findPanel" hidden>
+          <label class="field"><span data-i18n="rs.find.label">The email you RSVP'd with</span>
+            <input type="email" id="findEmail" autocomplete="email" />
+          </label>
+          <button type="button" class="btn btn--outline btn--sm" id="findBtn" data-i18n="rs.find.btn">Find my RSVP</button>
+          <p class="rsvp__status" id="findStatus" role="status" aria-live="polite"></p>
+        </div>
+      </div>
+
       <form class="rsvp" id="rsvpForm" novalidate>
         <div class="rsvp__row">
           <label class="field"><span data-i18n-html="rs.name">Full name <em>*</em></span><input type="text" name="name" required autocomplete="name" /></label>
