@@ -59,6 +59,15 @@ chat stays hidden.
   per-event tallies, the full response table, and CSV export.
 - **Wedding concierge** — a Claude-powered chat bubble (on every screen) that answers guest
   questions from the wedding details. Appears only when the backend has an `ANTHROPIC_API_KEY`.
+- **Find Your Seat** — guests look up their reception table by name (`/api/seating`); the
+  admin assigns table numbers inline in the RSVPs tab.
+- **Song requests** + **photo loves** + **live home stats** (PII-free guest count).
+- **Push notifications** — guests opt into day-of reminders (🔔 in the More sheet); the
+  admin can broadcast announcements. Auto-fires a reminder 2 hours before each event.
+  Uses Web Push + VAPID (`web-push`); the public key is exposed at `/api/push/key` and a
+  `push` handler lives in the service worker.
+- **English / हिंदी** — a language toggle in the app bar localizes the whole app shell,
+  the home screen, and every page header (choice persists in `localStorage`).
 - **FAQ** accordion and a gift **registry** section.
 - Fully **responsive** with `prefers-reduced-motion` support and iOS safe-area insets.
 
@@ -134,6 +143,8 @@ guest) and skips image types vision can't read (e.g. HEIC). Disable it with `PHO
 | `ANTHROPIC_API_KEY` | Enables the concierge **and** photo/guestbook moderation |
 | `ADMIN_PASSWORD` | Enables the RSVP admin dashboard (`/admin.html`) |
 | `PHOTO_MODERATION=off` | Turn moderation off even when the key is set |
+| `VAPID_PUBLIC_KEY` / `VAPID_PRIVATE_KEY` | Web Push keys (auto-generated to `server/data/vapid.json` if unset) |
+| `VAPID_CONTACT` | `mailto:` contact for push (default placeholder) |
 | `PHOTO_S3_BUCKET` | Switch photo storage to S3/R2 (else local disk) |
 | `PHOTO_S3_ENDPOINT` | R2 (or custom) S3 endpoint; omit for AWS S3 |
 | `PHOTO_S3_REGION` | Bucket region (`auto` for R2) |

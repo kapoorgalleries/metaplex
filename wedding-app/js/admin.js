@@ -64,10 +64,16 @@
   function renderTables() {
     document.querySelector("#tableRsvps tbody").innerHTML = data.rsvps.slice().reverse().map((x) => {
       const badge = x.attending === "yes" ? '<span class="badge badge--yes">Yes</span>' : '<span class="badge badge--no">No</span>';
+      const table = x.attending === "yes"
+        ? `<input class="admin__table-input" data-id="${esc(x.id)}" value="${esc(x.table || "")}" placeholder="—" />`
+        : "";
       return `<tr><td>${esc(x.name)}</td><td>${esc(x.email)}</td><td>${badge}</td><td>${esc(x.guests)}</td>
         <td>${esc((x.events || []).join(", "))}</td><td>${esc(x.meal)}</td><td>${x.hotelBlock ? "✓" : ""}</td>
-        <td>${esc(x.note)}</td><td>${esc(when(x.submittedAt))}</td></tr>`;
+        <td>${table}</td><td>${esc(x.note)}</td><td>${esc(when(x.submittedAt))}</td></tr>`;
     }).join("");
+    document.querySelectorAll(".admin__table-input").forEach((inp) =>
+      inp.addEventListener("change", () => saveTable(inp.dataset.id, inp.value.trim(), inp))
+    );
 
     document.querySelector("#tableGuestbook tbody").innerHTML = data.guestbook.slice().reverse().map((x) =>
       `<tr><td>${esc(x.name)}</td><td style="white-space:normal">${esc(x.message)}</td><td>${esc(when(x.at))}</td></tr>`
@@ -79,6 +85,23 @@
 
     renderPhotos();
     countEl.textContent = `${data[active].length} record${data[active].length === 1 ? "" : "s"}`;
+  }
+
+  async function saveTable(id, table, inp) {
+    try {
+      const r = await fetch(`/api/admin/rsvp/${encodeURIComponent(id)}/table`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...headers() },
+        body: JSON.stringify({ table }),
+      });
+      if (!r.ok) throw new Error("Save failed.");
+      const entry = data.rsvps.find((x) => x.id === id);
+      if (entry) entry.table = table;
+      inp.classList.add("saved");
+      setTimeout(() => inp.classList.remove("saved"), 900);
+    } catch (e) {
+      if (window.toast) window.toast(e.message, "err");
+    }
   }
 
   const photosEl = document.getElementById("adminPhotos");
@@ -127,7 +150,7 @@
   });
 
   const COLS = {
-    rsvps: ["name", "email", "attending", "guests", "events", "meal", "hotelBlock", "note", "submittedAt"],
+    rsvps: ["name", "email", "attending", "guests", "events", "meal", "hotelBlock", "table", "note", "submittedAt"],
     guestbook: ["name", "message", "at"],
     songs: ["song", "artist", "by", "note", "at"],
   };
@@ -158,6 +181,39 @@
   }
   document.getElementById("refreshBtn").addEventListener("click", () => refresh().catch((e) => window.toast && window.toast(e.message, "err")));
 
+  // Announcements (push broadcast) — only shown if push is enabled server-side.
+  const annForm = document.getElementById("announceForm");
+  const annStatus = document.getElementById("annStatus");
+  annForm.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const title = document.getElementById("annTitle").value.trim();
+    const body = document.getElementById("annBody").value.trim();
+    if (!body) return;
+    annStatus.textContent = "Sending…";
+    annStatus.className = "rsvp__status";
+    try {
+      const r = await fetch("/api/admin/push/broadcast", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...headers() },
+        body: JSON.stringify({ title, body }),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.error || "Send failed.");
+      annStatus.className = "rsvp__status ok";
+      annStatus.textContent = `Sent to ${d.sent} device${d.sent === 1 ? "" : "s"}.`;
+      annForm.reset();
+    } catch (err) {
+      annStatus.className = "rsvp__status err";
+      annStatus.textContent = err.message;
+    }
+  });
+  function maybeShowAnnounce() {
+    fetch("/api/push/key")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((info) => { if (info && info.enabled) document.getElementById("announceCard").hidden = false; })
+      .catch(() => {});
+  }
+
   async function unlock() {
     loginStatus.textContent = "";
     try {
@@ -166,6 +222,7 @@
       gate.hidden = true;
       panel.hidden = false;
       showTab("rsvps");
+      maybeShowAnnounce();
     } catch (err) {
       token = "";
       sessionStorage.removeItem("adminToken");

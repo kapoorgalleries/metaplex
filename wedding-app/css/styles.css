@@ -558,7 +558,7 @@ body.app .nav { display: none !important; } /* legacy desktop nav, unused */
   position: fixed; top: 0; left: 0; right: 0; z-index: 60;
   height: calc(var(--appbar-h) + env(safe-area-inset-top));
   padding-top: env(safe-area-inset-top);
-  display: grid; grid-template-columns: 56px 1fr 56px; align-items: center;
+  display: grid; grid-template-columns: 56px 1fr auto; align-items: center;
   background: linear-gradient(135deg, var(--maroon), var(--maroon-deep)); color: var(--cream);
   box-shadow: 0 4px 18px -8px rgba(74,14,24,0.6);
 }
@@ -698,3 +698,44 @@ body.app .concierge { bottom: calc(var(--tabbar-h) + 14px + env(safe-area-inset-
   background: rgba(74,14,24,0.8); color: #fff; font-size: 0.95rem; cursor: pointer;
 }
 .admin__photo-del:hover { background: var(--rose); }
+
+/* Find Your Seat */
+.seat { max-width: 520px; margin: 0 auto; }
+.seat__form { background: var(--white); border-radius: var(--radius); padding: clamp(1.4rem,3vw,2rem); box-shadow: var(--shadow); border: 1px solid rgba(184,134,11,0.18); display: grid; gap: 1rem; }
+.seat__form .btn { width: 100%; }
+.seat__result { margin-top: 1.6rem; }
+.seat__searching { text-align: center; color: var(--muted); }
+.seat__card { background: var(--white); border-radius: var(--radius); padding: 1.8rem; box-shadow: var(--shadow); border: 1px solid rgba(184,134,11,0.18); text-align: center; margin-bottom: 1rem; }
+.seat__name { font-family: var(--display); color: var(--maroon); font-size: 1.5rem; }
+.seat__table { margin-top: 1rem; }
+.seat__num { display: inline-grid; place-items: center; width: 90px; height: 90px; border-radius: 50%;
+  background: linear-gradient(150deg, var(--marigold), var(--maroon)); color: var(--cream);
+  font-family: var(--display); font-size: 2.4rem; box-shadow: var(--shadow); }
+.seat__tlabel { display: block; margin-top: 0.6rem; font-size: 0.7rem; letter-spacing: 0.2em; text-transform: uppercase; color: var(--muted); }
+.seat__pending { color: var(--gold); font-style: italic; font-family: var(--serif); font-size: 1.15rem; }
+.seat__none { color: var(--muted); }
+
+/* Admin table input */
+.admin__table-input { width: 64px; padding: 0.3rem 0.5rem; border: 1.5px solid rgba(110,20,35,0.18); border-radius: 8px; font-family: var(--sans); background: var(--cream); }
+.admin__table-input.saved { border-color: #2e7d4f; background: #e3f3e8; }
+
+/* Admin announcement broadcaster */
+.admin__announce { background: var(--white); border-radius: var(--radius); padding: 1.4rem 1.6rem; box-shadow: var(--shadow); border: 1px solid rgba(184,134,11,0.18); margin-bottom: 1.6rem; }
+.admin__announce h3 { color: var(--maroon); font-size: 1.2rem; }
+.admin__announce p { color: var(--muted); font-size: 0.88rem; margin: 0.2rem 0 0.8rem; }
+.admin__announce form { display: grid; gap: 0.6rem; }
+.admin__announce input, .admin__announce textarea {
+  font-family: var(--sans); font-size: 0.95rem; color: var(--ink); padding: 0.6rem 0.8rem;
+  border: 1.5px solid rgba(110,20,35,0.18); border-radius: 10px; background: var(--cream); resize: vertical;
+}
+.admin__announce .btn { justify-self: start; }
+
+/* App bar language toggle */
+.appbar__actions { display: flex; align-items: center; gap: 4px; padding-right: 8px; }
+.appbar__lang {
+  background: rgba(253,247,238,0.14); border: 1px solid rgba(253,247,238,0.45); color: var(--cream);
+  border-radius: 999px; font-family: var(--sans); font-size: 0.72rem; letter-spacing: 0.04em;
+  padding: 4px 9px; cursor: pointer; line-height: 1;
+}
+.appbar__lang:hover { background: rgba(253,247,238,0.26); }
+:lang(hi) .appbar__title, :lang(hi) .subhero h1, :lang(hi) .section__title { letter-spacing: 0; }

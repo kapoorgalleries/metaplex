@@ -1,5 +1,5 @@
 /* Priya & Sanjay 2026 — service worker (offline app shell) */
-const CACHE = "psw-2026-v3";
+const CACHE = "psw-2026-v4";
 const SHELL = [
   "index.html",
   "story.html",
@@ -13,6 +13,7 @@ const SHELL = [
   "guestbook.html",
   "faq.html",
   "rsvp.html",
+  "seating.html",
   "css/styles.css",
   "js/site.js",
   "js/home.js",
@@ -21,6 +22,7 @@ const SHELL = [
   "js/rsvp.js",
   "js/guestbook.js",
   "js/music.js",
+  "js/seating.js",
   "manifest.json",
   "icons/icon-192.png",
   "icons/icon-512.png",
@@ -35,6 +37,34 @@ self.addEventListener("install", (event) => {
 self.addEventListener("activate", (event) => {
   event.waitUntil(
     caches.keys().then((keys) => Promise.all(keys.filter((k) => k !== CACHE).map((k) => caches.delete(k)))).then(() => self.clients.claim())
+  );
+});
+
+/* ---- Push notifications ---- */
+self.addEventListener("push", (event) => {
+  let data = {};
+  try { data = event.data ? event.data.json() : {}; } catch (_) {}
+  const title = data.title || "Priya & Sanjay";
+  event.waitUntil(
+    self.registration.showNotification(title, {
+      body: data.body || "",
+      icon: "icons/icon-192.png",
+      badge: "icons/icon-192.png",
+      data: { url: data.url || "/" },
+    })
+  );
+});
+
+self.addEventListener("notificationclick", (event) => {
+  event.notification.close();
+  const url = (event.notification.data && event.notification.data.url) || "/";
+  event.waitUntil(
+    self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((wins) => {
+      for (const w of wins) {
+        if ("focus" in w) { w.navigate(url); return w.focus(); }
+      }
+      return self.clients.openWindow(url);
+    })
   );
 });
 

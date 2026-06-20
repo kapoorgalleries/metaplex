@@ -15,6 +15,7 @@ const multer = require("multer");
 const Anthropic = require("@anthropic-ai/sdk");
 const { createStorage } = require("./storage");
 const { moderatePhoto, moderateText, isEnabled: moderationEnabled } = require("./moderation");
+const createPush = require("./push");
 
 const app = express();
 const PORT = process.env.PORT || 8080;
@@ -39,6 +40,9 @@ function appendJson(name, entry) {
   list.push(entry);
   fs.writeFileSync(path.join(DATA_DIR, name), JSON.stringify(list, null, 2));
   return entry;
+}
+function writeJsonFile(name, list) {
+  fs.writeFileSync(path.join(DATA_DIR, name), JSON.stringify(list, null, 2));
 }
 const trimStr = (v, n) => (typeof v === "string" ? v.trim().slice(0, n) : "");
 
@@ -248,6 +252,40 @@ app.post("/api/photos/:id/love", async (req, res) => {
 });
 
 /* =========================================================
+   Push notifications
+   ========================================================= */
+const push = createPush(DATA_DIR);
+
+// Day-of reminders (UTC start times; 2 hours before each event).
+push.initReminders([
+  { key: "mehndi", title: "Mehndi & Haldi", startISO: "2026-10-16T05:30:00Z", timeLabel: "11:00 AM", loc: "The Courtyard, Hotel Lakend" },
+  { key: "sangeet", title: "Sangeet", startISO: "2026-10-16T13:30:00Z", timeLabel: "7:00 PM", loc: "Grand Ballroom, Hotel Lakend" },
+  { key: "ceremony", title: "Wedding Ceremony", startISO: "2026-10-17T11:30:00Z", timeLabel: "5:00 PM", loc: "Lakeside Mandap, Lake Pichola" },
+  { key: "reception", title: "Reception", startISO: "2026-10-17T15:00:00Z", timeLabel: "8:30 PM", loc: "Terrace Gardens, Lake Pichola" },
+]);
+
+app.get("/api/push/key", (_req, res) => res.json({ enabled: push.enabled, key: push.publicKey() }));
+
+app.post("/api/push/subscribe", (req, res) => {
+  const ok = push.subscribe(req.body);
+  res.status(ok ? 201 : 503).json({ ok });
+});
+
+app.post("/api/push/unsubscribe", (req, res) => {
+  if (req.body && req.body.endpoint) push.unsubscribe(req.body.endpoint);
+  res.json({ ok: true });
+});
+
+// Admin broadcast (e.g. day-of announcements).
+app.post("/api/admin/push/broadcast", requireAdmin, async (req, res) => {
+  const title = trimStr(req.body && req.body.title, 80) || "Priya & Sanjay";
+  const body = trimStr(req.body && req.body.body, 200);
+  if (!body) return res.status(400).json({ error: "Message is required." });
+  const result = await push.broadcast({ title, body, url: "/" });
+  res.json(result);
+});
+
+/* =========================================================
    Public aggregate stats (no PII)
    ========================================================= */
 app.get("/api/stats", async (_req, res) => {
@@ -279,6 +317,7 @@ app.post("/api/rsvp", (req, res) => {
     return res.status(400).json({ error: "Name, email and attendance are required." });
   }
   const entry = {
+    id: "r" + Date.now().toString(36) + Math.random().toString(36).slice(2, 7),
     name,
     email,
     attending,
@@ -287,10 +326,23 @@ app.post("/api/rsvp", (req, res) => {
     meal: trimStr(b.meal, 40),
     hotelBlock: Boolean(b.hotelBlock),
     note: trimStr(b.note, 1000),
+    table: "",
     submittedAt: new Date().toISOString(),
   };
   appendJson("rsvps.json", entry);
   res.status(201).json({ ok: true });
+});
+
+/* =========================================================
+   Find Your Seat — public lookup by name
+   ========================================================= */
+app.get("/api/seating", (req, res) => {
+  const q = trimStr(req.query.q, 80).toLowerCase();
+  if (!q) return res.status(400).json({ error: "Enter your name to search." });
+  const matches = readJson("rsvps.json")
+    .filter((r) => r.attending === "yes" && (r.name || "").toLowerCase().includes(q))
+    .map((r) => ({ name: r.name, table: r.table || "" }));
+  res.json({ matches });
 });
 
 /* =========================================================
@@ -367,6 +419,16 @@ app.get("/api/admin/songs", requireAdmin, (_req, res) => {
   res.json(readJson("songs.json"));
 });
 
+// Assign / clear a table number for an RSVP (seating).
+app.post("/api/admin/rsvp/:id/table", requireAdmin, (req, res) => {
+  const list = readJson("rsvps.json");
+  const entry = list.find((r) => r.id === req.params.id);
+  if (!entry) return res.status(404).json({ error: "RSVP not found." });
+  entry.table = trimStr(req.body && req.body.table, 20);
+  writeJsonFile("rsvps.json", list);
+  res.json({ id: entry.id, table: entry.table });
+});
+
 // Remove an inappropriate photo (moderation).
 app.delete("/api/photos/:id", requireAdmin, async (req, res) => {
   try {
@@ -390,4 +452,5 @@ app.listen(PORT, () => {
   console.log(`Photo storage: ${storage.kind}`);
   console.log(`Photo moderation: ${moderationEnabled(anthropic) ? "on (Claude vision)" : "off"}`);
   console.log(`Admin dashboard: ${ADMIN_PASSWORD ? "enabled (/admin.html)" : "disabled (set ADMIN_PASSWORD)"}`);
+  console.log(`Push notifications: ${push.enabled ? "enabled" : "disabled (web-push not installed)"}`);
 });

@@ -46,7 +46,8 @@
       .then((r) => (r.ok ? r.json() : null))
       .then((s) => {
         if (s && s.guests > 0) {
-          statsEl.textContent = `💛 ${s.guests} guest${s.guests === 1 ? "" : "s"} celebrating with us`;
+          const tpl = window.t ? window.t("home.stats") : "💛 {n} guests celebrating with us";
+          statsEl.textContent = tpl.replace("{n}", s.guests);
           statsEl.hidden = false;
         }
       })

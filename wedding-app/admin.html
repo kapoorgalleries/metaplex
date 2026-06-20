@@ -36,6 +36,17 @@
       <div class="admin" id="adminPanel" hidden>
         <div class="admin__stats" id="adminStats"></div>
 
+        <div class="admin__announce" id="announceCard" hidden>
+          <h3>📣 Send an announcement</h3>
+          <p>Push a notification to everyone who turned on reminders.</p>
+          <form id="announceForm">
+            <input id="annTitle" type="text" maxlength="80" placeholder="Title (optional)" />
+            <textarea id="annBody" rows="2" maxlength="200" required placeholder="e.g. Shuttle to the Sangeet leaves at 6:30 PM from the lobby."></textarea>
+            <button class="btn btn--solid btn--sm" type="submit">Send to all</button>
+            <span class="rsvp__status" id="annStatus"></span>
+          </form>
+        </div>
+
         <div class="admin__tabs" id="adminTabs">
           <button class="admin__tab is-active" data-tab="rsvps">RSVPs</button>
           <button class="admin__tab" data-tab="guestbook">Guestbook</button>
@@ -51,7 +62,7 @@
 
         <div class="admin__pane" data-tab="rsvps">
           <div class="table-wrap"><table class="admin__table" id="tableRsvps">
-            <thead><tr><th>Name</th><th>Email</th><th>Attending</th><th>Guests</th><th>Events</th><th>Meal</th><th>Hotel</th><th>Note</th><th>When</th></tr></thead>
+            <thead><tr><th>Name</th><th>Email</th><th>Attending</th><th>Guests</th><th>Events</th><th>Meal</th><th>Hotel</th><th>Table</th><th>Note</th><th>When</th></tr></thead>
             <tbody></tbody>
           </table></div>
         </div>
