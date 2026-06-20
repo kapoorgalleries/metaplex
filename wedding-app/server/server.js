@@ -9,10 +9,11 @@
 "use strict";
 
 const path = require("path");
-const fs = require("fs");
 const express = require("express");
 const multer = require("multer");
 const Anthropic = require("@anthropic-ai/sdk");
+const { createStorage } = require("./storage");
+const { moderatePhoto, isEnabled: moderationEnabled } = require("./moderation");
 
 const app = express();
 const PORT = process.env.PORT || 8080;
@@ -21,13 +22,16 @@ app.use(express.json({ limit: "1mb" }));
 
 // ---------- Paths ----------
 const SITE_ROOT = path.join(__dirname, ".."); // the wedding-app/ static site
-const UPLOAD_DIR = path.join(__dirname, "uploads");
-const MANIFEST = path.join(UPLOAD_DIR, "manifest.json");
-fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+
+// ---------- Photo storage (local disk by default; S3/R2 via env) ----------
+const storage = createStorage();
 
 // ---------- Static hosting ----------
 app.use(express.static(SITE_ROOT));
-app.use("/uploads", express.static(UPLOAD_DIR));
+if (storage.serveDir) {
+  // Local backend: serve uploaded files. (S3/R2 serve from their own URL.)
+  app.use("/uploads", express.static(storage.serveDir));
+}
 
 /* =========================================================
    Wedding concierge (Claude)
@@ -130,18 +134,18 @@ app.post("/api/concierge", async (req, res) => {
    ========================================================= */
 
 const IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/webp", "image/gif", "image/heic"]);
+const EXT_FOR_TYPE = {
+  "image/jpeg": ".jpg",
+  "image/png": ".png",
+  "image/webp": ".webp",
+  "image/gif": ".gif",
+  "image/heic": ".heic",
+};
 
-const storage = multer.diskStorage({
-  destination: (_req, _file, cb) => cb(null, UPLOAD_DIR),
-  filename: (_req, file, cb) => {
-    const ext = (path.extname(file.originalname) || "").toLowerCase().replace(/[^.a-z0-9]/g, "");
-    const safe = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}${ext || ".jpg"}`;
-    cb(null, safe);
-  },
-});
-
+// Buffer the file in memory so it can be moderated before it's persisted
+// (and so the same code path works for local disk and S3/R2).
 const upload = multer({
-  storage,
+  storage: multer.memoryStorage(),
   limits: { fileSize: 15 * 1024 * 1024 }, // 15 MB
   fileFilter: (_req, file, cb) => {
     if (IMAGE_TYPES.has(file.mimetype)) cb(null, true);
@@ -149,42 +153,61 @@ const upload = multer({
   },
 });
 
-function readManifest() {
-  try {
-    return JSON.parse(fs.readFileSync(MANIFEST, "utf8"));
-  } catch (_) {
-    return [];
-  }
-}
-function writeManifest(list) {
-  fs.writeFileSync(MANIFEST, JSON.stringify(list, null, 2));
-}
+const trim = (v, n) => (typeof v === "string" ? v.trim().slice(0, n) : "");
 
-app.get("/api/photos", (_req, res) => {
-  res.json(readManifest());
+app.get("/api/photos", async (_req, res) => {
+  try {
+    res.json(await storage.readManifest());
+  } catch (err) {
+    console.error("readManifest error:", err?.message || err);
+    res.status(502).json({ error: "Couldn't load photos." });
+  }
 });
 
 app.post("/api/photos", (req, res) => {
-  upload.single("photo")(req, res, (err) => {
+  upload.single("photo")(req, res, async (err) => {
     if (err) {
       const msg = err.code === "LIMIT_FILE_SIZE" ? "That photo is over the 15 MB limit." : err.message;
       return res.status(400).json({ error: msg });
     }
     if (!req.file) return res.status(400).json({ error: "Please choose a photo to upload." });
 
-    const trim = (v, n) => (typeof v === "string" ? v.trim().slice(0, n) : "");
-    const entry = {
-      id: path.parse(req.file.filename).name,
-      url: `/uploads/${req.file.filename}`,
-      uploader: trim(req.body.uploader, 80) || "A guest",
-      caption: trim(req.body.caption, 200),
-      uploadedAt: new Date().toISOString(),
-    };
+    const caption = trim(req.body.caption, 200);
 
-    const list = readManifest();
-    list.push(entry);
-    writeManifest(list);
-    res.status(201).json(entry);
+    try {
+      // Light moderation (no-op unless enabled — see moderation.js).
+      const verdict = await moderatePhoto(anthropic, {
+        buffer: req.file.buffer,
+        mediaType: req.file.mimetype,
+        caption,
+      });
+      if (!verdict.allowed) {
+        return res.status(422).json({
+          error: "Thanks! This photo wasn't approved for the public gallery. Please try a different one.",
+        });
+      }
+
+      const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const key = `${id}${EXT_FOR_TYPE[req.file.mimetype] || ".jpg"}`;
+      const { url } = await storage.save({
+        buffer: req.file.buffer,
+        key,
+        contentType: req.file.mimetype,
+      });
+
+      const entry = {
+        id,
+        url,
+        uploader: trim(req.body.uploader, 80) || "A guest",
+        caption,
+        uploadedAt: new Date().toISOString(),
+      };
+      await storage.appendManifest(entry);
+      res.status(201).json(entry);
+    } catch (e) {
+      console.error("Photo upload error:", e?.message || e);
+      res.status(502).json({ error: "Upload failed. Please try again." });
+    }
   });
 });
 
@@ -193,4 +216,6 @@ app.post("/api/photos", (req, res) => {
 app.listen(PORT, () => {
   console.log(`Priya & Sanjay wedding app running at http://localhost:${PORT}`);
   console.log(hasApiKey ? "Concierge: enabled (Claude)" : "Concierge: disabled (set ANTHROPIC_API_KEY to enable)");
+  console.log(`Photo storage: ${storage.kind}`);
+  console.log(`Photo moderation: ${moderationEnabled(anthropic) ? "on (Claude vision)" : "off"}`);
 });

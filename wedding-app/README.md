@@ -79,8 +79,42 @@ A minimal Express server (`server/server.js`) that:
 - **`GET/POST /api/photos`** — lists and accepts guest photo uploads (`multer`, images only,
   15 MB cap), stored on disk under `server/uploads/`.
 
-To collect photos in cloud storage (S3/R2) or move RSVP/photos into a database later, the
-handlers in `server.js` are the single place to swap the storage layer.
+### Photo storage (local disk → S3 / Cloudflare R2)
+
+Photo storage is pluggable (`server/storage.js`). With no extra config it uses **local disk**
+(`server/uploads/`). Set `PHOTO_S3_BUCKET` to switch to an **S3-compatible bucket** — AWS S3
+or Cloudflare R2 — with no code changes:
+
+```bash
+# Cloudflare R2 example
+export PHOTO_S3_BUCKET=priya-sanjay-photos
+export PHOTO_S3_ENDPOINT=https://<account>.r2.cloudflarestorage.com   # omit for AWS S3
+export PHOTO_S3_REGION=auto                                           # "auto" for R2
+export PHOTO_PUBLIC_BASE_URL=https://photos.yourwedding.com           # where objects are served
+export PHOTO_S3_ACCESS_KEY_ID=...        # or use the default AWS credential chain
+export PHOTO_S3_SECRET_ACCESS_KEY=...
+npm start
+```
+
+The uploaded object and a `manifest.json` index both live in the bucket; the photo `url`
+returned to the gallery is `PHOTO_PUBLIC_BASE_URL/<key>`.
+
+### Photo moderation (light, Claude vision)
+
+When the concierge is enabled (`ANTHROPIC_API_KEY` set), every upload is screened with Claude
+vision before it's published — it blocks nudity, graphic violence, hateful content, and obvious
+spam, and allows ordinary event photos. It **fails open** (a moderation error never blocks a
+guest) and skips image types vision can't read (e.g. HEIC). Disable it with `PHOTO_MODERATION=off`.
+
+| Env var | Purpose |
+|---|---|
+| `ANTHROPIC_API_KEY` | Enables the concierge **and** photo moderation |
+| `PHOTO_MODERATION=off` | Turn moderation off even when the key is set |
+| `PHOTO_S3_BUCKET` | Switch photo storage to S3/R2 (else local disk) |
+| `PHOTO_S3_ENDPOINT` | R2 (or custom) S3 endpoint; omit for AWS S3 |
+| `PHOTO_S3_REGION` | Bucket region (`auto` for R2) |
+| `PHOTO_PUBLIC_BASE_URL` | Public URL base where bucket objects are served |
+| `PHOTO_S3_ACCESS_KEY_ID` / `PHOTO_S3_SECRET_ACCESS_KEY` | Bucket credentials (optional; falls back to the AWS default chain) |
 
 ## Customizing
 
