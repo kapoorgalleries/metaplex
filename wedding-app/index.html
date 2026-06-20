@@ -172,6 +172,22 @@
       <h2 class="section__title">Gallery</h2>
     </div>
     <div class="gallery" id="galleryGrid"><!-- populated by JS --></div>
+
+    <div class="share reveal" id="share">
+      <h3>📸 Share your photos</h3>
+      <p>Captured a moment over the weekend? Add it here so everyone can relive it.</p>
+      <form class="share__form" id="photoForm">
+        <div class="share__row">
+          <input type="text" name="uploader" placeholder="Your name (optional)" autocomplete="name" />
+          <input type="text" name="caption" placeholder="Caption (optional)" maxlength="200" />
+        </div>
+        <div class="share__row">
+          <input type="file" name="photo" id="photoInput" accept="image/*" required />
+          <button type="submit" class="btn btn--solid btn--sm">Upload photo</button>
+        </div>
+        <p class="share__status" id="photoStatus" role="status" aria-live="polite"></p>
+      </form>
+    </div>
   </section>
 
   <!-- ===== RSVP ===== -->
@@ -299,6 +315,27 @@
     <div class="lightbox__stage" id="lightboxStage"></div>
   </div>
 
+  <!-- ===== Concierge chat ===== -->
+  <button class="concierge__fab" id="conciergeFab" aria-label="Ask the wedding concierge" hidden>
+    💬
+  </button>
+  <div class="concierge" id="conciergePanel" aria-hidden="true">
+    <div class="concierge__head">
+      <div>
+        <strong>Wedding Concierge</strong>
+        <span>Ask me anything about the weekend</span>
+      </div>
+      <button class="concierge__close" id="conciergeClose" aria-label="Close">&times;</button>
+    </div>
+    <div class="concierge__log" id="conciergeLog"></div>
+    <form class="concierge__form" id="conciergeForm">
+      <input type="text" id="conciergeInput" placeholder="e.g. What should I wear to the Sangeet?"
+             autocomplete="off" />
+      <button type="submit" aria-label="Send">→</button>
+    </form>
+  </div>
+
   <script src="js/main.js"></script>
+  <script src="js/api.js"></script>
 </body>
 </html>
