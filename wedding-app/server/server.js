@@ -20,7 +20,43 @@ const createPush = require("./push");
 const app = express();
 const PORT = process.env.PORT || 8080;
 
+app.set("trust proxy", true); // honour X-Forwarded-For so rate limiting keys on the real client IP
 app.use(express.json({ limit: "1mb" }));
+
+/* ---------- Spam hardening: in-memory rate limiting + honeypot ---------- */
+// Per-IP sliding window. In-memory is fine for a single-instance wedding app.
+function rateLimit({ windowMs, max }) {
+  const hits = new Map(); // ip -> [timestamps]
+  return (req, res, next) => {
+    const now = Date.now();
+    const ip = req.ip || "unknown";
+    const recent = (hits.get(ip) || []).filter((t) => now - t < windowMs);
+    if (recent.length >= max) {
+      res.set("Retry-After", String(Math.ceil(windowMs / 1000)));
+      return res.status(429).json({ error: "You're doing that a bit too fast — please wait a moment and try again." });
+    }
+    recent.push(now);
+    hits.set(ip, recent);
+    // Opportunistic cleanup so the map can't grow without bound.
+    if (hits.size > 5000) {
+      for (const [k, v] of hits) if (!v.some((t) => now - t < windowMs)) hits.delete(k);
+    }
+    next();
+  };
+}
+
+// Bots love to fill in every field; real forms hide a "website" trap.
+// If it's filled, pretend everything went fine (so bots don't retry) but store nothing.
+function honeypot(req, res, next) {
+  if (req.body && typeof req.body.website === "string" && req.body.website.trim() !== "") {
+    return res.status(200).json({ ok: true });
+  }
+  next();
+}
+
+// Generous limits — enough for a household filling things in, hostile to scripts.
+const limitWrites = rateLimit({ windowMs: 60 * 1000, max: 12 });
+const limitConcierge = rateLimit({ windowMs: 60 * 1000, max: 20 });
 
 // ---------- Paths ----------
 const SITE_ROOT = path.join(__dirname, ".."); // the wedding-app/ static site
@@ -106,7 +142,7 @@ app.get("/api/concierge", (_req, res) => {
   res.json({ available: hasApiKey });
 });
 
-app.post("/api/concierge", async (req, res) => {
+app.post("/api/concierge", limitConcierge, async (req, res) => {
   if (!anthropic) {
     return res
       .status(503)
@@ -187,7 +223,7 @@ app.get("/api/photos", async (_req, res) => {
   }
 });
 
-app.post("/api/photos", (req, res) => {
+app.post("/api/photos", limitWrites, (req, res) => {
   upload.single("photo")(req, res, async (err) => {
     if (err) {
       const msg = err.code === "LIMIT_FILE_SIZE" ? "That photo is over the 15 MB limit." : err.message;
@@ -308,7 +344,7 @@ app.get("/api/stats", async (_req, res) => {
 /* =========================================================
    RSVP
    ========================================================= */
-app.post("/api/rsvp", (req, res) => {
+app.post("/api/rsvp", limitWrites, honeypot, (req, res) => {
   const b = req.body || {};
   const name = trimStr(b.name, 120);
   const email = trimStr(b.email, 160);
@@ -321,7 +357,7 @@ app.post("/api/rsvp", (req, res) => {
     name,
     email,
     attending,
-    guests: Math.max(1, Math.min(20, parseInt(b.guests, 10) || 1)),
+    guests: Math.max(1, Math.min(10, parseInt(b.guests, 10) || 1)),
     events: Array.isArray(b.events) ? b.events.map((e) => trimStr(e, 60)).filter(Boolean).slice(0, 10) : [],
     meal: trimStr(b.meal, 40),
     hotelBlock: Boolean(b.hotelBlock),
@@ -369,7 +405,7 @@ app.get("/api/rsvp/mine", (req, res) => {
   });
 });
 
-app.post("/api/rsvp/update", (req, res) => {
+app.post("/api/rsvp/update", limitWrites, honeypot, (req, res) => {
   const b = req.body || {};
   const email = trimStr(b.email, 160).toLowerCase();
   if (!email) return res.status(400).json({ error: "Email is required." });
@@ -382,7 +418,7 @@ app.post("/api/rsvp/update", (req, res) => {
   const e = list[idx];
   if (b.name != null && trimStr(b.name, 120)) e.name = trimStr(b.name, 120);
   if (b.attending === "yes" || b.attending === "no") e.attending = b.attending;
-  e.guests = Math.max(1, Math.min(20, parseInt(b.guests, 10) || e.guests || 1));
+  e.guests = Math.max(1, Math.min(10, parseInt(b.guests, 10) || e.guests || 1));
   e.events = Array.isArray(b.events) ? b.events.map((x) => trimStr(x, 60)).filter(Boolean).slice(0, 10) : e.events;
   e.meal = trimStr(b.meal, 40);
   e.hotelBlock = Boolean(b.hotelBlock);
@@ -400,7 +436,7 @@ app.get("/api/guestbook", (_req, res) => {
   res.json(readJson("guestbook.json").map((e) => ({ name: e.name, message: e.message, at: e.at })));
 });
 
-app.post("/api/guestbook", async (req, res) => {
+app.post("/api/guestbook", limitWrites, honeypot, async (req, res) => {
   const name = trimStr(req.body && req.body.name, 80);
   const message = trimStr(req.body && req.body.message, 600);
   if (!name || !message) return res.status(400).json({ error: "Please add your name and a message." });
@@ -424,7 +460,7 @@ app.get("/api/songs", (_req, res) => {
   res.json(readJson("songs.json").map((s) => ({ song: s.song, artist: s.artist, by: s.by, at: s.at })));
 });
 
-app.post("/api/songs", async (req, res) => {
+app.post("/api/songs", limitWrites, honeypot, async (req, res) => {
   const b = req.body || {};
   const song = trimStr(b.song, 120);
   const artist = trimStr(b.artist, 120);

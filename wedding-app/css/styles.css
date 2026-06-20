@@ -341,6 +341,36 @@ img { max-width: 100%; display: block; }
   background: var(--maroon); color: var(--white); font-size: 1.1rem;
 }
 .concierge__form button:hover { background: var(--maroon-deep); }
+.concierge__chips {
+  display: flex; flex-wrap: wrap; gap: 0.4rem; padding: 0.6rem 0.8rem 0.2rem;
+  background: var(--cream); border-top: 1px solid rgba(184,134,11,0.15);
+}
+.concierge__chip {
+  font-family: var(--sans); font-size: 0.78rem; color: var(--maroon);
+  padding: 0.4rem 0.75rem; border: 1.5px solid rgba(110,20,35,0.25); border-radius: 999px;
+  background: var(--white); cursor: pointer; transition: background 0.15s, color 0.15s;
+}
+.concierge__chip:hover, .concierge__chip:focus-visible { background: var(--maroon); color: var(--cream); border-color: var(--maroon); }
+
+/* ---------- Honeypot (spam trap — kept out of sight & off the tab order) ---------- */
+.hp { position: absolute; left: -9999px; width: 1px; height: 1px; overflow: hidden; }
+
+/* ---------- Skip link (a11y) ---------- */
+.skip-link {
+  position: fixed; top: 0; left: 50%; transform: translate(-50%, -120%);
+  z-index: 1000; background: var(--maroon); color: var(--cream);
+  padding: 0.65rem 1.1rem; border-radius: 0 0 12px 12px; font-family: var(--sans);
+  font-size: 0.9rem; text-decoration: none; box-shadow: var(--shadow);
+  transition: transform 0.18s ease;
+}
+.skip-link:focus { transform: translate(-50%, 0); outline: 2px solid var(--marigold); outline-offset: 2px; }
+
+/* ---------- Visible focus for keyboard users ---------- */
+:focus-visible {
+  outline: 2px solid var(--marigold); outline-offset: 2px; border-radius: 4px;
+}
+.tab:focus-visible, .appbar__more:focus-visible, .appbar__lang:focus-visible,
+.appbar__back:focus-visible { outline-offset: -2px; }
 
 /* ---------- RSVP ---------- */
 .rsvp {

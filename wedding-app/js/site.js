@@ -56,6 +56,11 @@
       en: "Hi! I'm the wedding concierge 💐 Ask me about events, dress codes, travel, or anything else about Priya & Sanjay's weekend.",
       hi: "नमस्ते! मैं विवाह सहायक हूँ 💐 कार्यक्रम, पहनावा, यात्रा या प्रिया और संजय के सप्ताहांत के बारे में कुछ भी पूछें।",
     },
+    "concierge.chip.dress": { en: "What should I wear?", hi: "मुझे क्या पहनना चाहिए?" },
+    "concierge.chip.travel": { en: "How do I get to Udaipur?", hi: "उदयपुर कैसे पहुँचूँ?" },
+    "concierge.chip.schedule": { en: "What's the schedule?", hi: "कार्यक्रम क्या है?" },
+    "concierge.chip.kids": { en: "Can I bring my kids?", hi: "क्या मैं बच्चों को ला सकता/सकती हूँ?" },
+    "a11y.skip": { en: "Skip to content", hi: "सामग्री पर जाएँ" },
     "offline": { en: "You're offline — showing a saved copy.", hi: "आप ऑफ़लाइन हैं — सहेजी गई प्रति दिखाई जा रही है।" },
     "toast.backOnline": { en: "Back online ✓", hi: "फिर से ऑनलाइन ✓" },
     "toast.remindersOn": { en: "You'll get day-of reminders 🔔", hi: "आपको कार्यक्रम के दिन रिमाइंडर मिलेंगे 🔔" },
@@ -328,6 +333,16 @@
   const isTab = TABS.some((t) => t.href === current);
   document.body.classList.add("app");
 
+  // Skip link → keyboard/screen-reader users can jump past the chrome.
+  const mainEl = document.querySelector("main");
+  if (mainEl && !mainEl.id) mainEl.id = "main";
+  const skip = document.createElement("a");
+  skip.className = "skip-link";
+  skip.href = "#" + (mainEl ? mainEl.id : "main");
+  skip.setAttribute("data-i18n", "a11y.skip");
+  skip.textContent = "Skip to content";
+  document.body.insertBefore(skip, document.body.firstChild);
+
   function el(html) {
     const t = document.createElement("template");
     t.innerHTML = html.trim();
@@ -359,7 +374,14 @@
     backBtn.addEventListener("click", () => (history.length > 1 ? history.back() : (location.href = "index.html")));
 
   const langBtn = document.getElementById("appbarLang");
-  const updateLangBtn = () => (langBtn.textContent = lang === "en" ? "हिं" : "EN");
+  const updateLangBtn = () => {
+    // Show the language you'll switch *to*, and announce it accessibly.
+    langBtn.textContent = lang === "en" ? "हिं" : "EN";
+    langBtn.setAttribute("lang", lang === "en" ? "hi" : "en");
+    const label = lang === "en" ? "हिंदी में बदलें" : "Switch to English";
+    langBtn.setAttribute("aria-label", label);
+    langBtn.setAttribute("title", label);
+  };
   updateLangBtn();
   langBtn.addEventListener("click", () => {
     lang = lang === "en" ? "hi" : "en";
@@ -375,8 +397,8 @@
     <nav class="tabbar" aria-label="Primary">
       ${TABS.map(
         (tb) =>
-          `<a class="tab ${tb.href === current ? "is-active" : ""}" href="${tb.href}">
-             <span class="tab__icon">${tb.icon}</span><span class="tab__label" data-i18n="${tb.key}">${tb.label}</span>
+          `<a class="tab ${tb.href === current ? "is-active" : ""}" href="${tb.href}"${tb.href === current ? ' aria-current="page"' : ""}>
+             <span class="tab__icon" aria-hidden="true">${tb.icon}</span><span class="tab__label" data-i18n="${tb.key}">${tb.label}</span>
            </a>`
       ).join("")}
     </nav>`);
@@ -593,6 +615,12 @@
           <button class="concierge__close" id="conciergeClose" aria-label="Close">&times;</button>
         </div>
         <div class="concierge__log" id="conciergeLog"></div>
+        <div class="concierge__chips" id="conciergeChips">
+          <button type="button" class="concierge__chip" data-q="concierge.chip.dress" data-i18n="concierge.chip.dress">What should I wear?</button>
+          <button type="button" class="concierge__chip" data-q="concierge.chip.travel" data-i18n="concierge.chip.travel">How do I get to Udaipur?</button>
+          <button type="button" class="concierge__chip" data-q="concierge.chip.schedule" data-i18n="concierge.chip.schedule">What's the schedule?</button>
+          <button type="button" class="concierge__chip" data-q="concierge.chip.kids" data-i18n="concierge.chip.kids">Can I bring my kids?</button>
+        </div>
         <form class="concierge__form" id="conciergeForm">
           <input type="text" id="conciergeInput" data-i18n-ph="concierge.ph" placeholder="e.g. What should I wear to the Sangeet?" autocomplete="off" />
           <button type="submit" aria-label="Send">→</button>
@@ -603,6 +631,7 @@
     const log = panel.querySelector("#conciergeLog");
     const form = panel.querySelector("#conciergeForm");
     const input = panel.querySelector("#conciergeInput");
+    const chips = panel.querySelector("#conciergeChips");
     const history = [];
     let greeted = false;
 
@@ -629,10 +658,11 @@
     }
     fab.addEventListener("click", () => toggle(!panel.classList.contains("open")));
     panel.querySelector("#conciergeClose").addEventListener("click", () => toggle(false));
-    form.addEventListener("submit", (e) => {
-      e.preventDefault();
-      const msg = input.value.trim();
+
+    function send(msg) {
+      msg = (msg || "").trim();
       if (!msg) return;
+      if (chips) chips.hidden = true; // hide suggestions once the chat starts
       bubble(msg, "user");
       history.push({ role: "user", content: msg });
       input.value = "";
@@ -650,6 +680,12 @@
         })
         .then((reply) => { typing.remove(); bubble(reply, "bot"); history.push({ role: "assistant", content: reply }); })
         .catch((err) => { typing.remove(); bubble(err.message, "bot"); });
-    });
+    }
+
+    form.addEventListener("submit", (e) => { e.preventDefault(); send(input.value); });
+    if (chips)
+      chips.querySelectorAll(".concierge__chip").forEach((c) =>
+        c.addEventListener("click", () => send(window.t ? window.t(c.getAttribute("data-q")) : c.textContent))
+      );
   }
 })();

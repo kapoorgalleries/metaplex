@@ -40,12 +40,13 @@
     e.preventDefault();
     const name = form.elements["name"].value.trim();
     const message = form.elements["message"].value.trim();
+    const website = form.elements["website"] ? form.elements["website"].value : "";
     if (!name || !message) return setStatus("Please add your name and a message.", "err");
     setStatus("Signing…", "");
     fetch("/api/guestbook", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name, message }),
+      body: JSON.stringify({ name, message, website }),
     })
       .then(async (r) => {
         const body = await r.json().catch(() => ({}));

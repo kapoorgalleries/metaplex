@@ -41,6 +41,7 @@
       artist: form.elements["artist"].value.trim(),
       by: form.elements["by"].value.trim(),
       note: form.elements["note"].value.trim(),
+      website: form.elements["website"] ? form.elements["website"].value : "",
     };
     if (!data.song) return setStatus("Please add a song title.", "err");
     setStatus("Adding…", "");

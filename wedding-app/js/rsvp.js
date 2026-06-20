@@ -107,6 +107,7 @@
       meal: form.elements["meal"].value,
       hotelBlock: form.elements["hotelBlock"].checked,
       note: form.elements["note"].value.trim(),
+      website: form.elements["website"] ? form.elements["website"].value : "",
     };
 
     const firstName = data.name.split(" ")[0];
