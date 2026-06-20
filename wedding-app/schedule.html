@@ -20,47 +20,49 @@
       <p data-i18n="sub.schedule.intro">Wear comfortable shoes, bring your dancing energy, and don't be shy with the buffet.</p>
     </section>
 
+    <div id="nowBanner" hidden style="max-width:1120px;margin:1.4rem auto 0;padding:0 6vw"></div>
+
     <section class="section">
       <div class="events">
         <article class="event-card reveal">
           <div class="event-card__icon">🌿</div>
-          <h3>Mehndi &amp; Haldi</h3>
+          <h3 data-i18n="ev.mehndi">Mehndi &amp; Haldi</h3>
           <p class="event-card__when">Fri, Oct 16 · 11:00 AM</p>
           <p class="event-card__where">The Courtyard, Hotel Lakend</p>
-          <p class="event-card__desc">Henna, turmeric, music and brunch. An intimate, colourful kick-off to the weekend.</p>
-          <p class="event-card__dress"><strong>Dress code:</strong> Bright florals &amp; yellows</p>
+          <p class="event-card__desc" data-i18n="sch.mehndi.desc">Henna, turmeric, music and brunch. An intimate, colourful kick-off to the weekend.</p>
+          <p class="event-card__dress" data-i18n-html="sch.mehndi.dress"><strong>Dress code:</strong> Bright florals &amp; yellows</p>
           <div class="event-card__actions" data-ev="mehndi"></div>
         </article>
         <article class="event-card reveal">
           <div class="event-card__icon">🎶</div>
-          <h3>Sangeet</h3>
+          <h3 data-i18n="ev.sangeet">Sangeet</h3>
           <p class="event-card__when">Fri, Oct 16 · 7:00 PM</p>
           <p class="event-card__where">Grand Ballroom, Hotel Lakend</p>
-          <p class="event-card__desc">An evening of choreographed chaos — family performances, a live DJ, and a dance floor that stays open late.</p>
-          <p class="event-card__dress"><strong>Dress code:</strong> Indian festive / cocktail</p>
+          <p class="event-card__desc" data-i18n="sch.sangeet.desc">An evening of choreographed chaos — family performances, a live DJ, and a dance floor that stays open late.</p>
+          <p class="event-card__dress" data-i18n-html="sch.sangeet.dress"><strong>Dress code:</strong> Indian festive / cocktail</p>
           <div class="event-card__actions" data-ev="sangeet"></div>
         </article>
         <article class="event-card event-card--feature reveal">
           <div class="event-card__icon">🪔</div>
-          <h3>Wedding Ceremony</h3>
+          <h3 data-i18n="ev.ceremony">Wedding Ceremony</h3>
           <p class="event-card__when">Sat, Oct 17 · 5:00 PM</p>
           <p class="event-card__where">Lakeside Mandap, Lake Pichola</p>
-          <p class="event-card__desc">The main event — the baraat, the pheras, and the vows, all at golden hour by the water.</p>
-          <p class="event-card__dress"><strong>Dress code:</strong> Traditional formal</p>
+          <p class="event-card__desc" data-i18n="sch.ceremony.desc">The main event — the baraat, the pheras, and the vows, all at golden hour by the water.</p>
+          <p class="event-card__dress" data-i18n-html="sch.ceremony.dress"><strong>Dress code:</strong> Traditional formal</p>
           <div class="event-card__actions" data-ev="ceremony"></div>
         </article>
         <article class="event-card reveal">
           <div class="event-card__icon">🥂</div>
-          <h3>Reception</h3>
+          <h3 data-i18n="ev.reception">Reception</h3>
           <p class="event-card__when">Sat, Oct 17 · 8:30 PM</p>
           <p class="event-card__where">Terrace Gardens, Lake Pichola</p>
-          <p class="event-card__desc">Dinner, drinks, toasts and one last dance to send us off into married life.</p>
-          <p class="event-card__dress"><strong>Dress code:</strong> Black-tie / formal</p>
+          <p class="event-card__desc" data-i18n="sch.reception.desc">Dinner, drinks, toasts and one last dance to send us off into married life.</p>
+          <p class="event-card__dress" data-i18n-html="sch.reception.dress"><strong>Dress code:</strong> Black-tie / formal</p>
           <div class="event-card__actions" data-ev="reception"></div>
         </article>
       </div>
       <div class="reveal" style="text-align:center;margin-top:2.5rem">
-        <button class="btn btn--outline" id="addCalendar">＋ Add weekend to calendar</button>
+        <button class="btn btn--outline" id="addCalendar" data-i18n="sch.addcal">＋ Add weekend to calendar</button>
       </div>
     </section>
   </main>
@@ -68,5 +70,6 @@
   <script src="js/site.js"></script>
   <script src="js/home.js"></script>
   <script src="js/schedule.js"></script>
+  <script src="js/now.js"></script>
 </body>
 </html>

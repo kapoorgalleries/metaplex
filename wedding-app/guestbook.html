@@ -24,17 +24,17 @@
       <div class="guestbook">
         <form class="guestbook__form" id="guestbookForm">
           <div class="rsvp__row">
-            <label class="field"><span>Your name <em>*</em></span><input type="text" name="name" required autocomplete="name" /></label>
+            <label class="field"><span data-i18n-html="gb.name">Your name <em>*</em></span><input type="text" name="name" required autocomplete="name" /></label>
           </div>
-          <label class="field"><span>Your message <em>*</em></span>
-            <textarea name="message" rows="4" maxlength="600" required placeholder="Wishing you a lifetime of love and laughter…"></textarea>
+          <label class="field"><span data-i18n-html="gb.msg">Your message <em>*</em></span>
+            <textarea name="message" rows="4" maxlength="600" required data-i18n-ph="gb.ph" placeholder="Wishing you a lifetime of love and laughter…"></textarea>
           </label>
-          <button type="submit" class="btn btn--solid">Sign the guestbook</button>
+          <button type="submit" class="btn btn--solid" data-i18n="gb.sign">Sign the guestbook</button>
           <p class="rsvp__status" id="guestbookStatus" role="status" aria-live="polite"></p>
         </form>
 
         <div class="guestbook__entries" id="guestbookEntries"></div>
-        <p class="guestbook__empty" id="guestbookEmpty" hidden>No messages yet — be the first to sign! ✍️</p>
+        <p class="guestbook__empty" id="guestbookEmpty" hidden data-i18n="gb.empty">No messages yet — be the first to sign! ✍️</p>
       </div>
     </section>
   </main>

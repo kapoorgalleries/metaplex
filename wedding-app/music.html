@@ -24,19 +24,19 @@
       <div class="songs">
         <form class="songs__form" id="songForm">
           <div class="rsvp__row">
-            <label class="field"><span>Song <em>*</em></span><input type="text" name="song" required maxlength="120" placeholder="e.g. Kala Chashma" /></label>
-            <label class="field"><span>Artist</span><input type="text" name="artist" maxlength="120" placeholder="e.g. Amar Arshi" /></label>
+            <label class="field"><span data-i18n-html="mu.song">Song <em>*</em></span><input type="text" name="song" required maxlength="120" data-i18n-ph="mu.song.ph" placeholder="e.g. Kala Chashma" /></label>
+            <label class="field"><span data-i18n="mu.artist">Artist</span><input type="text" name="artist" maxlength="120" data-i18n-ph="mu.artist.ph" placeholder="e.g. Amar Arshi" /></label>
           </div>
           <div class="rsvp__row">
-            <label class="field"><span>Your name</span><input type="text" name="by" maxlength="80" autocomplete="name" /></label>
-            <label class="field"><span>Dedication (optional)</span><input type="text" name="note" maxlength="200" placeholder="For the bride & groom!" /></label>
+            <label class="field"><span data-i18n="mu.name">Your name</span><input type="text" name="by" maxlength="80" autocomplete="name" /></label>
+            <label class="field"><span data-i18n="mu.ded">Dedication (optional)</span><input type="text" name="note" maxlength="200" data-i18n-ph="mu.ded.ph" placeholder="For the bride & groom!" /></label>
           </div>
-          <button type="submit" class="btn btn--solid">Add to the playlist</button>
+          <button type="submit" class="btn btn--solid" data-i18n="mu.add">Add to the playlist</button>
           <p class="rsvp__status" id="songStatus" role="status" aria-live="polite"></p>
         </form>
 
         <div class="songs__list" id="songList"></div>
-        <p class="guestbook__empty" id="songEmpty" hidden>No requests yet — get the party started! 🎶</p>
+        <p class="guestbook__empty" id="songEmpty" hidden data-i18n="mu.empty">No requests yet — get the party started! 🎶</p>
       </div>
     </section>
   </main>

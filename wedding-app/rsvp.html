@@ -23,22 +23,22 @@
     <section class="section">
       <form class="rsvp" id="rsvpForm" novalidate>
         <div class="rsvp__row">
-          <label class="field"><span>Full name <em>*</em></span><input type="text" name="name" required autocomplete="name" /></label>
-          <label class="field"><span>Email <em>*</em></span><input type="email" name="email" required autocomplete="email" /></label>
+          <label class="field"><span data-i18n-html="rs.name">Full name <em>*</em></span><input type="text" name="name" required autocomplete="name" /></label>
+          <label class="field"><span data-i18n-html="rs.email">Email <em>*</em></span><input type="email" name="email" required autocomplete="email" /></label>
         </div>
         <div class="rsvp__row">
-          <label class="field"><span>Will you attend? <em>*</em></span>
+          <label class="field"><span data-i18n-html="rs.attend">Will you attend? <em>*</em></span>
             <select name="attending" required>
-              <option value="">Please choose…</option>
-              <option value="yes">Joyfully accepts</option>
-              <option value="no">Regretfully declines</option>
+              <option value="" data-i18n="rs.choose">Please choose…</option>
+              <option value="yes" data-i18n="rs.yes">Joyfully accepts</option>
+              <option value="no" data-i18n="rs.no">Regretfully declines</option>
             </select>
           </label>
-          <label class="field"><span>Number of guests (incl. you)</span><input type="number" name="guests" min="1" max="10" value="1" /></label>
+          <label class="field"><span data-i18n="rs.guests">Number of guests (incl. you)</span><input type="number" name="guests" min="1" max="10" value="1" /></label>
         </div>
 
         <fieldset class="field field--group" data-when="yes">
-          <legend>Which events will you join?</legend>
+          <legend data-i18n="rs.events">Which events will you join?</legend>
           <div class="checks">
             <label><input type="checkbox" name="events" value="Mehndi & Haldi" /> Mehndi &amp; Haldi</label>
             <label><input type="checkbox" name="events" value="Sangeet" /> Sangeet</label>
@@ -48,30 +48,30 @@
         </fieldset>
 
         <div class="rsvp__row" data-when="yes">
-          <label class="field"><span>Meal preference</span>
+          <label class="field"><span data-i18n="rs.meal">Meal preference</span>
             <select name="meal">
-              <option value="">No preference</option>
+              <option value="" data-i18n="rs.meal.none">No preference</option>
               <option>Vegetarian</option><option>Vegan</option><option>Jain</option>
               <option>Non-vegetarian</option><option>Gluten-free</option>
             </select>
           </label>
-          <label class="field field--check"><input type="checkbox" name="hotelBlock" /><span>I'd like a room in the hotel block</span></label>
+          <label class="field field--check"><input type="checkbox" name="hotelBlock" /><span data-i18n="rs.hotel">I'd like a room in the hotel block</span></label>
         </div>
 
-        <label class="field" data-when="yes"><span>Song request &amp; a note for the couple</span>
-          <textarea name="note" rows="3" placeholder="Anything you'd like us to know — dietary needs, a song to play, a message…"></textarea>
+        <label class="field" data-when="yes"><span data-i18n="rs.note">Song request &amp; a note for the couple</span>
+          <textarea name="note" rows="3" data-i18n-ph="rs.note.ph" placeholder="Anything you'd like us to know — dietary needs, a song to play, a message…"></textarea>
         </label>
 
-        <button type="submit" class="btn btn--solid rsvp__submit">Send RSVP</button>
+        <button type="submit" class="btn btn--solid rsvp__submit" data-i18n="rs.send">Send RSVP</button>
         <p class="rsvp__status" id="rsvpStatus" role="status" aria-live="polite"></p>
       </form>
 
       <div class="registry reveal">
-        <h3>Gifts &amp; blessings</h3>
-        <p>Your presence is the only present we need. If you wish to give, we've set up a registry and a honeymoon fund.</p>
+        <h3 data-i18n="rs.gifts.t">Gifts &amp; blessings</h3>
+        <p data-i18n="rs.gifts.p">Your presence is the only present we need. If you wish to give, we've set up a registry and a honeymoon fund.</p>
         <div class="registry__links">
-          <a class="btn btn--outline btn--sm" href="#" onclick="return false">View registry</a>
-          <a class="btn btn--outline btn--sm" href="#" onclick="return false">Honeymoon fund</a>
+          <a class="btn btn--outline btn--sm" href="#" onclick="return false" data-i18n="rs.gifts.reg">View registry</a>
+          <a class="btn btn--outline btn--sm" href="#" onclick="return false" data-i18n="rs.gifts.hm">Honeymoon fund</a>
         </div>
       </div>
     </section>

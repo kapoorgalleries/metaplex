@@ -67,7 +67,11 @@ chat stays hidden.
   Uses Web Push + VAPID (`web-push`); the public key is exposed at `/api/push/key` and a
   `push` handler lives in the service worker.
 - **English / हिंदी** — a language toggle in the app bar localizes the whole app shell,
-  the home screen, and every page header (choice persists in `localStorage`).
+  the home screen, every page header, **and the page bodies** (story, schedule, travel,
+  things-to-do, wedding party, FAQ, and all the forms). Choice persists in `localStorage`.
+- **Day-of "Happening Now / Up Next"** — a live banner on the home & schedule pages that,
+  during the wedding weekend, shows the current or next event with a countdown
+  (`js/now.js`; preview any moment with `?now=<ISO>`).
 - **FAQ** accordion and a gift **registry** section.
 - Fully **responsive** with `prefers-reduced-motion` support and iOS safe-area insets.
 

@@ -739,3 +739,16 @@ body.app .concierge { bottom: calc(var(--tabbar-h) + 14px + env(safe-area-inset-
 }
 .appbar__lang:hover { background: rgba(253,247,238,0.26); }
 :lang(hi) .appbar__title, :lang(hi) .subhero h1, :lang(hi) .section__title { letter-spacing: 0; }
+
+/* Day-of "happening now / up next" banner */
+.nowbar {
+  display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap;
+  margin: 1.4rem 6vw 0; padding: 0.8rem 1.2rem; border-radius: 14px;
+  background: linear-gradient(135deg, var(--maroon), var(--maroon-deep)); color: var(--cream);
+  box-shadow: var(--shadow); text-decoration: none;
+}
+.nowbar--live { background: linear-gradient(135deg, #8a1b2e, var(--maroon-deep)); }
+.nowbar__label { font-size: 0.72rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--marigold-soft); }
+.nowbar__name { font-family: var(--display); font-size: 1.15rem; }
+.nowbar--done { justify-content: center; font-family: var(--serif); font-style: italic; font-size: 1.05rem; }
+.section + #nowBanner .nowbar, #nowBanner .nowbar { margin-left: 0; margin-right: 0; }

@@ -22,17 +22,17 @@
 
     <section class="section">
       <div class="share reveal" id="share">
-        <h3>📸 Share your photos</h3>
-        <p>Add a snap from any of the events — it'll appear in the gallery below.</p>
+        <h3 data-i18n="ph.share.t">📸 Share your photos</h3>
+        <p data-i18n="ph.share.p">Add a snap from any of the events — it'll appear in the gallery below.</p>
         <form class="share__form" id="photoForm">
           <div class="share__row">
-            <input type="text" name="uploader" placeholder="Your name (optional)" autocomplete="name" />
-            <input type="text" name="caption" placeholder="Caption (optional)" maxlength="200" />
+            <input type="text" name="uploader" data-i18n-ph="ph.share.name" placeholder="Your name (optional)" autocomplete="name" />
+            <input type="text" name="caption" data-i18n-ph="ph.share.cap" placeholder="Caption (optional)" maxlength="200" />
           </div>
           <div class="share__row share__cam">
             <input type="file" name="photo" id="photoInput" accept="image/*" required />
-            <button type="submit" class="btn btn--solid btn--sm">Upload photo</button>
-            <button type="button" class="btn btn--outline btn--sm" id="cameraBtn">📷 Take a photo</button>
+            <button type="submit" class="btn btn--solid btn--sm" data-i18n="ph.share.upload">Upload photo</button>
+            <button type="button" class="btn btn--outline btn--sm" id="cameraBtn" data-i18n="ph.share.cam">📷 Take a photo</button>
           </div>
           <input type="file" id="cameraInput" accept="image/*" capture="environment" hidden />
           <p class="share__status" id="photoStatus" role="status" aria-live="polite"></p>
@@ -40,7 +40,7 @@
       </div>
 
       <div class="gallery" id="galleryGrid" style="margin-top:2.5rem"></div>
-      <p class="guestbook__empty" id="galleryEmpty" hidden>No photos yet — be the first to share one!</p>
+      <p class="guestbook__empty" id="galleryEmpty" hidden data-i18n="ph.empty">No photos yet — be the first to share one!</p>
     </section>
   </main>
   <div id="site-footer"></div>
