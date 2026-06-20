@@ -45,16 +45,22 @@
 
   const form = document.getElementById("photoForm");
   const status = document.getElementById("photoStatus");
+  const fileInput = document.getElementById("photoInput");
+  const cameraBtn = document.getElementById("cameraBtn");
+  const cameraInput = document.getElementById("cameraInput");
   function setStatus(msg, kind) {
     status.textContent = msg;
     status.className = "share__status" + (kind ? " " + kind : "");
   }
-  form.addEventListener("submit", (e) => {
-    e.preventDefault();
-    const fileInput = document.getElementById("photoInput");
-    if (!fileInput.files || !fileInput.files[0]) return setStatus("Please choose a photo first.", "err");
+
+  function upload(file) {
+    if (!file) return setStatus("Please choose a photo first.", "err");
+    const data = new FormData();
+    data.append("uploader", form.elements["uploader"].value);
+    data.append("caption", form.elements["caption"].value);
+    data.append("photo", file);
     setStatus("Uploading…", "");
-    fetch("/api/photos", { method: "POST", body: new FormData(form) })
+    fetch("/api/photos", { method: "POST", body: data })
       .then(async (r) => {
         const body = await r.json().catch(() => ({}));
         if (!r.ok) throw new Error(body.error || "Upload failed.");
@@ -63,8 +69,16 @@
       .then((photo) => {
         addTile(photo, true);
         form.reset();
-        setStatus("Thank you! Your photo is now in the gallery. 💛", "ok");
+        setStatus("", "");
+        if (window.toast) window.toast("Your photo is in the gallery 💛", "ok");
       })
       .catch((err) => setStatus(err.message, "err"));
+  }
+
+  form.addEventListener("submit", (e) => {
+    e.preventDefault();
+    upload(fileInput.files && fileInput.files[0]);
   });
+  cameraBtn.addEventListener("click", () => cameraInput.click());
+  cameraInput.addEventListener("change", () => upload(cameraInput.files && cameraInput.files[0]));
 })();

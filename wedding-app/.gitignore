@@ -1,0 +1,4 @@
+# The repository root .gitignore ignores *.css (it targets Metaplex build output).
+# This wedding app ships hand-written CSS that MUST be versioned — re-include it.
+!css/styles.css
+!**/*.css

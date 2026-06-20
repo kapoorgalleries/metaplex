@@ -29,10 +29,12 @@
             <input type="text" name="uploader" placeholder="Your name (optional)" autocomplete="name" />
             <input type="text" name="caption" placeholder="Caption (optional)" maxlength="200" />
           </div>
-          <div class="share__row">
+          <div class="share__row share__cam">
             <input type="file" name="photo" id="photoInput" accept="image/*" required />
             <button type="submit" class="btn btn--solid btn--sm">Upload photo</button>
+            <button type="button" class="btn btn--outline btn--sm" id="cameraBtn">📷 Take a photo</button>
           </div>
+          <input type="file" id="cameraInput" accept="image/*" capture="environment" hidden />
           <p class="share__status" id="photoStatus" role="status" aria-live="polite"></p>
         </form>
       </div>

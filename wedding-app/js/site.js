@@ -21,6 +21,8 @@
     { href: "travel.html", label: "Travel & Stay", icon: "✈️" },
     { href: "things-to-do.html", label: "Things to Do", icon: "🛕" },
     { href: "party.html", label: "Wedding Party", icon: "💃" },
+    { href: "music.html", label: "Song Requests", icon: "🎵" },
+    { href: "registry.html", label: "Registry", icon: "🎁" },
     { href: "faq.html", label: "FAQ", icon: "❓" },
   ];
   const TITLES = {
@@ -33,6 +35,8 @@
     "travel.html": "Travel & Stay",
     "things-to-do.html": "Things to Do",
     "party.html": "Wedding Party",
+    "music.html": "Song Requests",
+    "registry.html": "Registry",
     "faq.html": "FAQ",
     "admin.html": "RSVP Dashboard",
   };
@@ -94,8 +98,10 @@
           ${MORE.map(
             (m) => `<a class="sheet__link" href="${m.href}"><span>${m.icon}</span>${m.label}</a>`
           ).join("")}
+          <button class="sheet__link" id="shareBtn" type="button"><span>🔗</span>Share this app</button>
         </div>
         <button class="btn btn--outline btn--sm sheet__install" id="installBtn" hidden>⬇ Add to Home Screen</button>
+        <p class="sheet__hint" id="iosHint" hidden>On iPhone: tap <strong>Share ⎋</strong> in Safari, then <strong>Add to Home Screen</strong>.</p>
       </div>
     </div>`);
   document.body.appendChild(sheet);
@@ -142,6 +148,26 @@
     openSheet(false);
   });
 
+  // iOS Safari never fires beforeinstallprompt — show a hint instead.
+  const isIOS = /iphone|ipad|ipod/i.test(navigator.userAgent);
+  const standalone = navigator.standalone || matchMedia("(display-mode: standalone)").matches;
+  if (isIOS && !standalone) document.getElementById("iosHint").hidden = false;
+
+  // Share the app (Web Share API → fallback to clipboard).
+  const shareBtn = document.getElementById("shareBtn");
+  shareBtn.addEventListener("click", async () => {
+    const shareData = { title: "Priya & Sanjay 2026", text: "Join us for Priya & Sanjay's wedding!", url: location.origin + "/" };
+    try {
+      if (navigator.share) {
+        await navigator.share(shareData);
+      } else {
+        await navigator.clipboard.writeText(shareData.url);
+        window.toast("Link copied to clipboard 🔗");
+      }
+      openSheet(false);
+    } catch (_) {/* user cancelled */}
+  });
+
   /* ---------- Scroll reveal ---------- */
   const io = new IntersectionObserver(
     (entries) =>
@@ -154,6 +180,17 @@
     { threshold: 0.1 }
   );
   document.querySelectorAll(".reveal").forEach((n) => io.observe(n));
+
+  /* ---------- Toast ---------- */
+  const toastEl = el(`<div class="toast" id="toast" role="status" aria-live="polite"></div>`);
+  document.body.appendChild(toastEl);
+  let toastTimer;
+  window.toast = (msg, kind) => {
+    toastEl.textContent = msg;
+    toastEl.className = "toast show" + (kind ? " toast--" + kind : "");
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => (toastEl.className = "toast"), 3200);
+  };
 
   /* ---------- Concierge ---------- */
   injectConcierge();

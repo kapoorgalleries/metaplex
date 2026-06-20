@@ -282,6 +282,31 @@ app.post("/api/guestbook", async (req, res) => {
 });
 
 /* =========================================================
+   Song requests (for the DJ)
+   ========================================================= */
+app.get("/api/songs", (_req, res) => {
+  res.json(readJson("songs.json").map((s) => ({ song: s.song, artist: s.artist, by: s.by, at: s.at })));
+});
+
+app.post("/api/songs", async (req, res) => {
+  const b = req.body || {};
+  const song = trimStr(b.song, 120);
+  const artist = trimStr(b.artist, 120);
+  const by = trimStr(b.by, 80);
+  const note = trimStr(b.note, 200);
+  if (!song) return res.status(400).json({ error: "Please add a song title." });
+
+  try {
+    const verdict = await moderateText(anthropic, `${song} — ${artist}. ${note}`);
+    if (!verdict.allowed) return res.status(422).json({ error: "That request wasn't approved. Try another song." });
+  } catch (_) {/* fail open */}
+
+  const entry = { song, artist, by, note, at: new Date().toISOString() };
+  appendJson("songs.json", entry);
+  res.status(201).json({ song: entry.song, artist: entry.artist, by: entry.by, at: entry.at });
+});
+
+/* =========================================================
    Admin (RSVP dashboard) — protected by ADMIN_PASSWORD
    ========================================================= */
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "";
@@ -297,6 +322,12 @@ function requireAdmin(req, res, next) {
 
 app.get("/api/rsvp", requireAdmin, (_req, res) => {
   res.json(readJson("rsvps.json"));
+});
+app.get("/api/admin/guestbook", requireAdmin, (_req, res) => {
+  res.json(readJson("guestbook.json"));
+});
+app.get("/api/admin/songs", requireAdmin, (_req, res) => {
+  res.json(readJson("songs.json"));
 });
 
 /* ========================================================= */
