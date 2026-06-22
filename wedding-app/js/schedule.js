@@ -21,9 +21,11 @@
     const ev = EVENTS[box.getAttribute("data-ev")];
     if (!ev) return;
 
+    const tr = (k, fb) => (window.t ? window.t(k) : fb);
     const cal = document.createElement("button");
     cal.className = "btn btn--outline";
-    cal.textContent = "＋ Calendar";
+    cal.setAttribute("data-i18n", "sch.cal");
+    cal.textContent = tr("sch.cal", "＋ Calendar");
     cal.addEventListener("click", () => {
       const url = URL.createObjectURL(new Blob([ics(ev)], { type: "text/calendar" }));
       const a = document.createElement("a");
@@ -43,14 +45,16 @@
       "&text=" + encodeURIComponent(`Priya & Sanjay — ${ev.title}`) +
       "&dates=" + ev.start + "/" + ev.end +
       "&location=" + encodeURIComponent(ev.loc);
-    gcal.textContent = "📅 Google";
+    gcal.setAttribute("data-i18n", "sch.gcal");
+    gcal.textContent = tr("sch.gcal", "📅 Google");
 
     const map = document.createElement("a");
     map.className = "btn btn--outline";
     map.target = "_blank";
     map.rel = "noopener";
     map.href = "https://www.google.com/maps/search/?api=1&query=" + encodeURIComponent(ev.map);
-    map.textContent = "📍 Map";
+    map.setAttribute("data-i18n", "sch.map");
+    map.textContent = tr("sch.map", "📍 Map");
 
     box.appendChild(cal);
     box.appendChild(gcal);

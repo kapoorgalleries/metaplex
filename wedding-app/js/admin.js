@@ -174,10 +174,86 @@
     URL.revokeObjectURL(url);
   });
 
+  /* ---------- Seating: auto-assign households into tables ---------- */
+  const seatsInput = document.getElementById("seatsPerTable");
+  const seatingSummary = document.getElementById("seatingSummary");
+
+  function renderSeatingSummary() {
+    const accepting = data.rsvps.filter((x) => x.attending === "yes");
+    const assigned = accepting.filter((x) => x.table);
+    const tables = {};
+    accepting.forEach((x) => {
+      if (!x.table) return;
+      tables[x.table] = (tables[x.table] || 0) + (parseInt(x.guests, 10) || 1);
+    });
+    const tableCount = Object.keys(tables).length;
+    seatingSummary.textContent = tableCount
+      ? `${tableCount} table${tableCount === 1 ? "" : "s"} · ${assigned.length}/${accepting.length} households seated`
+      : `${accepting.length} household${accepting.length === 1 ? "" : "s"} to seat`;
+  }
+
+  async function persistTables(updates) {
+    // updates: [{id, table}] — save sequentially so we don't hammer the server.
+    let ok = 0;
+    for (const u of updates) {
+      try {
+        const r = await fetch(`/api/admin/rsvp/${encodeURIComponent(u.id)}/table`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", ...headers() },
+          body: JSON.stringify({ table: u.table }),
+        });
+        if (r.ok) {
+          ok++;
+          const e = data.rsvps.find((x) => x.id === u.id);
+          if (e) e.table = u.table;
+        }
+      } catch (_) {/* keep going */}
+    }
+    return ok;
+  }
+
+  async function autoAssign() {
+    const seats = Math.max(2, Math.min(20, parseInt(seatsInput.value, 10) || 8));
+    const households = data.rsvps
+      .filter((x) => x.attending === "yes")
+      .map((x) => ({ id: x.id, size: Math.max(1, parseInt(x.guests, 10) || 1) }))
+      .sort((a, b) => b.size - a.size); // first-fit decreasing → fewer, fuller tables
+    if (!households.length) return window.toast && window.toast("No accepting guests to seat yet.", "err");
+    if (!confirm(`Auto-assign ${households.length} households into tables of ${seats}? This overwrites existing table numbers.`)) return;
+
+    const tables = []; // each: remaining seats
+    const updates = [];
+    for (const h of households) {
+      let idx = tables.findIndex((rem) => rem >= h.size);
+      if (idx === -1) { tables.push(seats); idx = tables.length - 1; }
+      tables[idx] -= h.size;
+      updates.push({ id: h.id, table: String(idx + 1) });
+    }
+    if (window.toast) window.toast("Assigning tables…");
+    const saved = await persistTables(updates);
+    renderTables();
+    renderSeatingSummary();
+    if (window.toast) window.toast(`Seated ${saved} households across ${tables.length} tables ✓`, "ok");
+  }
+
+  async function clearTables() {
+    const assigned = data.rsvps.filter((x) => x.attending === "yes" && x.table);
+    if (!assigned.length) return window.toast && window.toast("No tables assigned yet.", "err");
+    if (!confirm(`Clear table numbers for ${assigned.length} households?`)) return;
+    const saved = await persistTables(assigned.map((x) => ({ id: x.id, table: "" })));
+    renderTables();
+    renderSeatingSummary();
+    if (window.toast) window.toast(`Cleared ${saved} assignments`, "ok");
+  }
+
+  document.getElementById("autoAssignBtn").addEventListener("click", () => autoAssign());
+  document.getElementById("clearTablesBtn").addEventListener("click", () => clearTables());
+
   async function refresh() {
     await loadAll();
     renderStats();
     renderTables();
+    renderSeatingSummary();
   }
   document.getElementById("refreshBtn").addEventListener("click", () => refresh().catch((e) => window.toast && window.toast(e.message, "err")));
 

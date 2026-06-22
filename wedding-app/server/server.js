@@ -527,6 +527,20 @@ app.delete("/api/photos/:id", requireAdmin, async (req, res) => {
   }
 });
 
+/* =========================================================
+   Fallbacks
+   ========================================================= */
+// Unknown API route → JSON 404 (don't serve HTML to fetch() callers).
+app.use("/api", (_req, res) => res.status(404).json({ error: "Not found." }));
+
+// Any other unmatched GET → the styled 404 page (mirrors Cloudflare Pages).
+app.use((req, res) => {
+  if (req.method === "GET" && req.accepts("html")) {
+    return res.status(404).sendFile(path.join(SITE_ROOT, "404.html"));
+  }
+  res.status(404).json({ error: "Not found." });
+});
+
 /* ========================================================= */
 
 app.listen(PORT, () => {

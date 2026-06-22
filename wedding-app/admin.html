@@ -75,6 +75,15 @@
         </div>
 
         <div class="admin__pane" data-tab="rsvps">
+          <div class="admin__seating" id="seatingTool">
+            <span class="admin__seating-title">🍽️ Seating</span>
+            <label>Seats / table
+              <input type="number" id="seatsPerTable" min="2" max="20" value="8" />
+            </label>
+            <button class="btn btn--outline btn--sm" id="autoAssignBtn">Auto-assign tables</button>
+            <button class="btn btn--outline btn--sm" id="clearTablesBtn">Clear all</button>
+            <span class="admin__seating-summary" id="seatingSummary"></span>
+          </div>
           <div class="table-wrap"><table class="admin__table" id="tableRsvps">
             <thead><tr><th>Name</th><th>Email</th><th>Attending</th><th>Guests</th><th>Events</th><th>Meal</th><th>Hotel</th><th>Table</th><th>Note</th><th>When</th></tr></thead>
             <tbody></tbody>
