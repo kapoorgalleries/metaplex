@@ -21,6 +21,21 @@
   lightbox.querySelector(".lightbox__close").addEventListener("click", closeLightbox);
   document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeLightbox(); });
 
+  // Lazy-load tile background images so a large album doesn't fetch everything at once.
+  const lazyIO =
+    "IntersectionObserver" in window
+      ? new IntersectionObserver(
+          (entries, obs) =>
+            entries.forEach((e) => {
+              if (!e.isIntersecting) return;
+              const t = e.target;
+              if (t.dataset.bg) { t.style.backgroundImage = `url("${t.dataset.bg}")`; delete t.dataset.bg; }
+              obs.unobserve(t);
+            }),
+          { rootMargin: "300px" }
+        )
+      : null;
+
   const loved = new Set(JSON.parse(localStorage.getItem("lovedPhotos") || "[]"));
   function rememberLove(id) {
     loved.add(id);
@@ -30,7 +45,9 @@
   function addTile(photo, prepend) {
     const tile = document.createElement("div");
     tile.className = "gallery__tile gallery__tile--photo visible";
-    tile.style.backgroundImage = `url("${photo.url}")`;
+    // New uploads (prepend) are at the top and visible, so load now; otherwise lazy-load.
+    if (prepend || !lazyIO) tile.style.backgroundImage = `url("${photo.url}")`;
+    else tile.dataset.bg = photo.url;
     const cap = photo.caption || "";
     const who = photo.uploader ? `— ${photo.uploader}` : "";
     const isLoved = loved.has(photo.id);
@@ -56,6 +73,7 @@
 
     if (prepend) grid.insertBefore(tile, grid.firstChild);
     else grid.appendChild(tile);
+    if (tile.dataset.bg && lazyIO) lazyIO.observe(tile);
     count++;
     if (empty) empty.hidden = count > 0;
   }
