@@ -261,6 +261,7 @@ app.post("/api/photos", limitWrites, (req, res) => {
         uploader: trim(req.body.uploader, 80) || "A guest",
         caption,
         loves: 0,
+        comments: [],
         uploadedAt: new Date().toISOString(),
       };
       await storage.appendManifest(entry);
@@ -270,6 +271,40 @@ app.post("/api/photos", limitWrites, (req, res) => {
       res.status(502).json({ error: "Upload failed. Please try again." });
     }
   });
+});
+
+// Add a comment to a photo (public, moderated, rate-limited, honeypot-trapped).
+app.post("/api/photos/:id/comments", limitWrites, honeypot, async (req, res) => {
+  const name = trim(req.body && req.body.name, 80) || "A guest";
+  const text = trim(req.body && req.body.text, 300);
+  if (!text) return res.status(400).json({ error: "Please write a comment." });
+
+  try {
+    const verdict = await moderateText(anthropic, text);
+    if (!verdict.allowed) {
+      return res.status(422).json({ error: "Thanks! That comment wasn't approved for the public gallery." });
+    }
+  } catch (_) {/* fail open */}
+
+  try {
+    const list = await storage.readManifest();
+    const entry = list.find((p) => p.id === req.params.id);
+    if (!entry) return res.status(404).json({ error: "Photo not found." });
+    const comment = {
+      id: `c${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`,
+      name,
+      text,
+      at: new Date().toISOString(),
+    };
+    entry.comments = Array.isArray(entry.comments) ? entry.comments : [];
+    entry.comments.push(comment);
+    if (entry.comments.length > 300) entry.comments = entry.comments.slice(-300);
+    await storage.writeManifest(list);
+    res.status(201).json(comment);
+  } catch (e) {
+    console.error("Comment error:", e?.message || e);
+    res.status(502).json({ error: "Could not post that comment." });
+  }
 });
 
 // Heart a photo (no auth — simple engagement; client de-dupes per device).
@@ -401,6 +436,7 @@ app.get("/api/rsvp/mine", (req, res) => {
       meal: r.meal || "",
       hotelBlock: Boolean(r.hotelBlock),
       note: r.note || "",
+      table: r.table || "",
     },
   });
 });

@@ -21,6 +21,7 @@
     "title.party": { en: "Wedding Party", hi: "परिवार और मित्र" },
     "title.music": { en: "Song Requests", hi: "गानों की फ़रमाइश" },
     "title.seating": { en: "Find Your Seat", hi: "अपनी सीट खोजें" },
+    "title.pass": { en: "Event Pass", hi: "इवेंट पास" },
     "title.registry": { en: "Registry", hi: "उपहार सूची" },
     "title.faq": { en: "FAQ", hi: "सामान्य प्रश्न" },
     "title.admin": { en: "RSVP Dashboard", hi: "उपस्थिति डैशबोर्ड" },
@@ -38,6 +39,7 @@
     "more.party": { en: "Wedding Party", hi: "परिवार और मित्र" },
     "more.music": { en: "Song Requests", hi: "गानों की फ़रमाइश" },
     "more.seating": { en: "Find Your Seat", hi: "अपनी सीट खोजें" },
+    "more.pass": { en: "Event Pass", hi: "इवेंट पास" },
     "more.registry": { en: "Registry", hi: "उपहार सूची" },
     "more.faq": { en: "FAQ", hi: "सामान्य प्रश्न" },
     "action.share": { en: "Share this app", hi: "ऐप साझा करें" },
@@ -61,6 +63,14 @@
     "concierge.chip.schedule": { en: "What's the schedule?", hi: "कार्यक्रम क्या है?" },
     "concierge.chip.kids": { en: "Can I bring my kids?", hi: "क्या मैं बच्चों को ला सकता/सकती हूँ?" },
     "a11y.skip": { en: "Skip to content", hi: "सामग्री पर जाएँ" },
+    "welcome.title": { en: "Welcome 🪔", hi: "स्वागत है 🪔" },
+    "welcome.sub": { en: "Everything for Priya & Sanjay's weekend, in your pocket.", hi: "प्रिया और संजय के सप्ताहांत की हर बात, आपकी जेब में।" },
+    "welcome.f1": { en: "💌 RSVP — and update it anytime", hi: "💌 उपस्थिति दर्ज करें — और कभी भी बदलें" },
+    "welcome.f2": { en: "📸 Share photos & leave comments", hi: "📸 तस्वीरें साझा करें और टिप्पणी करें" },
+    "welcome.f3": { en: "💬 Ask the concierge anything", hi: "💬 सहायक से कुछ भी पूछें" },
+    "welcome.f4": { en: "🔔 Turn on day-of reminders", hi: "🔔 कार्यक्रम के दिन के रिमाइंडर चालू करें" },
+    "welcome.f5": { en: "🌐 Switch to हिंदी anytime", hi: "🌐 कभी भी English में बदलें" },
+    "welcome.cta": { en: "Start exploring", hi: "शुरू करें" },
     "offline": { en: "You're offline — showing a saved copy.", hi: "आप ऑफ़लाइन हैं — सहेजी गई प्रति दिखाई जा रही है।" },
     "toast.backOnline": { en: "Back online ✓", hi: "फिर से ऑनलाइन ✓" },
     "toast.remindersOn": { en: "You'll get day-of reminders 🔔", hi: "आपको कार्यक्रम के दिन रिमाइंडर मिलेंगे 🔔" },
@@ -117,6 +127,24 @@
     "sub.rsvp.intro": { en: "Kindly respond by <strong>August 15, 2026</strong>. One submission per household is perfect.", hi: "कृपया <strong>15 अगस्त 2026</strong> तक उत्तर दें। प्रति परिवार एक प्रतिक्रिया उत्तम है।" },
     "sub.seating.kicker": { en: "At the reception", hi: "रिसेप्शन में" },
     "sub.seating.intro": { en: "Enter your name to find your table for the reception dinner.", hi: "रिसेप्शन डिनर के लिए अपनी मेज़ खोजने हेतु अपना नाम दर्ज करें।" },
+    // Event Pass
+    "sub.pass.kicker": { en: "Your digital pass", hi: "आपका डिजिटल पास" },
+    "sub.pass.intro": { en: "Pull up your personal pass — your events, table, and a quick add-to-calendar.", hi: "अपना निजी पास देखें — आपके कार्यक्रम, मेज़, और कैलेंडर में जोड़ने का आसान तरीका।" },
+    "pass.label": { en: "The email you RSVP'd with", hi: "वह ईमेल जिससे आपने उपस्थिति दर्ज की" },
+    "pass.find": { en: "Get my pass", hi: "मेरा पास पाएँ" },
+    "pass.searching": { en: "Looking…", hi: "खोज रहे हैं…" },
+    "pass.none": { en: "We couldn't find an RSVP for that email. Have you RSVP'd yet?", hi: "उस ईमेल के लिए कोई उपस्थिति नहीं मिली। क्या आपने उपस्थिति दर्ज की है?" },
+    "pass.notyes": { en: "Your RSVP is marked as not attending. Update it on the RSVP page if that's changed.", hi: "आपकी उपस्थिति 'नहीं आ रहे' के रूप में दर्ज है। यदि बदला हो तो RSVP पृष्ठ पर अपडेट करें।" },
+    "pass.needEmail": { en: "Enter your email.", hi: "अपना ईमेल दर्ज करें।" },
+    "pass.err": { en: "Something went wrong. Please try again.", hi: "कुछ गड़बड़ हुई। कृपया पुनः प्रयास करें।" },
+    "pass.admits": { en: "Admits", hi: "प्रवेश" },
+    "pass.events": { en: "Your events", hi: "आपके कार्यक्रम" },
+    "pass.allevents": { en: "All celebrations", hi: "सभी समारोह" },
+    "pass.table": { en: "Table", hi: "मेज़" },
+    "pass.tablePending": { en: "Assigned closer to the day", hi: "कार्यक्रम के नज़दीक तय होगी" },
+    "pass.addcal": { en: "＋ Add my events to calendar", hi: "＋ मेरे कार्यक्रम कैलेंडर में जोड़ें" },
+    "pass.savehint": { en: "Tip: screenshot this pass to keep it handy.", hi: "सुझाव: इस पास का स्क्रीनशॉट लेकर सहेज लें।" },
+    "pass.guest": { en: "Guest", hi: "अतिथि" },
     // Seating page
     "seat.label": { en: "Your name", hi: "आपका नाम" },
     "seat.find": { en: "Find my table", hi: "मेरी मेज़ खोजें" },
@@ -224,6 +252,12 @@
     "ph.share.upload": { en: "Upload photo", hi: "तस्वीर अपलोड करें" },
     "ph.share.cam": { en: "📷 Take a photo", hi: "📷 फ़ोटो लें" },
     "ph.empty": { en: "No photos yet — be the first to share one!", hi: "अभी कोई तस्वीर नहीं — पहले साझा करने वाले बनें!" },
+    "ph.cmt.none": { en: "No comments yet — say something kind!", hi: "अभी कोई टिप्पणी नहीं — कुछ अच्छा लिखें!" },
+    "ph.cmt.name": { en: "Your name", hi: "आपका नाम" },
+    "ph.cmt.ph": { en: "Add a comment…", hi: "एक टिप्पणी जोड़ें…" },
+    "ph.cmt.posting": { en: "Posting…", hi: "भेजा जा रहा है…" },
+    "ph.cmt.need": { en: "Write a comment first.", hi: "पहले एक टिप्पणी लिखें।" },
+    "ph.cmt.guest": { en: "A guest", hi: "एक अतिथि" },
     "gb.name": { en: "Your name <em>*</em>", hi: "आपका नाम <em>*</em>" },
     "gb.msg": { en: "Your message <em>*</em>", hi: "आपका संदेश <em>*</em>" },
     "gb.ph": { en: "Wishing you a lifetime of love and laughter…", hi: "आपको जीवनभर प्यार और हँसी की शुभकामनाएँ…" },
@@ -320,6 +354,7 @@
     { href: "party.html", label: "Wedding Party", icon: "💃", key: "more.party" },
     { href: "music.html", label: "Song Requests", icon: "🎵", key: "more.music" },
     { href: "seating.html", label: "Find Your Seat", icon: "🍽️", key: "more.seating" },
+    { href: "pass.html", label: "Event Pass", icon: "🎟️", key: "more.pass" },
     { href: "registry.html", label: "Registry", icon: "🎁", key: "more.registry" },
     { href: "faq.html", label: "FAQ", icon: "❓", key: "more.faq" },
   ];
@@ -335,6 +370,7 @@
     "party.html": "Wedding Party",
     "music.html": "Song Requests",
     "seating.html": "Find Your Seat",
+    "pass.html": "Event Pass",
     "registry.html": "Registry",
     "faq.html": "FAQ",
     "admin.html": "RSVP Dashboard",
@@ -614,8 +650,42 @@
   /* ---------- Concierge ---------- */
   injectConcierge();
 
+  /* ---------- First-visit welcome ---------- */
+  injectWelcome();
+
   /* ---------- Apply translations once chrome + page DOM are present ---------- */
   applyI18n();
+
+  function injectWelcome() {
+    if (localStorage.getItem("welcomed")) return;
+    const w = el(`
+      <div class="sheet welcome" id="welcomeSheet" hidden>
+        <div class="sheet__backdrop" id="welcomeBackdrop"></div>
+        <div class="sheet__panel" role="dialog" aria-label="Welcome" aria-modal="true">
+          <div class="sheet__grip"></div>
+          <h2 class="welcome__title" data-i18n="welcome.title">Welcome 🪔</h2>
+          <p class="welcome__sub" data-i18n="welcome.sub">Everything for Priya & Sanjay's weekend, in your pocket.</p>
+          <ul class="welcome__list">
+            <li data-i18n="welcome.f1">💌 RSVP — and update it anytime</li>
+            <li data-i18n="welcome.f2">📸 Share photos & leave comments</li>
+            <li data-i18n="welcome.f3">💬 Ask the concierge anything</li>
+            <li data-i18n="welcome.f4">🔔 Turn on day-of reminders</li>
+            <li data-i18n="welcome.f5">🌐 Switch to हिंदी anytime</li>
+          </ul>
+          <button class="btn btn--solid welcome__cta" id="welcomeCta" data-i18n="welcome.cta">Start exploring</button>
+        </div>
+      </div>`);
+    document.body.appendChild(w);
+    const openW = (open) => {
+      w.hidden = false;
+      requestAnimationFrame(() => w.classList.toggle("open", open));
+      if (!open) setTimeout(() => (w.hidden = true), 250);
+    };
+    const dismiss = () => { localStorage.setItem("welcomed", "1"); openW(false); };
+    w.querySelector("#welcomeCta").addEventListener("click", dismiss);
+    w.querySelector("#welcomeBackdrop").addEventListener("click", dismiss);
+    setTimeout(() => openW(true), 650);
+  }
 
   function injectConcierge() {
     const fab = el(`<button class="concierge__fab" id="conciergeFab" aria-label="Ask the wedding concierge" hidden>💬</button>`);

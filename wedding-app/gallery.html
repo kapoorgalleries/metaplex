@@ -60,8 +60,23 @@
   <div id="site-footer"></div>
 
   <div class="lightbox" id="lightbox" aria-hidden="true">
-    <button class="lightbox__close" aria-label="Close">&times;</button>
-    <div class="lightbox__stage" id="lightboxStage"></div>
+    <div class="lightbox__panel">
+      <button class="lightbox__close" aria-label="Close">&times;</button>
+      <div class="lightbox__stage" id="lightboxStage"></div>
+      <div class="lightbox__side">
+        <p class="lightbox__cap" id="lightboxCap"></p>
+        <div class="lightbox__comments" id="lightboxComments"></div>
+        <form class="lightbox__form" id="commentForm">
+          <div class="hp" aria-hidden="true"><label>Website<input type="text" name="website" tabindex="-1" autocomplete="off" /></label></div>
+          <input type="text" id="commentName" data-i18n-ph="ph.cmt.name" placeholder="Your name" maxlength="80" autocomplete="name" />
+          <div class="lightbox__cmtrow">
+            <input type="text" id="commentText" data-i18n-ph="ph.cmt.ph" placeholder="Add a comment…" maxlength="300" />
+            <button type="submit" aria-label="Post comment">→</button>
+          </div>
+          <p class="lightbox__cstatus" id="commentStatus" role="status" aria-live="polite"></p>
+        </form>
+      </div>
+    </div>
   </div>
 
   <script src="js/site.js"></script>

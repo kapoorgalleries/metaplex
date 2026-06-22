@@ -5,21 +5,94 @@
   const empty = document.getElementById("galleryEmpty");
   const lightbox = document.getElementById("lightbox");
   const stage = document.getElementById("lightboxStage");
+  const capEl = document.getElementById("lightboxCap");
+  const commentsEl = document.getElementById("lightboxComments");
+  const commentForm = document.getElementById("commentForm");
+  const commentName = document.getElementById("commentName");
+  const commentText = document.getElementById("commentText");
+  const commentStatus = document.getElementById("commentStatus");
+  const tr = (k, fb) => (window.t ? window.t(k) : fb);
   let count = 0;
+  let activePhoto = null;
+
+  function renderComments(photo) {
+    const list = Array.isArray(photo.comments) ? photo.comments : [];
+    if (!list.length) {
+      commentsEl.innerHTML = `<p class="lightbox__nocmt">${tr("ph.cmt.none", "No comments yet — say something kind!")}</p>`;
+      return;
+    }
+    commentsEl.innerHTML = list
+      .map(
+        (c) =>
+          `<div class="lightbox__cmt"><span class="lightbox__cmt-by">${window.escapeHtml(c.name || "A guest")}</span>` +
+          `<span class="lightbox__cmt-text">${window.escapeHtml(c.text)}</span></div>`
+      )
+      .join("");
+    commentsEl.scrollTop = commentsEl.scrollHeight;
+  }
 
   function openPhoto(photo) {
+    activePhoto = photo;
     stage.style.background = `#2c1a16 url("${photo.url}") center/contain no-repeat`;
     stage.textContent = "";
+    const cap = photo.caption || "";
+    const who = photo.uploader ? `— ${photo.uploader}` : "";
+    capEl.textContent = `${cap} ${who}`.trim();
+    capEl.hidden = !capEl.textContent;
+    commentStatus.textContent = "";
+    commentStatus.className = "lightbox__cstatus";
+    renderComments(photo);
     lightbox.classList.add("open");
     lightbox.setAttribute("aria-hidden", "false");
   }
   function closeLightbox() {
     lightbox.classList.remove("open");
     lightbox.setAttribute("aria-hidden", "true");
+    activePhoto = null;
   }
   lightbox.addEventListener("click", (e) => { if (e.target === lightbox) closeLightbox(); });
   lightbox.querySelector(".lightbox__close").addEventListener("click", closeLightbox);
-  document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeLightbox(); });
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape" && lightbox.classList.contains("open")) closeLightbox(); });
+
+  commentForm.addEventListener("submit", (e) => {
+    e.preventDefault();
+    if (!activePhoto) return;
+    const text = commentText.value.trim();
+    if (!text) { commentStatus.textContent = tr("ph.cmt.need", "Write a comment first."); commentStatus.className = "lightbox__cstatus err"; return; }
+    const payload = {
+      name: commentName.value.trim() || (window.t ? window.t("ph.cmt.guest") : "A guest"),
+      text,
+      website: commentForm.elements["website"] ? commentForm.elements["website"].value : "",
+    };
+    commentStatus.textContent = tr("ph.cmt.posting", "Posting…");
+    commentStatus.className = "lightbox__cstatus";
+    const photo = activePhoto;
+    fetch(`/api/photos/${encodeURIComponent(photo.id)}/comments`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    })
+      .then(async (r) => {
+        const body = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(body.error || "Could not post that comment.");
+        return body;
+      })
+      .then((comment) => {
+        photo.comments = Array.isArray(photo.comments) ? photo.comments : [];
+        photo.comments.push(comment);
+        if (activePhoto === photo) renderComments(photo);
+        updateTileCommentCount(photo);
+        commentText.value = "";
+        commentStatus.textContent = "";
+      })
+      .catch((err) => { commentStatus.textContent = err.message; commentStatus.className = "lightbox__cstatus err"; });
+  });
+
+  function updateTileCommentCount(photo) {
+    const el = grid.querySelector(`.gallery__cmtcount[data-id="${photo.id}"]`);
+    const n = (photo.comments || []).length;
+    if (el) { el.textContent = n; el.hidden = n === 0; }
+  }
 
   // Lazy-load tile background images so a large album doesn't fetch everything at once.
   const lazyIO =
@@ -51,9 +124,11 @@
     const cap = photo.caption || "";
     const who = photo.uploader ? `— ${photo.uploader}` : "";
     const isLoved = loved.has(photo.id);
+    const nComments = (photo.comments || []).length;
     tile.innerHTML =
       `<button class="gallery__love${isLoved ? " is-loved" : ""}" aria-label="Love this photo">` +
       `<span class="gallery__heart">♥</span><span class="gallery__loves">${photo.loves || 0}</span></button>` +
+      `<span class="gallery__cmtbadge" title="Comments">💬 <span class="gallery__cmtcount" data-id="${photo.id}"${nComments ? "" : " hidden"}>${nComments}</span></span>` +
       `<span class="gallery__caption">${window.escapeHtml(cap)} ${window.escapeHtml(who)}</span>`;
     tile.addEventListener("click", () => openPhoto(photo));
 

@@ -249,11 +249,61 @@
   document.getElementById("autoAssignBtn").addEventListener("click", () => autoAssign());
   document.getElementById("clearTablesBtn").addEventListener("click", () => clearTables());
 
+  /* ---------- Catering: dietary headcounts for the caterer ---------- */
+  const mealSummaryEl = document.getElementById("mealSummary");
+
+  function mealTally() {
+    const accepting = data.rsvps.filter((x) => x.attending === "yes");
+    const meals = {}; // label -> { households, heads }
+    accepting.forEach((x) => {
+      const label = (x.meal && x.meal.trim()) || "No preference";
+      const heads = parseInt(x.guests, 10) || 1;
+      if (!meals[label]) meals[label] = { households: 0, heads: 0 };
+      meals[label].households += 1;
+      meals[label].heads += heads;
+    });
+    const totalHeads = accepting.reduce((n, x) => n + (parseInt(x.guests, 10) || 1), 0);
+    const hotel = accepting.filter((x) => x.hotelBlock).length;
+    // Most specific diets first; "No preference" last.
+    const order = Object.keys(meals).sort((a, b) => (a === "No preference" ? 1 : b === "No preference" ? -1 : a.localeCompare(b)));
+    return { meals, order, totalHeads, hotel };
+  }
+
+  function renderCatering() {
+    const { meals, order, totalHeads, hotel } = mealTally();
+    if (!totalHeads) {
+      mealSummaryEl.innerHTML = `<p style="color:var(--muted)">No accepting guests yet.</p>`;
+      return;
+    }
+    const chips = order
+      .map((label) => `<div class="admin__meal"><strong>${meals[label].heads}</strong><span>${esc(label)}</span><em>${meals[label].households} hh</em></div>`)
+      .join("");
+    mealSummaryEl.innerHTML =
+      chips +
+      `<div class="admin__meal admin__meal--total"><strong>${totalHeads}</strong><span>Total plates</span><em>${hotel} want hotel</em></div>`;
+  }
+
+  document.getElementById("exportMeals").addEventListener("click", () => {
+    const { meals, order, totalHeads, hotel } = mealTally();
+    const rows = [["Meal preference", "Households", "Guests (plates)"]];
+    order.forEach((label) => rows.push([label, meals[label].households, meals[label].heads]));
+    rows.push(["TOTAL", "", totalHeads]);
+    rows.push(["Hotel-block requests", hotel, ""]);
+    const csv = rows.map((r) => r.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(",")).join("\r\n");
+    const url = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "catering-priya-sanjay-2026.csv";
+    a.click();
+    URL.revokeObjectURL(url);
+  });
+
   async function refresh() {
     await loadAll();
     renderStats();
     renderTables();
     renderSeatingSummary();
+    renderCatering();
   }
   document.getElementById("refreshBtn").addEventListener("click", () => refresh().catch((e) => window.toast && window.toast(e.message, "err")));
 

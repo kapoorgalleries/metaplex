@@ -1,5 +1,5 @@
 /* Priya & Sanjay 2026 — service worker (offline app shell) */
-const CACHE = "psw-2026-v8";
+const CACHE = "psw-2026-v9";
 const SHELL = [
   "index.html",
   "404.html",
@@ -15,6 +15,7 @@ const SHELL = [
   "faq.html",
   "rsvp.html",
   "seating.html",
+  "pass.html",
   "css/styles.css",
   "js/site.js",
   "js/home.js",
@@ -24,6 +25,7 @@ const SHELL = [
   "js/guestbook.js",
   "js/music.js",
   "js/seating.js",
+  "js/pass.js",
   "js/now.js",
   "manifest.json",
   "icons/icon-192.png",
