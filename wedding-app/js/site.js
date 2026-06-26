@@ -623,7 +623,15 @@
       }),
     { threshold: 0.1 }
   );
-  document.querySelectorAll(".reveal").forEach((n) => io.observe(n));
+  // Stagger reveals that share a parent (e.g. card grids) so they cascade in.
+  document.querySelectorAll(".reveal").forEach((n) => {
+    const sibs = n.parentElement
+      ? Array.prototype.filter.call(n.parentElement.children, (c) => c.classList.contains("reveal"))
+      : [n];
+    const idx = sibs.indexOf(n);
+    if (idx > 0) n.style.transitionDelay = Math.min(idx, 6) * 80 + "ms";
+    io.observe(n);
+  });
 
   /* ---------- Toast ---------- */
   const toastEl = el(`<div class="toast" id="toast" role="status" aria-live="polite"></div>`);

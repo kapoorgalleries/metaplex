@@ -22,6 +22,9 @@
   --serif: "Cormorant Garamond", Georgia, serif;
   --display: "Marcellus", "Cormorant Garamond", serif;
   --sans: "Jost", system-ui, sans-serif;
+
+  /* Refined ease-out for entrances (easeOutQuint-ish) */
+  --ease: cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -57,6 +60,7 @@ img { max-width: 100%; display: block; }
   transition: transform 0.2s ease, box-shadow 0.2s ease, background 0.2s ease, color 0.2s ease;
 }
 .btn:hover { transform: translateY(-2px); }
+.btn:active { transform: translateY(0) scale(0.97); transition-duration: 0.08s; }
 .btn--solid {
   background: linear-gradient(135deg, var(--maroon), var(--maroon-deep));
   color: var(--white);
@@ -486,8 +490,46 @@ label[data-when].show { display: flex; }
 }
 
 /* ---------- Reveal animation ---------- */
-.reveal { opacity: 0; transform: translateY(24px); transition: opacity 0.7s ease, transform 0.7s ease; }
+.reveal { opacity: 0; transform: translateY(20px); transition: opacity 0.8s var(--ease), transform 0.8s var(--ease); }
 .reveal.visible { opacity: 1; transform: none; }
+
+/* =========================================================
+   Motion system — subtle, elegant entrances + micro-interactions
+   (all neutralized by the prefers-reduced-motion block below)
+   ========================================================= */
+@keyframes riseIn { from { opacity: 0; transform: translateY(22px); } to { opacity: 1; transform: none; } }
+@keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+@keyframes mandalaIn { from { opacity: 0; transform: scale(1.12); } to { opacity: 0.7; transform: none; } }
+@keyframes photoIn { from { opacity: 0.25; transform: scale(1.04); } to { opacity: 1; transform: none; } }
+@keyframes chromeFade { from { opacity: 0; } to { opacity: 1; } }
+
+/* Whole page eases in on load */
+.page { animation: fadeIn 0.5s ease both; }
+
+/* Hero: cinematic staggered entrance */
+.hero__mandala { animation: mandalaIn 1.6s var(--ease) both; }
+.hero__inner > * { animation: riseIn 0.9s var(--ease) both; }
+.hero__eyebrow { animation-delay: 0.10s; }
+.hero__names   { animation-delay: 0.22s; }
+.hero__tag     { animation-delay: 0.38s; }
+.hero__date    { animation-delay: 0.52s; }
+.countdown     { animation-delay: 0.66s; }
+.hero__btn     { animation-delay: 0.80s; }
+.hero__stats   { animation-delay: 0.90s; }
+.hero__scroll  { opacity: 0; animation: fadeIn 0.6s ease 1.15s both, bob 2s ease-in-out 1.7s infinite; }
+
+/* Inner pages: the header eases in the same way */
+.subhero > * { animation: riseIn 0.8s var(--ease) both; }
+.subhero__kicker { animation-delay: 0.05s; }
+.subhero h1 { animation-delay: 0.16s; }
+.subhero p  { animation-delay: 0.30s; }
+
+/* App chrome fades in gently on first paint */
+.appbar { animation: chromeFade 0.5s ease both; }
+.tabbar { animation: chromeFade 0.5s ease 0.08s both; }
+
+/* Gallery photos fade/scale in as they lazy-load */
+.gallery__tile.is-loaded { animation: photoIn 0.55s var(--ease); }
 
 /* ---------- Responsive ---------- */
 @media (max-width: 760px) {
@@ -506,11 +548,15 @@ label[data-when].show { display: flex; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
     animation-duration: 0.01ms !important;
+    animation-delay: 0ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
+    transition-delay: 0ms !important;
     scroll-behavior: auto !important;
   }
   .reveal { opacity: 1 !important; transform: none !important; }
+  /* Entrances resolve to their visible end-state instantly */
+  .hero__inner > *, .subhero > *, .hero__mandala, .hero__scroll, .page { opacity: 1 !important; transform: none !important; }
 }
 
 /* =========================================================
@@ -675,7 +721,12 @@ body.app .nav { display: none !important; } /* legacy desktop nav, unused */
 .tab__icon { font-size: 1.35rem; line-height: 1; filter: grayscale(0.4); transition: transform 0.15s ease; }
 .tab.is-active { color: var(--maroon); font-weight: 500; }
 .tab.is-active .tab__icon { filter: none; transform: translateY(-2px); }
-.tab.is-active::before { content: ""; position: absolute; top: 0; width: 28px; height: 3px; border-radius: 0 0 3px 3px; background: var(--marigold); }
+.tab:active .tab__icon { transform: scale(0.88); }
+.tab.is-active::before {
+  content: ""; position: absolute; top: 0; width: 28px; height: 3px; border-radius: 0 0 3px 3px; background: var(--marigold);
+  transform-origin: center; animation: tabBar 0.45s var(--ease) 0.1s both;
+}
+@keyframes tabBar { from { transform: scaleX(0); opacity: 0; } to { transform: scaleX(1); opacity: 1; } }
 .tab { position: relative; }
 
 /* More sheet */

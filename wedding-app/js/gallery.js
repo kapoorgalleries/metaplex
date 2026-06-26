@@ -102,7 +102,7 @@
             entries.forEach((e) => {
               if (!e.isIntersecting) return;
               const t = e.target;
-              if (t.dataset.bg) { t.style.backgroundImage = `url("${t.dataset.bg}")`; delete t.dataset.bg; }
+              if (t.dataset.bg) { t.style.backgroundImage = `url("${t.dataset.bg}")`; delete t.dataset.bg; t.classList.add("is-loaded"); }
               obs.unobserve(t);
             }),
           { rootMargin: "300px" }
@@ -119,7 +119,7 @@
     const tile = document.createElement("div");
     tile.className = "gallery__tile gallery__tile--photo visible";
     // New uploads (prepend) are at the top and visible, so load now; otherwise lazy-load.
-    if (prepend || !lazyIO) tile.style.backgroundImage = `url("${photo.url}")`;
+    if (prepend || !lazyIO) { tile.style.backgroundImage = `url("${photo.url}")`; tile.classList.add("is-loaded"); }
     else tile.dataset.bg = photo.url;
     const cap = photo.caption || "";
     const who = photo.uploader ? `— ${photo.uploader}` : "";
