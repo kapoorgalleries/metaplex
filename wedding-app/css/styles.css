@@ -531,6 +531,54 @@ label[data-when].show { display: flex; }
 /* Gallery photos fade/scale in as they lazy-load */
 .gallery__tile.is-loaded { animation: photoIn 0.55s var(--ease); }
 
+/* =========================================================
+   Launch splash — a branded intro shown on app launch,
+   then dissolves into the app. (Skipped under reduced-motion.)
+   ========================================================= */
+.splash {
+  position: fixed; inset: 0; z-index: 200; display: grid; place-items: center;
+  background: radial-gradient(circle at 50% 34%, #8a1c2d, #6e1423 56%, #5a0f1c);
+  color: var(--cream); text-align: center; overflow: hidden;
+  opacity: 1; transition: opacity 0.6s ease;
+}
+.splash.hide { opacity: 0; pointer-events: none; }
+.splash__dots {
+  position: absolute; inset: 0;
+  background-image: radial-gradient(circle, rgba(243,180,80,0.16) 1.5px, transparent 1.6px);
+  background-size: 28px 28px; opacity: 0.5;
+  -webkit-mask-image: radial-gradient(circle at 50% 40%, #000, transparent 70%);
+  mask-image: radial-gradient(circle at 50% 40%, #000, transparent 70%);
+  animation: fadeIn 1s ease both;
+}
+.splash__inner { position: relative; z-index: 1; display: flex; flex-direction: column; align-items: center; padding: 2rem; }
+.splash__ring {
+  width: 92px; height: 92px; border-radius: 50%; display: grid; place-items: center; margin-bottom: 1.1rem;
+  border: 1.5px solid rgba(243,180,80,0.6);
+  box-shadow: 0 0 44px -8px rgba(243,180,80,0.5), inset 0 0 28px -10px rgba(243,180,80,0.45);
+  animation: splashRing 0.9s var(--ease) both;
+}
+.splash__diya { font-size: 2.9rem; line-height: 1; filter: drop-shadow(0 6px 16px rgba(243,180,80,0.55)); animation: splashGlow 2.4s ease-in-out infinite; }
+.splash__names {
+  font-family: var(--serif); font-weight: 600; font-size: clamp(2.6rem, 12vw, 4rem);
+  color: #fff; line-height: 1; animation: riseIn 0.8s var(--ease) 0.35s both;
+}
+.splash__names i { color: var(--marigold); font-style: italic; }
+.splash__date {
+  font-family: var(--display); letter-spacing: 0.14em; text-transform: uppercase;
+  font-size: 0.82rem; color: #f7e9cf; margin-top: 0.75rem; animation: riseIn 0.8s var(--ease) 0.6s both;
+}
+.splash__rule {
+  width: 160px; max-width: 60vw; height: 1px; margin-top: 1.1rem;
+  background: linear-gradient(90deg, transparent, var(--marigold), transparent);
+  transform-origin: center; animation: splashRule 0.9s var(--ease) 0.85s both;
+}
+@keyframes splashRing { from { opacity: 0; transform: scale(0.7); } to { opacity: 1; transform: none; } }
+@keyframes splashRule { from { opacity: 0; transform: scaleX(0); } to { opacity: 1; transform: scaleX(1); } }
+@keyframes splashGlow {
+  0%, 100% { transform: scale(1); filter: drop-shadow(0 6px 16px rgba(243,180,80,0.45)); }
+  50% { transform: scale(1.06); filter: drop-shadow(0 9px 24px rgba(243,180,80,0.75)); }
+}
+
 /* ---------- Responsive ---------- */
 @media (max-width: 760px) {
   .nav__toggle { display: flex; }

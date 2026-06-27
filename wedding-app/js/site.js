@@ -7,6 +7,41 @@
 (function () {
   "use strict";
 
+  /* ---------- Launch splash (mount ASAP, once per session) ---------- */
+  (function launchSplash() {
+    try {
+      if (matchMedia("(prefers-reduced-motion: reduce)").matches) return; // decorative — skip
+      if (sessionStorage.getItem("splashed")) return; // already shown this session
+      sessionStorage.setItem("splashed", "1");
+    } catch (_) { return; }
+    const s = document.createElement("div");
+    s.className = "splash";
+    s.id = "splash";
+    s.setAttribute("role", "img");
+    s.setAttribute("aria-label", "Priya and Sanjay — October 17, 2026, Udaipur");
+    s.innerHTML =
+      '<div class="splash__dots" aria-hidden="true"></div>' +
+      '<div class="splash__inner">' +
+      '<div class="splash__ring"><span class="splash__diya">🪔</span></div>' +
+      '<div class="splash__names">Priya <i>&amp;</i> Sanjay</div>' +
+      '<div class="splash__date">October 17, 2026 · Udaipur</div>' +
+      '<div class="splash__rule"></div>' +
+      "</div>";
+    (document.body || document.documentElement).appendChild(s);
+    window.__splashActive = true;
+    let hidden = false;
+    const done = () => {
+      if (hidden) return;
+      hidden = true;
+      s.classList.add("hide");
+      window.__splashActive = false;
+      document.dispatchEvent(new Event("splash:done"));
+      setTimeout(() => s.remove(), 650);
+    };
+    s.addEventListener("click", done); // tap to skip
+    setTimeout(done, 1900);
+  })();
+
   /* ---------- i18n (English / हिंदी) ---------- */
   const DICT = {
     // App bar titles (per page)
@@ -692,7 +727,9 @@
     const dismiss = () => { localStorage.setItem("welcomed", "1"); openW(false); };
     w.querySelector("#welcomeCta").addEventListener("click", dismiss);
     w.querySelector("#welcomeBackdrop").addEventListener("click", dismiss);
-    setTimeout(() => openW(true), 650);
+    // If the launch splash is playing, wait until it dissolves; else show shortly after load.
+    if (window.__splashActive) document.addEventListener("splash:done", () => setTimeout(() => openW(true), 350), { once: true });
+    else setTimeout(() => openW(true), 650);
   }
 
   function injectConcierge() {
