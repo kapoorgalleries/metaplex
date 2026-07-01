@@ -43,28 +43,53 @@ chat stays hidden.
 
 ## Build, validate & CI
 
-The wedding app is a first-class build target in this repo. From `wedding-app/`:
+The wedding app is a first-class, CI-validated build target in this repo — kept
+**independently deployable** and **never bundled** into the Metaplex storefront.
+It uses **npm** (matching the `server/` lockfile); the `js/` storefront keeps Yarn.
+From `wedding-app/`:
 
 ```bash
-npm run build      # validate the static site + server (this is the "build")
-npm run setup      # install the server's dependencies (server/)
-npm start          # run the app (static site + API) on :8080
+npm ci            # reproducible install (root has no deps; server has its own)
+npm run validate  # validate the SOURCE (see below)
+npm run build     # produce a clean, deterministic deploy artifact → dist/
+npm run scan      # audit dist/ for excluded/backend/secret files
+npm run smoke     # serve dist/ over HTTP and smoke-test the static site
+npm run ci        # validate → build → scan → smoke (the whole static pipeline)
+
+npm run setup     # install the backend's deps (npm ci in server/)
+npm start         # run the full app (static site + API) on :8080
 ```
 
-`npm run build` runs `scripts/validate.js` — a zero-dependency check that:
+- **`validate`** (`scripts/validate-build.mjs`) checks the source: every expected
+  page exists; every CSS/JS/asset referenced by HTML resolves; no broken relative
+  paths and no accidental local-dev paths (`localhost`, `file://`, machine paths);
+  every service-worker-cached file exists; `manifest.json` is valid with real
+  icons; the SW is registered with `register("sw.js")`; and every JS file parses.
+- **`build`** (`scripts/build.mjs`) deletes stale output and copies **only** the
+  deployable frontend (HTML, `css/`, `js/`, `icons/`, `assets/`, `manifest.json`,
+  `sw.js`, `robots.txt`, `sitemap.xml`) into `dist/`. Server code, tooling,
+  `node_modules`, local data/uploads, docs, and any `.env`/`.log`/key files are
+  excluded. `dist/` is git-ignored and reproducible from a clean checkout.
+- **`scan`** (`scripts/scan-dist.mjs`) fails if `dist/` contains any backend/tooling
+  file or a leaked secret (private key, `sk-ant-…`, AWS key, JWT, DB URL,
+  service-role, VAPID **private** key), and confirms the SW shell matches the artifact.
+- **`smoke`** (`scripts/smoke.mjs`) serves `dist/` and asserts pages/assets/shell
+  files return 200, the styled 404 route works, and all JS parses. It **does not**
+  claim to test dynamic features (RSVP, concierge, photos, push, email).
 
-- parses every JS and JSON file,
-- confirms each HTML page has a `<!DOCTYPE>` and a `<title>`,
-- verifies `css/styles.css` exists and isn't empty (guards the `.gitignore`
-  regression that once shipped the app unstyled),
-- confirms every asset the service worker promises to cache actually exists, and
-- checks the core PWA assets (manifest, robots, sitemap, OG image, icons).
+GitHub Actions (`.github/workflows/wedding-app.yml`) runs on every PR touching
+`wedding-app/` (plus `workflow_dispatch`), in two clearly-separated jobs:
 
-GitHub Actions runs this on every PR that touches `wedding-app/`
-(`.github/workflows/wedding-app.yml`): it builds/validates, installs the server
-deps, boots the server, and smoke-tests the key routes (`/`, `/pass.html`,
-`/manifest.json`, `/robots.txt`, `/sitemap.xml`, `/api/stats`, and the 404 route)
-— so the app is gated alongside the repo's Rust checks.
+1. **static** — `npm ci` → validate → build → scan → smoke → **uploads the exact
+   `dist/`** as the `wedding-app-dist` artifact (the same bytes you'd deploy).
+2. **backend** — `npm --prefix server ci`, boots the API, and smoke-tests the
+   secret-free endpoints (`/api/stats`, `/api/concierge`, `/api/push/key`,
+   `POST /api/rsvp`, `/api/rsvp/mine`). Concierge/push/S3/moderation need secrets
+   and are **not** proven here.
+
+See **[DEPLOY.md](./DEPLOY.md)** for the backend deployment architecture (it's a
+conventional Node/Express server — which does **not** run on vanilla Cloudflare
+Pages — and how the static `dist/` and the API relate).
 
 ## Features
 

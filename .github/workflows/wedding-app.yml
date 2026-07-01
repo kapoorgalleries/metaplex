@@ -1,7 +1,9 @@
 name: Wedding App
 
-# Builds/validates the Priya & Sanjay wedding app (wedding-app/) as part of
-# the repo's CI, alongside the Rust checks. Runs only when the app changes.
+# CI for the wedding app (wedding-app/). It validates the source, builds a
+# clean deploy artifact, scans it, serves it, smoke-tests the static site, and
+# uploads the exact dist that would be deployed — separately from a backend
+# boot check. It does NOT touch or bundle the Metaplex storefront build.
 on:
   pull_request:
     paths:
@@ -12,46 +14,83 @@ on:
     paths:
       - "wedding-app/**"
       - ".github/workflows/wedding-app.yml"
-
-defaults:
-  run:
-    working-directory: ./wedding-app
+  workflow_dispatch:
 
 jobs:
-  build:
-    name: Validate & smoke-test
+  static:
+    name: Build, scan & smoke-test the static site
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./wedding-app
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
+          cache: npm
+          cache-dependency-path: wedding-app/package-lock.json
 
-      - name: Validate static site + server syntax
+      - name: Install (reproducible)
+        run: npm ci
+
+      - name: Validate source
+        run: npm run validate
+
+      - name: Build clean dist
         run: npm run build
 
-      - name: Install server dependencies
-        run: npm --prefix server install
+      - name: Scan dist for excluded/sensitive files
+        run: npm run scan
 
-      - name: Smoke-test the server
+      - name: Serve dist & smoke-test pages
+        run: npm run smoke
+
+      - name: Upload deploy artifact (exact dist/)
+        uses: actions/upload-artifact@v4
+        with:
+          name: wedding-app-dist
+          path: wedding-app/dist
+          if-no-files-found: error
+          retention-days: 14
+
+  backend:
+    name: Backend boot & no-secret API smoke
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./wedding-app
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: wedding-app/server/package-lock.json
+
+      - name: Install server dependencies (reproducible)
+        run: npm --prefix server ci
+
+      - name: Boot the API and check secret-free endpoints
+        # No ANTHROPIC_API_KEY / ADMIN_PASSWORD / S3 creds are set: AI, admin and
+        # cloud storage stay disabled. This only proves the server boots and its
+        # endpoints that don't require secrets respond — NOT that concierge,
+        # push, photo-moderation or email work end to end (those need a secret'd
+        # environment; see DEPLOY.md).
         run: |
           node server/server.js &
           SRV=$!
-          # give it a moment to bind
-          for i in 1 2 3 4 5 6 7 8; do
-            curl -fsS http://localhost:8080/ >/dev/null 2>&1 && break
-            sleep 1
-          done
-          echo "Checking core routes…"
-          curl -fsS http://localhost:8080/                 >/dev/null && echo "  ✓ /"
-          curl -fsS http://localhost:8080/pass.html        >/dev/null && echo "  ✓ /pass.html"
-          curl -fsS http://localhost:8080/manifest.json    >/dev/null && echo "  ✓ /manifest.json"
-          curl -fsS http://localhost:8080/robots.txt       >/dev/null && echo "  ✓ /robots.txt"
-          curl -fsS http://localhost:8080/sitemap.xml      >/dev/null && echo "  ✓ /sitemap.xml"
-          curl -fsS http://localhost:8080/api/stats        >/dev/null && echo "  ✓ /api/stats"
-          # unknown route must serve the styled 404 (status 404, but body served)
-          curl -sS -o /dev/null -w "  404 route → %{http_code}\n" http://localhost:8080/nope
+          for i in 1 2 3 4 5 6 7 8; do curl -fsS http://localhost:8080/api/stats >/dev/null 2>&1 && break; sleep 1; done
+          echo "Checking secret-free API endpoints…"
+          curl -fsS http://localhost:8080/api/stats        | grep -q '"guests"'   && echo "  ✓ GET  /api/stats"
+          curl -fsS http://localhost:8080/api/concierge    | grep -q '"available"'&& echo "  ✓ GET  /api/concierge (available:false without a key)"
+          curl -fsS http://localhost:8080/api/push/key     >/dev/null             && echo "  ✓ GET  /api/push/key"
+          curl -fsS -X POST http://localhost:8080/api/rsvp -H 'Content-Type: application/json' \
+            -d '{"name":"CI Test","email":"ci@example.com","attending":"yes","guests":2}' | grep -q '"ok":true' \
+            && echo "  ✓ POST /api/rsvp (persistence layer)"
+          curl -fsS http://localhost:8080/api/rsvp/mine?email=ci@example.com | grep -q '"found":true' && echo "  ✓ GET  /api/rsvp/mine"
           kill $SRV
         env:
           PORT: "8080"
