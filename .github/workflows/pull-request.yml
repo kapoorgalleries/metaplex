@@ -6,18 +6,18 @@ defaults:
 
 # Scoped to the Rust program tree so unrelated changes (e.g. wedding-app/,
 # docs) aren't gated by these checks. Rust PRs still run the full suite.
+# (This file is deliberately NOT in the paths list, so editing the workflow
+# itself doesn't re-trigger the Rust suite on an otherwise non-Rust PR.)
 on:
   pull_request:
     paths:
       - "rust/**"
       - "ci/**"
-      - ".github/workflows/pull-request.yml"
   push:
     branches: [master]
     paths:
       - "rust/**"
       - "ci/**"
-      - ".github/workflows/pull-request.yml"
 
 jobs:
   all_github_action_checks:
