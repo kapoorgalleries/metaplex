@@ -4,7 +4,7 @@
    ========================================================= */
 
 :root {
-  --maroon: #6e1423;
+  --maroon: #7A1F23;
   --maroon-deep: #4a0e18;
   --marigold: #e8a33d;
   --marigold-soft: #f6c873;
@@ -537,7 +537,7 @@ label[data-when].show { display: flex; }
    ========================================================= */
 .splash {
   position: fixed; inset: 0; z-index: 200; display: grid; place-items: center;
-  background: radial-gradient(circle at 50% 34%, #8a1c2d, #6e1423 56%, #5a0f1c);
+  background: radial-gradient(circle at 50% 34%, #8a1c2d, #7A1F23 56%, #5a0f1c);
   color: var(--cream); text-align: center; overflow: hidden;
   opacity: 1; transition: opacity 0.6s ease;
 }
@@ -969,7 +969,7 @@ body.app .concierge { bottom: calc(var(--tabbar-h) + 14px + env(safe-area-inset-
 .passlookup .btn { justify-self: start; }
 .pass {
   max-width: 420px; margin: 0 auto; border-radius: 22px; overflow: hidden;
-  background: radial-gradient(circle at 50% 0%, #8a1c2d, #6e1423 60%, #5a0f1c);
+  background: radial-gradient(circle at 50% 0%, #8a1c2d, #7A1F23 60%, #5a0f1c);
   color: var(--cream); box-shadow: 0 30px 60px -28px rgba(74,14,24,0.75);
   border: 1px solid rgba(243,180,80,0.35);
 }

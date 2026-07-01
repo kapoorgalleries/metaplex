@@ -2,10 +2,10 @@
 (function () {
   "use strict";
   const EVENTS = {
-    mehndi: { title: "Mehndi & Haldi", start: "20261016T053000Z", end: "20261016T080000Z", loc: "The Courtyard, Hotel Lakend, Udaipur", map: "Hotel Lakend Udaipur" },
-    sangeet: { title: "Sangeet", start: "20261016T133000Z", end: "20261016T180000Z", loc: "Grand Ballroom, Hotel Lakend, Udaipur", map: "Hotel Lakend Udaipur" },
-    ceremony: { title: "Wedding Ceremony", start: "20261017T113000Z", end: "20261017T143000Z", loc: "Lakeside Mandap, Lake Pichola, Udaipur", map: "Lake Pichola Udaipur" },
-    reception: { title: "Reception", start: "20261017T150000Z", end: "20261017T190000Z", loc: "Terrace Gardens, Lake Pichola, Udaipur", map: "Lake Pichola Udaipur" },
+    haldi: { title: "Haldi", start: "20261106T150000Z", end: "20261106T170000Z", loc: "Conrad New York Downtown, 102 North End Ave, New York, NY 10282", map: "Conrad New York Downtown" },
+    sangeet: { title: "Sangeet", start: "20261107T000000Z", end: "20261107T040000Z", loc: "The Lighthouse at Pier 61, Chelsea Piers, New York, NY 10011", map: "The Lighthouse at Pier 61 Chelsea Piers" },
+    ceremony: { title: "Wedding Ceremony", start: "20261107T210000Z", end: "20261107T230000Z", loc: "Conrad New York Downtown, 102 North End Ave, New York, NY 10282", map: "Conrad New York Downtown" },
+    reception: { title: "Reception", start: "20261108T000000Z", end: "20261108T040000Z", loc: "Hall des Lumières, 49 Chambers Street, New York, NY 10007", map: "Hall des Lumieres 49 Chambers Street New York" },
   };
 
   function ics(ev) {

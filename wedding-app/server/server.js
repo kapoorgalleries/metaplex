@@ -98,37 +98,41 @@ if (storage.serveDir) {
 
 // The single source of truth the concierge may answer from.
 const WEDDING_FACTS = `
-COUPLE: Priya & Sanjay
-DATE: Saturday, October 17, 2026
-PLACE: Udaipur, India ("City of Lakes")
-RSVP DEADLINE: August 15, 2026 (one submission per household)
-CONTACT: priyaandsanjay2026@example.com
+COUPLE: Priya Mallikarjuna & Sanjay Kapoor ("Priya & Sanjay")
+DATES: Friday, November 6 & Saturday, November 7, 2026, in New York City (an optional farewell brunch follows on Sunday, November 8)
+RSVP DEADLINE: August 31, 2026
+CONTACT: the couple's planners — sonal@sjsevents.com (cc ginny@sjsevents.com)
 
-EVENTS (three days of celebration):
-- Mehndi & Haldi — Fri, Oct 16, 11:00 AM, The Courtyard, Hotel Lakend. Dress: bright florals & yellows.
-- Sangeet — Fri, Oct 16, 7:00 PM, Grand Ballroom, Hotel Lakend. Dress: Indian festive / cocktail.
-- Wedding Ceremony — Sat, Oct 17, 5:00 PM, Lakeside Mandap, Lake Pichola. Dress: traditional formal.
-- Reception — Sat, Oct 17, 8:30 PM, Terrace Gardens, Lake Pichola. Dress: black-tie / formal.
+EVENTS:
+- Haldi — Fri, Nov 6, morning, Conrad New York Downtown (102 North End Avenue, New York, NY 10282). A bright morning of turmeric, music and blessings.
+- Sangeet — Fri, Nov 6, 7:00 PM, The Lighthouse at Pier 61 (Chelsea Piers, Pier 61, W 23rd St & the Hudson, New York, NY 10011). An evening of music and dance.
+- Wedding Ceremony — Sat, Nov 7, daytime, Conrad New York Downtown (102 North End Avenue, New York, NY 10282).
+- Reception — Sat, Nov 7, evening, Hall des Lumières (49 Chambers Street, New York, NY 10007).
+- Farewell Brunch — Sun, Nov 8, late morning (optional; details to follow).
+
+ATTIRE:
+- Indian festive attire is warmly encouraged all weekend — wear your most colourful outfits.
+- Please AVOID red, maroon, gold, white, and ivory (traditionally reserved for the couple).
+- By event: Haldi — bright colours you don't mind getting a little turmeric on; Sangeet — colourful & celebratory; Ceremony — traditional; Reception — formal.
 
 TRAVEL & STAY:
-- Nearest airport: Maharana Pratap Airport (UDR), ~25 min from venues. Many guests connect via Delhi (DEL) or Mumbai (BOM).
-- Room block at Hotel Lakend, discounted with code PRIYASANJAY26, book before Sep 1, 2026.
-- Shuttles run from partner hotels to every event.
+- Room block at the Conrad New York Downtown (102 North End Avenue), group rate from $409/night, rooms held Nov 5–8. Direct booking link & group code to follow.
+- All three celebration venues are in Manhattan: the Conrad and Hall des Lumières in Lower Manhattan, The Lighthouse at Pier 61 in Chelsea.
 
 FAQ:
-- Plus-ones: the invitation notes seats reserved per household; ask in the RSVP note if unsure.
-- Children: warmly welcome — include them in the guest count.
-- Dress code: each event has its own (see above); when in doubt, lean festive and colourful.
-- Transport: shuttles run from partner hotels to all events; schedules shared with confirmed guests.
-- Gifts: presence is the only present needed; a registry and honeymoon fund are available on the site.
+- Plus-ones / party size: your invitation and RSVP reflect the seats reserved for you; if unsure, ask the planners.
+- Children: include everyone in your party in the guest count.
+- Dress code: see ATTIRE above.
+- The Sunday farewell brunch is optional; details to follow.
+- For anything at all, email sonal@sjsevents.com (cc ginny@sjsevents.com).
 `.trim();
 
 const CONCIERGE_SYSTEM = `
-You are the warm, helpful digital concierge for Priya & Sanjay's 2026 wedding website.
+You are the warm, helpful digital concierge for Priya & Sanjay's 2026 wedding app.
 Answer guests' questions about the wedding using ONLY the facts provided below.
 Be friendly and concise (2-4 sentences). Use a little warmth, not gushing.
 If the answer isn't in the facts, say you're not sure and suggest emailing
-priyaandsanjay2026@example.com — do not invent details (no made-up times, prices, or policies).
+sonal@sjsevents.com — do not invent details (no made-up times, prices, or policies).
 Politely decline anything unrelated to the wedding.
 
 WEDDING FACTS:
@@ -328,11 +332,12 @@ app.post("/api/photos/:id/love", async (req, res) => {
 const push = createPush(DATA_DIR);
 
 // Day-of reminders (UTC start times; 2 hours before each event).
+// Times are US Eastern (EST = UTC-5 in November); startISO is the event start in UTC.
 push.initReminders([
-  { key: "mehndi", title: "Mehndi & Haldi", startISO: "2026-10-16T05:30:00Z", timeLabel: "11:00 AM", loc: "The Courtyard, Hotel Lakend" },
-  { key: "sangeet", title: "Sangeet", startISO: "2026-10-16T13:30:00Z", timeLabel: "7:00 PM", loc: "Grand Ballroom, Hotel Lakend" },
-  { key: "ceremony", title: "Wedding Ceremony", startISO: "2026-10-17T11:30:00Z", timeLabel: "5:00 PM", loc: "Lakeside Mandap, Lake Pichola" },
-  { key: "reception", title: "Reception", startISO: "2026-10-17T15:00:00Z", timeLabel: "8:30 PM", loc: "Terrace Gardens, Lake Pichola" },
+  { key: "haldi", title: "Haldi", startISO: "2026-11-06T15:00:00Z", timeLabel: "Morning", loc: "Conrad New York Downtown" },
+  { key: "sangeet", title: "Sangeet", startISO: "2026-11-07T00:00:00Z", timeLabel: "7:00 PM", loc: "The Lighthouse at Pier 61" },
+  { key: "ceremony", title: "Wedding Ceremony", startISO: "2026-11-07T21:00:00Z", timeLabel: "Daytime", loc: "Conrad New York Downtown" },
+  { key: "reception", title: "Reception", startISO: "2026-11-08T00:00:00Z", timeLabel: "Evening", loc: "Hall des Lumières" },
 ]);
 
 app.get("/api/push/key", (_req, res) => res.json({ enabled: push.enabled, key: push.publicKey() }));

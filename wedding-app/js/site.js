@@ -18,13 +18,13 @@
     s.className = "splash";
     s.id = "splash";
     s.setAttribute("role", "img");
-    s.setAttribute("aria-label", "Priya and Sanjay — October 17, 2026, Udaipur");
+    s.setAttribute("aria-label", "Priya and Sanjay — November 6 and 7, 2026, New York City");
     s.innerHTML =
       '<div class="splash__dots" aria-hidden="true"></div>' +
       '<div class="splash__inner">' +
       '<div class="splash__ring"><span class="splash__diya">🪔</span></div>' +
       '<div class="splash__names">Priya <i>&amp;</i> Sanjay</div>' +
-      '<div class="splash__date">October 17, 2026 · Udaipur</div>' +
+      '<div class="splash__date">November 6 &amp; 7, 2026 · New York City</div>' +
       '<div class="splash__rule"></div>' +
       "</div>";
     (document.body || document.documentElement).appendChild(s);
@@ -114,9 +114,9 @@
     // Home
     "home.eyebrow": { en: "Together with their families", hi: "अपने परिवारों सहित" },
     "home.tag": { en: "are getting married", hi: "विवाह बंधन में बँध रहे हैं" },
-    "home.saturday": { en: "Saturday", hi: "शनिवार" },
-    "home.place": { en: "Udaipur, India", hi: "उदयपुर, भारत" },
-    "home.rsvpBtn": { en: "RSVP by Aug 15", hi: "15 अगस्त तक उपस्थिति बताएँ" },
+    "home.saturday": { en: "Friday & Saturday", hi: "शुक्रवार और शनिवार" },
+    "home.place": { en: "New York City", hi: "न्यूयॉर्क शहर" },
+    "home.rsvpBtn": { en: "RSVP by Aug 31", hi: "31 अगस्त तक उपस्थिति बताएँ" },
     "home.stats": { en: "💛 {n} guests celebrating with us", hi: "💛 {n} मेहमान हमारे साथ उत्सव मना रहे हैं" },
     "cd.days": { en: "Days", hi: "दिन" },
     "cd.hours": { en: "Hours", hi: "घंटे" },
@@ -159,7 +159,7 @@
     "sub.guestbook.kicker": { en: "Leave us a note", hi: "हमें संदेश लिखें" },
     "sub.guestbook.intro": { en: "Share a memory, a blessing, or a bit of advice for married life. We'll treasure every word.", hi: "कोई याद, आशीर्वाद, या वैवाहिक जीवन के लिए सलाह साझा करें। हम हर शब्द को संजोएँगे।" },
     "sub.rsvp.kicker": { en: "We can't wait to celebrate with you", hi: "हम आपके साथ उत्सव की प्रतीक्षा में हैं" },
-    "sub.rsvp.intro": { en: "Kindly respond by <strong>August 15, 2026</strong>. One submission per household is perfect.", hi: "कृपया <strong>15 अगस्त 2026</strong> तक उत्तर दें। प्रति परिवार एक प्रतिक्रिया उत्तम है।" },
+    "sub.rsvp.intro": { en: "Kindly respond by <strong>August 31, 2026</strong>. One submission per household is perfect.", hi: "कृपया <strong>31 अगस्त 2026</strong> तक उत्तर दें। प्रति परिवार एक प्रतिक्रिया उत्तम है।" },
     "sub.seating.kicker": { en: "At the reception", hi: "रिसेप्शन में" },
     "sub.seating.intro": { en: "Enter your name to find your table for the reception dinner.", hi: "रिसेप्शन डिनर के लिए अपनी मेज़ खोजने हेतु अपना नाम दर्ज करें।" },
     // Event Pass
@@ -195,10 +195,14 @@
     "now.inHM": { en: "in {h}h {m}m", hi: "{h} घं {m} मि में" },
     "now.tomorrow": { en: "tomorrow", hi: "कल" },
     "now.wrap": { en: "That's a wrap — thank you for celebrating with us 💛", hi: "समापन — हमारे साथ उत्सव मनाने के लिए धन्यवाद 💛" },
-    "ev.mehndi": { en: "Mehndi & Haldi", hi: "मेहंदी और हल्दी" },
+    "ev.haldi": { en: "Haldi", hi: "हल्दी" },
     "ev.sangeet": { en: "Sangeet", hi: "संगीत" },
     "ev.ceremony": { en: "Wedding Ceremony", hi: "विवाह समारोह" },
     "ev.reception": { en: "Reception", hi: "रिसेप्शन" },
+    "ev.brunch": { en: "Farewell Brunch", hi: "विदाई ब्रंच" },
+    "sch.brunch.when": { en: "Sun, Nov 8 · Late morning", hi: "रवि, 8 नवंबर · दोपहर से पहले" },
+    "sch.brunch.where": { en: "Optional · details to follow", hi: "वैकल्पिक · विवरण शीघ्र" },
+    "sch.brunch.desc": { en: "One last coffee together before everyone heads home.", hi: "सबके घर लौटने से पहले एक आख़िरी कॉफ़ी साथ में।" },
     "st.2019.t": { en: "2019 — A chance meeting", hi: "2019 — एक संयोगवश मुलाक़ात" },
     "st.2019.p": { en: "We were seated next to each other at a friend's Diwali party in Mumbai. Sanjay spilled chai on Priya's dupatta within the first ten minutes. She forgave him by dessert.", hi: "हम मुंबई में एक मित्र की दिवाली पार्टी में अगल-बगल बैठे थे। पहले दस मिनट में ही संजय ने प्रिया के दुपट्टे पर चाय गिरा दी। मिठाई आते-आते उसने माफ़ कर दिया।" },
     "st.2021.t": { en: "2021 — Long distance &amp; longer phone calls", hi: "2021 — दूरी और लंबी फ़ोन कॉल" },
@@ -260,23 +264,23 @@
     "pt.karan": { en: "The planner. If something runs on time this weekend, thank Karan.", hi: "योजनाकार। इस सप्ताहांत कुछ समय पर हुआ, तो करण को धन्यवाद दें।" },
     "pt.bridesmaid": { en: "Bridesmaid", hi: "सखी" },
     "pt.groomsman": { en: "Groomsman", hi: "सखा" },
-    "sch.mehndi.dress": { en: "<strong>Dress code:</strong> Bright florals &amp; yellows", hi: "<strong>ड्रेस कोड:</strong> चटख फूल और पीले रंग" },
-    "sch.mehndi.desc": { en: "Henna, turmeric, music and brunch. An intimate, colourful kick-off to the weekend.", hi: "मेहंदी, हल्दी, संगीत और ब्रंच। सप्ताहांत की एक आत्मीय, रंगीन शुरुआत।" },
-    "sch.sangeet.dress": { en: "<strong>Dress code:</strong> Indian festive / cocktail", hi: "<strong>ड्रेस कोड:</strong> भारतीय उत्सवी / कॉकटेल" },
-    "sch.sangeet.desc": { en: "An evening of choreographed chaos — family performances, a live DJ, and a dance floor that stays open late.", hi: "नियोजित धमाल की एक शाम — पारिवारिक प्रस्तुतियाँ, लाइव DJ, और देर रात तक खुला डांस फ़्लोर।" },
-    "sch.ceremony.dress": { en: "<strong>Dress code:</strong> Traditional formal", hi: "<strong>ड्रेस कोड:</strong> पारंपरिक औपचारिक" },
-    "sch.ceremony.desc": { en: "The main event — the baraat, the pheras, and the vows, all at golden hour by the water.", hi: "मुख्य आयोजन — बारात, फेरे और वचन, सब कुछ झील किनारे सुनहरे समय में।" },
-    "sch.reception.dress": { en: "<strong>Dress code:</strong> Black-tie / formal", hi: "<strong>ड्रेस कोड:</strong> ब्लैक-टाई / औपचारिक" },
-    "sch.reception.desc": { en: "Dinner, drinks, toasts and one last dance to send us off into married life.", hi: "रात्रिभोज, पेय, टोस्ट और एक आख़िरी नृत्य — हमें वैवाहिक जीवन में विदा करने के लिए।" },
+    "sch.haldi.dress": { en: "<strong>Attire:</strong> Bright colours you don't mind getting a little turmeric on", hi: "<strong>पहनावा:</strong> चटख रंग जिन पर थोड़ी हल्दी लग जाए तो चलेगा" },
+    "sch.haldi.desc": { en: "A bright morning of turmeric, music and blessings before the wedding.", hi: "विवाह से पहले हल्दी, संगीत और आशीर्वाद की एक उज्ज्वल सुबह।" },
+    "sch.sangeet.dress": { en: "<strong>Attire:</strong> Colourful & celebratory", hi: "<strong>पहनावा:</strong> रंगीन और उत्सवी" },
+    "sch.sangeet.desc": { en: "An evening of music and dance — family performances and a DJ late into the night.", hi: "संगीत और नृत्य की एक शाम — पारिवारिक प्रस्तुतियाँ और देर रात तक DJ।" },
+    "sch.ceremony.dress": { en: "<strong>Attire:</strong> Traditional", hi: "<strong>पहनावा:</strong> पारंपरिक" },
+    "sch.ceremony.desc": { en: "The wedding ceremony — our traditions, our vows, the heart of the weekend.", hi: "विवाह समारोह — हमारी परंपराएँ, हमारे वचन, सप्ताहांत का हृदय।" },
+    "sch.reception.dress": { en: "<strong>Attire:</strong> Formal", hi: "<strong>पहनावा:</strong> औपचारिक" },
+    "sch.reception.desc": { en: "Dinner, dancing and one last celebration to send us off into married life.", hi: "रात्रिभोज, नृत्य और एक आख़िरी उत्सव — हमें वैवाहिक जीवन में विदा करने के लिए।" },
     "sch.addcal": { en: "＋ Add weekend to calendar", hi: "＋ कैलेंडर में सप्ताहांत जोड़ें" },
-    "sch.mehndi.when": { en: "Fri, Oct 16 · 11:00 AM", hi: "शुक्र, 16 अक्टूबर · सुबह 11:00" },
-    "sch.mehndi.where": { en: "The Courtyard, Hotel Lakend", hi: "द कोर्टयार्ड, होटल लेकएंड" },
-    "sch.sangeet.when": { en: "Fri, Oct 16 · 7:00 PM", hi: "शुक्र, 16 अक्टूबर · शाम 7:00" },
-    "sch.sangeet.where": { en: "Grand Ballroom, Hotel Lakend", hi: "ग्रैंड बॉलरूम, होटल लेकएंड" },
-    "sch.ceremony.when": { en: "Sat, Oct 17 · 5:00 PM", hi: "शनि, 17 अक्टूबर · शाम 5:00" },
-    "sch.ceremony.where": { en: "Lakeside Mandap, Lake Pichola", hi: "लेकसाइड मंडप, पिछोला झील" },
-    "sch.reception.when": { en: "Sat, Oct 17 · 8:30 PM", hi: "शनि, 17 अक्टूबर · रात 8:30" },
-    "sch.reception.where": { en: "Terrace Gardens, Lake Pichola", hi: "टेरेस गार्डन, पिछोला झील" },
+    "sch.haldi.when": { en: "Fri, Nov 6 · Morning", hi: "शुक्र, 6 नवंबर · सुबह" },
+    "sch.haldi.where": { en: "Conrad New York Downtown", hi: "कॉनराड न्यूयॉर्क डाउनटाउन" },
+    "sch.sangeet.when": { en: "Fri, Nov 6 · 7:00 PM", hi: "शुक्र, 6 नवंबर · शाम 7:00" },
+    "sch.sangeet.where": { en: "The Lighthouse at Pier 61", hi: "द लाइटहाउस, पियर 61" },
+    "sch.ceremony.when": { en: "Sat, Nov 7 · Daytime", hi: "शनि, 7 नवंबर · दिन में" },
+    "sch.ceremony.where": { en: "Conrad New York Downtown", hi: "कॉनराड न्यूयॉर्क डाउनटाउन" },
+    "sch.reception.when": { en: "Sat, Nov 7 · Evening", hi: "शनि, 7 नवंबर · शाम" },
+    "sch.reception.where": { en: "Hall des Lumières", hi: "हॉल दे लुमिएर" },
     "sch.cal": { en: "＋ Calendar", hi: "＋ कैलेंडर" },
     "sch.gcal": { en: "📅 Google", hi: "📅 गूगल" },
     "sch.map": { en: "📍 Map", hi: "📍 नक्शा" },
@@ -526,7 +530,7 @@
     document.head.appendChild(n);
   }
   head("link", { rel: "manifest", href: "manifest.json" });
-  head("meta", { name: "theme-color", content: "#6e1423" });
+  head("meta", { name: "theme-color", content: "#7A1F23" });
   head("meta", { name: "apple-mobile-web-app-capable", content: "yes" });
   head("meta", { name: "apple-mobile-web-app-status-bar-style", content: "black-translucent" });
   head("meta", { name: "apple-mobile-web-app-title", content: "Priya & Sanjay" });

@@ -6,10 +6,10 @@
   if (!mount) return;
 
   const EVENTS = [
-    { key: "mehndi", titleKey: "ev.mehndi", title: "Mehndi & Haldi", start: "2026-10-16T05:30:00Z", end: "2026-10-16T08:00:00Z" },
-    { key: "sangeet", titleKey: "ev.sangeet", title: "Sangeet", start: "2026-10-16T13:30:00Z", end: "2026-10-16T18:00:00Z" },
-    { key: "ceremony", titleKey: "ev.ceremony", title: "Wedding Ceremony", start: "2026-10-17T11:30:00Z", end: "2026-10-17T14:30:00Z" },
-    { key: "reception", titleKey: "ev.reception", title: "Reception", start: "2026-10-17T15:00:00Z", end: "2026-10-17T19:00:00Z" },
+    { key: "haldi", titleKey: "ev.haldi", title: "Haldi", start: "2026-11-06T15:00:00Z", end: "2026-11-06T17:00:00Z" },
+    { key: "sangeet", titleKey: "ev.sangeet", title: "Sangeet", start: "2026-11-07T00:00:00Z", end: "2026-11-07T04:00:00Z" },
+    { key: "ceremony", titleKey: "ev.ceremony", title: "Wedding Ceremony", start: "2026-11-07T21:00:00Z", end: "2026-11-07T23:00:00Z" },
+    { key: "reception", titleKey: "ev.reception", title: "Reception", start: "2026-11-08T00:00:00Z", end: "2026-11-08T04:00:00Z" },
   ].map((e) => ({ ...e, s: Date.parse(e.start), e2: Date.parse(e.end) }));
 
   const t = (k, fb) => (window.t ? window.t(k) : fb);
