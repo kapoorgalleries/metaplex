@@ -1,0 +1,57 @@
+name: Wedding App
+
+# Builds/validates the Priya & Sanjay wedding app (wedding-app/) as part of
+# the repo's CI, alongside the Rust checks. Runs only when the app changes.
+on:
+  pull_request:
+    paths:
+      - "wedding-app/**"
+      - ".github/workflows/wedding-app.yml"
+  push:
+    branches: [master]
+    paths:
+      - "wedding-app/**"
+      - ".github/workflows/wedding-app.yml"
+
+defaults:
+  run:
+    working-directory: ./wedding-app
+
+jobs:
+  build:
+    name: Validate & smoke-test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Validate static site + server syntax
+        run: npm run build
+
+      - name: Install server dependencies
+        run: npm --prefix server install
+
+      - name: Smoke-test the server
+        run: |
+          node server/server.js &
+          SRV=$!
+          # give it a moment to bind
+          for i in 1 2 3 4 5 6 7 8; do
+            curl -fsS http://localhost:8080/ >/dev/null 2>&1 && break
+            sleep 1
+          done
+          echo "Checking core routes…"
+          curl -fsS http://localhost:8080/                 >/dev/null && echo "  ✓ /"
+          curl -fsS http://localhost:8080/pass.html        >/dev/null && echo "  ✓ /pass.html"
+          curl -fsS http://localhost:8080/manifest.json    >/dev/null && echo "  ✓ /manifest.json"
+          curl -fsS http://localhost:8080/robots.txt       >/dev/null && echo "  ✓ /robots.txt"
+          curl -fsS http://localhost:8080/sitemap.xml      >/dev/null && echo "  ✓ /sitemap.xml"
+          curl -fsS http://localhost:8080/api/stats        >/dev/null && echo "  ✓ /api/stats"
+          # unknown route must serve the styled 404 (status 404, but body served)
+          curl -sS -o /dev/null -w "  404 route → %{http_code}\n" http://localhost:8080/nope
+          kill $SRV
+        env:
+          PORT: "8080"

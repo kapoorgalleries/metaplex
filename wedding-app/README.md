@@ -41,6 +41,31 @@ The server serves the static site **and** the API, so this one command runs ever
 Without `ANTHROPIC_API_KEY` the site and photo sharing still work — only the concierge
 chat stays hidden.
 
+## Build, validate & CI
+
+The wedding app is a first-class build target in this repo. From `wedding-app/`:
+
+```bash
+npm run build      # validate the static site + server (this is the "build")
+npm run setup      # install the server's dependencies (server/)
+npm start          # run the app (static site + API) on :8080
+```
+
+`npm run build` runs `scripts/validate.js` — a zero-dependency check that:
+
+- parses every JS and JSON file,
+- confirms each HTML page has a `<!DOCTYPE>` and a `<title>`,
+- verifies `css/styles.css` exists and isn't empty (guards the `.gitignore`
+  regression that once shipped the app unstyled),
+- confirms every asset the service worker promises to cache actually exists, and
+- checks the core PWA assets (manifest, robots, sitemap, OG image, icons).
+
+GitHub Actions runs this on every PR that touches `wedding-app/`
+(`.github/workflows/wedding-app.yml`): it builds/validates, installs the server
+deps, boots the server, and smoke-tests the key routes (`/`, `/pass.html`,
+`/manifest.json`, `/robots.txt`, `/sitemap.xml`, `/api/stats`, and the 404 route)
+— so the app is gated alongside the repo's Rust checks.
+
 ## Features
 
 - **Hero + live countdown** to the ceremony date.
