@@ -10,7 +10,7 @@
   const tabsEl = document.getElementById("adminTabs");
   const countEl = document.getElementById("tabCount");
 
-  const EVENTS = ["Mehndi & Haldi", "Sangeet", "Ceremony", "Reception"];
+  const EVENTS = ["Haldi", "Sangeet", "Ceremony", "Reception", "Farewell Brunch"];
   const esc = (v) => window.escapeHtml(v == null ? "" : v);
   let token = sessionStorage.getItem("adminToken") || "";
   let active = "rsvps";

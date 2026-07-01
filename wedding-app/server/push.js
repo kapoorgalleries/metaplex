@@ -38,7 +38,7 @@ module.exports = function createPush(DATA_DIR) {
         write(VAPID, keys);
       }
     }
-    const contact = process.env.VAPID_CONTACT || "mailto:priyaandsanjay2026@example.com";
+    const contact = process.env.VAPID_CONTACT || "mailto:sonal@sjsevents.com";
     webpush.setVapidDetails(contact, keys.publicKey, keys.privateKey);
   }
 

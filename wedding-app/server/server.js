@@ -177,7 +177,7 @@ app.post("/api/concierge", limitConcierge, async (req, res) => {
     if (response.stop_reason === "refusal") {
       return res.json({
         reply:
-          "Sorry, I can't help with that one — but for anything about the wedding, email priyaandsanjay2026@example.com.",
+          "Sorry, I can't help with that one — but for anything about the wedding, email sonal@sjsevents.com.",
       });
     }
 
