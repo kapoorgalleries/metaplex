@@ -15,6 +15,11 @@
   let count = 0;
   let activePhoto = null;
 
+  // Option A: when sharing the website's Supabase, photos are just image + caption
+  // (moderated) — the schema has no comments/loves, so hide that UI.
+  const useSupa = !!(window.Supa && window.Supa.enabled);
+  if (useSupa && commentForm) commentForm.hidden = true;
+
   function renderComments(photo) {
     const list = Array.isArray(photo.comments) ? photo.comments : [];
     if (!list.length) {
@@ -41,7 +46,8 @@
     capEl.hidden = !capEl.textContent;
     commentStatus.textContent = "";
     commentStatus.className = "lightbox__cstatus";
-    renderComments(photo);
+    if (useSupa) { commentsEl.innerHTML = ""; commentsEl.hidden = true; }
+    else renderComments(photo);
     lightbox.classList.add("open");
     lightbox.setAttribute("aria-hidden", "false");
   }
@@ -125,26 +131,31 @@
     const who = photo.uploader ? `— ${photo.uploader}` : "";
     const isLoved = loved.has(photo.id);
     const nComments = (photo.comments || []).length;
+    const engagement = useSupa
+      ? ""
+      : `<button class="gallery__love${isLoved ? " is-loved" : ""}" aria-label="Love this photo">` +
+        `<span class="gallery__heart">♥</span><span class="gallery__loves">${photo.loves || 0}</span></button>` +
+        `<span class="gallery__cmtbadge" title="Comments">💬 <span class="gallery__cmtcount" data-id="${photo.id}"${nComments ? "" : " hidden"}>${nComments}</span></span>`;
     tile.innerHTML =
-      `<button class="gallery__love${isLoved ? " is-loved" : ""}" aria-label="Love this photo">` +
-      `<span class="gallery__heart">♥</span><span class="gallery__loves">${photo.loves || 0}</span></button>` +
-      `<span class="gallery__cmtbadge" title="Comments">💬 <span class="gallery__cmtcount" data-id="${photo.id}"${nComments ? "" : " hidden"}>${nComments}</span></span>` +
+      engagement +
       `<span class="gallery__caption">${window.escapeHtml(cap)} ${window.escapeHtml(who)}</span>`;
     tile.addEventListener("click", () => openPhoto(photo));
 
-    const loveBtn = tile.querySelector(".gallery__love");
-    const lovesEl = tile.querySelector(".gallery__loves");
-    loveBtn.addEventListener("click", (e) => {
-      e.stopPropagation();
-      if (loved.has(photo.id)) return;
-      rememberLove(photo.id);
-      loveBtn.classList.add("is-loved");
-      lovesEl.textContent = (photo.loves || 0) + 1; // optimistic
-      fetch(`/api/photos/${encodeURIComponent(photo.id)}/love`, { method: "POST" })
-        .then((r) => (r.ok ? r.json() : null))
-        .then((d) => { if (d) { photo.loves = d.loves; lovesEl.textContent = d.loves; } })
-        .catch(() => {});
-    });
+    if (!useSupa) {
+      const loveBtn = tile.querySelector(".gallery__love");
+      const lovesEl = tile.querySelector(".gallery__loves");
+      loveBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        if (loved.has(photo.id)) return;
+        rememberLove(photo.id);
+        loveBtn.classList.add("is-loved");
+        lovesEl.textContent = (photo.loves || 0) + 1; // optimistic
+        fetch(`/api/photos/${encodeURIComponent(photo.id)}/love`, { method: "POST" })
+          .then((r) => (r.ok ? r.json() : null))
+          .then((d) => { if (d) { photo.loves = d.loves; lovesEl.textContent = d.loves; } })
+          .catch(() => {});
+      });
+    }
 
     if (prepend) grid.insertBefore(tile, grid.firstChild);
     else grid.appendChild(tile);
@@ -153,13 +164,28 @@
     if (empty) empty.hidden = count > 0;
   }
 
-  fetch("/api/photos")
-    .then((r) => (r.ok ? r.json() : []))
-    .then((list) => {
-      if (Array.isArray(list)) list.forEach((p) => addTile(p, false));
-      if (empty) empty.hidden = count > 0;
-    })
-    .catch(() => { if (empty) empty.hidden = false; });
+  function loadPhotos() {
+    if (useSupa) {
+      window.Supa.client().then((sb) => {
+        if (!sb) { if (empty) empty.hidden = false; return; }
+        sb.from("gallery_photos").select("storage_path,alt_text").eq("approved", true).order("created_at", { ascending: false })
+          .then((r) => {
+            if (r.error || !Array.isArray(r.data)) { if (empty) empty.hidden = false; return; }
+            r.data.forEach((p) => { if (p.storage_path) addTile({ url: window.Supa.photoUrl(p.storage_path), caption: p.alt_text || "" }, false); });
+            if (empty) empty.hidden = count > 0;
+          });
+      });
+      return;
+    }
+    fetch("/api/photos")
+      .then((r) => (r.ok ? r.json() : []))
+      .then((list) => {
+        if (Array.isArray(list)) list.forEach((p) => addTile(p, false));
+        if (empty) empty.hidden = count > 0;
+      })
+      .catch(() => { if (empty) empty.hidden = false; });
+  }
+  loadPhotos();
 
   const form = document.getElementById("photoForm");
   const status = document.getElementById("photoStatus");
@@ -173,6 +199,29 @@
 
   function upload(file) {
     if (!file) return setStatus("Please choose a photo first.", "err");
+    if (file.size > 15 * 1024 * 1024) return setStatus("That photo is over the 15 MB limit.", "err");
+
+    if (useSupa) {
+      // Matches the website: upload to the guest-uploads bucket, then a moderated row.
+      const caption = form.elements["caption"].value.trim();
+      const ext = (file.name.split(".").pop() || "jpg").toLowerCase().replace(/[^a-z0-9]/g, "") || "jpg";
+      const rand = Math.random().toString(36).slice(2);
+      const path = Date.now() + "-" + rand + "." + ext;
+      setStatus("Uploading…", "");
+      window.Supa.client().then((sb) => {
+        if (!sb) return setStatus("Couldn't connect — please try again.", "err");
+        sb.storage.from("guest-uploads").upload(path, file, { contentType: file.type }).then((u) => {
+          if (u.error) return setStatus("Upload failed — please try again.", "err");
+          sb.from("gallery_photos").insert({ storage_path: path, alt_text: caption || "Guest photo" }).then((i) => {
+            if (i.error) { sb.storage.from("guest-uploads").remove([path]).catch(() => {}); return setStatus("Upload failed — please try again.", "err"); }
+            form.reset();
+            setStatus("Thank you! Your photo will appear once it's approved. 💛", "ok");
+          });
+        });
+      });
+      return;
+    }
+
     const data = new FormData();
     data.append("uploader", form.elements["uploader"].value);
     data.append("caption", form.elements["caption"].value);

@@ -45,15 +45,29 @@ const SECRETS = [
   { re: /\bsk-ant-[A-Za-z0-9_-]{8,}/, what: "Anthropic API key" },
   { re: /\bAKIA[0-9A-Z]{16}\b/, what: "AWS access key id" },
   { re: /\baws_secret_access_key\b/i, what: "AWS secret reference" },
-  { re: /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{6,}/, what: "JWT" },
   { re: /\b(postgres(ql)?|mysql|mongodb(\+srv)?):\/\/[^\s"']+/i, what: "database connection URL" },
   { re: /\bservice_role\b/i, what: "service-role credential" },
   { re: /VAPID_PRIVATE_KEY|vapidPrivate/i, what: "VAPID private key" },
 ];
+// JWTs need care: Supabase *publishable* keys (role "anon"/"authenticated") are
+// public by design and ship in the client; only a service_role JWT is a secret.
+const JWT = /\beyJ[A-Za-z0-9_-]{10,}\.([A-Za-z0-9_-]{10,})\.[A-Za-z0-9_-]{6,}/g;
+function jwtRole(payloadB64) {
+  try {
+    const json = JSON.parse(Buffer.from(payloadB64.replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("utf8"));
+    return json.role || "";
+  } catch (_) { return "unknown"; }
+}
 const textFiles = files.filter((f) => /\.(html|js|css|json|txt|xml|webmanifest)$/i.test(f));
 for (const f of textFiles) {
   const txt = fs.readFileSync(f, "utf8");
   for (const s of SECRETS) if (s.re.test(txt)) fail(`possible ${s.what} in ${relD(f)}`);
+  let m;
+  JWT.lastIndex = 0;
+  while ((m = JWT.exec(txt))) {
+    const role = jwtRole(m[1]);
+    if (role !== "anon" && role !== "authenticated") fail(`possible secret JWT (role="${role}") in ${relD(f)}`);
+  }
 }
 
 /* 3) The service-worker shell must exactly match files present in the artifact. */

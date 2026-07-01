@@ -24,12 +24,25 @@
     if (empty) empty.hidden = count > 0;
   }
 
+  const useSupa = !!(window.Supa && window.Supa.enabled);
+
   function load() {
+    if (useSupa) {
+      window.Supa.client().then((sb) => {
+        if (!sb) return;
+        sb.from("guestbook").select("name,message").eq("approved", true).order("created_at", { ascending: false })
+          .then((r) => {
+            if (r.error || !Array.isArray(r.data)) { if (empty) empty.hidden = false; return; }
+            r.data.forEach((e) => addEntry(e, false));
+            if (empty) empty.hidden = count > 0;
+          });
+      });
+      return;
+    }
     fetch("/api/guestbook")
       .then((r) => (r.ok ? r.json() : []))
       .then((list) => {
-        // newest first
-        if (Array.isArray(list)) list.slice().reverse().forEach((e) => addEntry(e, false));
+        if (Array.isArray(list)) list.slice().reverse().forEach((e) => addEntry(e, false)); // newest first
         if (empty) empty.hidden = count > 0;
       })
       .catch(() => { if (empty) empty.hidden = false; });
@@ -41,8 +54,23 @@
     const name = form.elements["name"].value.trim();
     const message = form.elements["message"].value.trim();
     const website = form.elements["website"] ? form.elements["website"].value : "";
+    if (website) return; // honeypot
     if (!name || !message) return setStatus("Please add your name and a message.", "err");
     setStatus("Signing…", "");
+
+    if (useSupa) {
+      // Matches the website: moderated insert (approved defaults to false).
+      window.Supa.client().then((sb) => {
+        if (!sb) return setStatus("Couldn't connect — please try again.", "err");
+        sb.from("guestbook").insert({ name, message }).then((r) => {
+          if (r.error) return setStatus("Couldn't send — please try again.", "err");
+          form.reset();
+          setStatus("Thank you! Your note will appear once it's approved. 💛", "ok");
+        });
+      });
+      return;
+    }
+
     fetch("/api/guestbook", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
