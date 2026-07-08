@@ -1,5 +1,5 @@
 /* Priya & Sanjay 2026 — service worker (offline app shell) */
-const CACHE = "psw-2026-v14";
+const CACHE = "psw-2026-v15";
 const SHELL = [
   "index.html",
   "404.html",

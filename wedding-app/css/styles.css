@@ -137,6 +137,18 @@ img { max-width: 100%; display: block; }
   mask-image: radial-gradient(circle at 50% 38%, black, transparent 70%);
   opacity: 0.7;
 }
+.hero__photo { position: absolute; inset: 0; z-index: 0; display: block; }
+.hero__photo img { width: 100%; height: 100%; object-fit: cover; object-position: center 40%; }
+.hero__photo::after {
+  content: ""; position: absolute; inset: 0;
+  background: linear-gradient(
+    180deg,
+    rgba(253, 247, 238, 0.58) 0%,
+    rgba(253, 247, 238, 0.80) 42%,
+    rgba(253, 247, 238, 0.84) 68%,
+    rgba(247, 236, 220, 0.94) 100%);
+}
+.hero__mandala { z-index: 1; }
 .hero__inner { position: relative; z-index: 2; max-width: 760px; }
 .hero__eyebrow {
   font-size: 0.9rem; letter-spacing: 0.3em; text-transform: uppercase;
@@ -649,11 +661,30 @@ label[data-when].show { display: flex; }
   font-family: var(--display); font-size: 2rem; color: var(--cream);
   background: linear-gradient(150deg, var(--marigold), var(--maroon));
 }
+.party__photo {
+  width: 96px; height: 96px; border-radius: 50%; margin: 0 auto 1rem;
+  display: block; overflow: hidden;
+  border: 2px solid rgba(184,134,11,0.35);
+  box-shadow: 0 10px 24px -14px rgba(74,14,24,0.55);
+}
+.party__photo img { width: 100%; height: 100%; object-fit: cover; object-position: center 30%; display: block; }
 .party__card h3 { color: var(--maroon); font-size: 1.4rem; }
 .party__role { color: var(--gold); font-size: 0.85rem; letter-spacing: 0.1em; text-transform: uppercase; margin: 0.2rem 0 0.6rem; }
 .party__card p { color: var(--muted); font-size: 0.92rem; }
 .party__card--memory { background: var(--cream-2); }
 .party__card--memory .party__avatar { background: none; font-size: 2.4rem; filter: saturate(0.9); }
+.party__card--memory .party__photo { border-color: rgba(122,99,87,0.35); }
+.party__card--memory .party__photo img { filter: grayscale(0.4) sepia(0.08) saturate(0.8); }
+
+/* Story page photo */
+.story-photo {
+  max-width: 760px; margin: clamp(1.5rem, 4vw, 2.5rem) auto 0; padding: 0 6vw;
+}
+.story-photo picture {
+  display: block; border-radius: var(--radius); overflow: hidden;
+  border: 1px solid rgba(184,134,11,0.22); box-shadow: var(--shadow);
+}
+.story-photo img { display: block; width: 100%; height: auto; }
 /* Name chips (bridesmaids / groomsmen) */
 .namegrid { display: flex; flex-wrap: wrap; gap: 0.6rem; justify-content: center; max-width: 780px; margin: 0 auto; }
 .namechip {
