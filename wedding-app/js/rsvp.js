@@ -45,6 +45,7 @@
     form.elements["guests"].value = r.guests || 1;
     form.elements["meal"].value = r.meal || "";
     form.elements["hotelBlock"].checked = !!r.hotelBlock;
+    if (form.elements["song"]) form.elements["song"].value = r.song || "";
     form.elements["note"].value = r.note || "";
     const set = new Set(r.events || []);
     form.querySelectorAll("input[name='events']").forEach((c) => (c.checked = set.has(c.value)));
@@ -91,6 +92,7 @@
       events: Array.from(form.querySelectorAll("input[name='events']:checked")).map((c) => c.value),
       meal: form.elements["meal"].value,
       hotelBlock: form.elements["hotelBlock"].checked,
+      song: form.elements["song"] ? form.elements["song"].value.trim() : "",
       note: form.elements["note"].value.trim(),
       website: form.elements["website"] ? form.elements["website"].value : "",
     };
@@ -188,6 +190,7 @@
         if (form.elements["phone"]) form.elements["phone"].value = d.phone || "";
         attendingSel.value = d.attending ? "yes" : "no";
         guestsInput.value = d.guest_count || 1;
+        if (form.elements["song"]) form.elements["song"].value = d.song_request || "";
         form.elements["note"].value = d.notes || "";
         rebuildEvents(d.events || []);
         submitBtn.textContent = t("rs.update", "Update RSVP");
@@ -219,7 +222,7 @@
         p_attending: attending,
         p_guest_count: attending ? Math.max(1, parseInt(guestsInput.value, 10) || 1) : 0,
         p_events: attending ? events : [],
-        p_song_request: "",
+        p_song_request: form.elements["song"] ? form.elements["song"].value.trim() : "",
         p_notes: form.elements["note"].value.trim(),
       };
       submitBtn.disabled = true;

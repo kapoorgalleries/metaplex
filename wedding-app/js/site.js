@@ -104,7 +104,7 @@
     "welcome.f2": { en: "📸 Share photos & leave comments", hi: "📸 तस्वीरें साझा करें और टिप्पणी करें" },
     "welcome.f3": { en: "💬 Ask the concierge anything", hi: "💬 सहायक से कुछ भी पूछें" },
     "welcome.f4": { en: "🔔 Turn on day-of reminders", hi: "🔔 कार्यक्रम के दिन के रिमाइंडर चालू करें" },
-    "welcome.f5": { en: "🌐 Switch to हिंदी anytime", hi: "🌐 कभी भी English में बदलें" },
+    "welcome.f5": { en: "🌐 Read it in हिंदी or ಕನ್ನಡ anytime", hi: "🌐 कभी भी English या ಕನ್ನಡ में पढ़ें" },
     "welcome.cta": { en: "Start exploring", hi: "शुरू करें" },
     "offline": { en: "You're offline — showing a saved copy.", hi: "आप ऑफ़लाइन हैं — सहेजी गई प्रति दिखाई जा रही है।" },
     "toast.backOnline": { en: "Back online ✓", hi: "फिर से ऑनलाइन ✓" },
@@ -323,8 +323,10 @@
     "rs.meal": { en: "Meal preference", hi: "भोजन की पसंद" },
     "rs.meal.none": { en: "No preference", hi: "कोई पसंद नहीं" },
     "rs.hotel": { en: "I'd like a room in the hotel block", hi: "मुझे होटल ब्लॉक में एक कमरा चाहिए" },
-    "rs.note": { en: "Song request &amp; a note for the couple", hi: "गाने की फ़रमाइश और जोड़े के लिए संदेश" },
-    "rs.note.ph": { en: "Anything you'd like us to know — dietary needs, a song to play, a message…", hi: "जो भी आप बताना चाहें — भोजन संबंधी ज़रूरतें, कोई गाना, कोई संदेश…" },
+    "rs.song": { en: "A song to get you on the dance floor", hi: "नाच के लिए एक गाना" },
+    "rs.song.ph": { en: "Optional — a song we should play", hi: "वैकल्पिक — कोई गाना जो हम बजाएँ" },
+    "rs.note": { en: "A note for the couple", hi: "जोड़े के लिए एक संदेश" },
+    "rs.note.ph": { en: "Anything you'd like us to know — a message, dietary needs…", hi: "जो भी आप बताना चाहें — कोई संदेश, भोजन संबंधी ज़रूरतें…" },
     "rs.send": { en: "Send RSVP", hi: "उपस्थिति भेजें" },
     "rs.gifts.t": { en: "Gifts &amp; blessings", hi: "उपहार और आशीर्वाद" },
     "rs.gifts.p": { en: "Your presence is the only present we need. If you wish to give, we've set up a registry and a honeymoon fund.", hi: "आपकी उपस्थिति ही हमारे लिए सबसे बड़ा उपहार है। यदि आप देना चाहें, तो हमने एक उपहार सूची और हनीमून फंड बनाया है।" },
@@ -355,10 +357,14 @@
     "rs.fix": { en: "Please fill in the highlighted fields.", hi: "कृपया चिह्नित फ़ील्ड भरें।" },
   };
 
+  const LANGS = ["en", "hi", "kn"];
   let lang = localStorage.getItem("lang") || "en";
+  if (LANGS.indexOf(lang) === -1) lang = "en";
   function t(key) {
     const e = DICT[key];
     if (!e) return key;
+    // Kannada lives in a separate overlay (KN); Hindi/English live on the entry.
+    if (lang === "kn") return (typeof KN !== "undefined" && KN[key]) || e.en || key;
     return e[lang] || e.en || key;
   }
   // textContent doesn't decode entities, but our dict values were extracted from
@@ -460,18 +466,23 @@
   if (backBtn)
     backBtn.addEventListener("click", () => (history.length > 1 ? history.back() : (location.href = "index.html")));
 
+  // 3-way language cycle: English → हिंदी → ಕನ್ನಡ → English.
+  const NEXT_LANG = { en: "hi", hi: "kn", kn: "en" };
+  const LANG_GLYPH = { en: "EN", hi: "हिं", kn: "ಕ" };        // glyph for the language you'll switch TO
+  const LANG_SWITCH_LABEL = { en: "Switch to English", hi: "हिंदी में बदलें", kn: "ಕನ್ನಡಕ್ಕೆ ಬದಲಿಸಿ" };
   const langBtn = document.getElementById("appbarLang");
   const updateLangBtn = () => {
     // Show the language you'll switch *to*, and announce it accessibly.
-    langBtn.textContent = lang === "en" ? "हिं" : "EN";
-    langBtn.setAttribute("lang", lang === "en" ? "hi" : "en");
-    const label = lang === "en" ? "हिंदी में बदलें" : "Switch to English";
+    const next = NEXT_LANG[lang];
+    langBtn.textContent = LANG_GLYPH[next];
+    langBtn.setAttribute("lang", next === "en" ? "en" : next);
+    const label = LANG_SWITCH_LABEL[next];
     langBtn.setAttribute("aria-label", label);
     langBtn.setAttribute("title", label);
   };
   updateLangBtn();
   langBtn.addEventListener("click", () => {
-    lang = lang === "en" ? "hi" : "en";
+    lang = NEXT_LANG[lang];
     localStorage.setItem("lang", lang);
     applyI18n();
     updateLangBtn();

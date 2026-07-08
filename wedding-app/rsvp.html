@@ -85,8 +85,12 @@
           <label class="field field--check"><input type="checkbox" name="hotelBlock" /><span data-i18n="rs.hotel">I'd like a room in the hotel block</span></label>
         </div>
 
-        <label class="field" data-when="yes"><span data-i18n="rs.note">Song request &amp; a note for the couple</span>
-          <textarea name="note" rows="3" data-i18n-ph="rs.note.ph" placeholder="Anything you'd like us to know — dietary needs, a song to play, a message…"></textarea>
+        <label class="field" data-when="yes"><span data-i18n="rs.song">A song to get you on the dance floor</span>
+          <input type="text" name="song" data-i18n-ph="rs.song.ph" placeholder="Optional — a song we should play" />
+        </label>
+
+        <label class="field" data-when="yes"><span data-i18n="rs.note">A note for the couple</span>
+          <textarea name="note" rows="3" data-i18n-ph="rs.note.ph" placeholder="Anything you'd like us to know — a message, dietary needs…"></textarea>
         </label>
 
         <button type="submit" class="btn btn--solid rsvp__submit" data-i18n="rs.send">Send RSVP</button>
