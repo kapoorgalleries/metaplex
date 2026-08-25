@@ -8,12 +8,13 @@
   const status = document.getElementById("passStatus");
   const card = document.getElementById("passCard");
 
-  // Calendar data keyed by the RSVP checkbox values (rsvp.html).
+  // Calendar data keyed by the RSVP checkbox values (rsvp.html), matching the
+  // site's stored event names. UTC instants for America/New_York (EST, UTC-5).
   const EVENTS = {
-    Haldi: { start: "20261106T150000Z", end: "20261106T170000Z", loc: "Conrad New York Downtown, 102 North End Ave, New York, NY 10282" },
-    Sangeet: { start: "20261107T000000Z", end: "20261107T040000Z", loc: "The Lighthouse at Pier 61, Chelsea Piers, New York, NY 10011" },
-    Ceremony: { start: "20261107T210000Z", end: "20261107T230000Z", loc: "Conrad New York Downtown, 102 North End Ave, New York, NY 10282" },
-    Reception: { start: "20261108T000000Z", end: "20261108T040000Z", loc: "Hall des Lumières, 49 Chambers Street, New York, NY 10007" },
+    "Haldi": { start: "20261106T160000Z", end: "20261106T180000Z", loc: "Conrad New York Downtown, 102 North End Ave, New York, NY 10282" },
+    "Sangeet": { start: "20261107T000000Z", end: "20261107T040000Z", loc: "The Lighthouse at Pier 61, Chelsea Piers, New York, NY 10011" },
+    "Wedding Ceremony": { start: "20261107T173000Z", end: "20261107T203000Z", loc: "Conrad New York Downtown, 102 North End Ave, New York, NY 10282" },
+    "Reception": { start: "20261107T233000Z", end: "20261108T043000Z", loc: "Hall des Lumières, 49 Chambers Street, New York, NY 10007" },
   };
   const ALL = Object.keys(EVENTS);
 
@@ -64,6 +65,12 @@
   }
 
   async function lookup() {
+    // Shared-site (Supabase) mode has no /api lookup — show the friendly
+    // pending note instead of a broken fetch.
+    if (window.Supa && window.Supa.enabled) {
+      card.hidden = true;
+      return setStatus(t("pass.tablePending", "Assigned closer to the day"));
+    }
     const email = emailInput.value.trim();
     if (!email) return setStatus(t("pass.needEmail", "Enter your email."), "err");
     setStatus(t("pass.searching", "Looking…"));

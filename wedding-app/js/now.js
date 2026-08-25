@@ -5,11 +5,13 @@
   const mount = document.getElementById("nowBanner");
   if (!mount) return;
 
+  // UTC instants for America/New_York (EST, UTC-5, in Nov 2026).
   const EVENTS = [
-    { key: "haldi", titleKey: "ev.haldi", title: "Haldi", start: "2026-11-06T15:00:00Z", end: "2026-11-06T17:00:00Z" },
+    { key: "haldi", titleKey: "ev.haldi", title: "Haldi", start: "2026-11-06T16:00:00Z", end: "2026-11-06T18:00:00Z" },
     { key: "sangeet", titleKey: "ev.sangeet", title: "Sangeet", start: "2026-11-07T00:00:00Z", end: "2026-11-07T04:00:00Z" },
-    { key: "ceremony", titleKey: "ev.ceremony", title: "Wedding Ceremony", start: "2026-11-07T21:00:00Z", end: "2026-11-07T23:00:00Z" },
-    { key: "reception", titleKey: "ev.reception", title: "Reception", start: "2026-11-08T00:00:00Z", end: "2026-11-08T04:00:00Z" },
+    { key: "satbrunch", titleKey: "ev.satbrunch", title: "Brunch", start: "2026-11-07T15:00:00Z", end: "2026-11-07T16:00:00Z" },
+    { key: "ceremony", titleKey: "ev.ceremony", title: "Wedding Ceremony", start: "2026-11-07T17:30:00Z", end: "2026-11-07T20:30:00Z" },
+    { key: "reception", titleKey: "ev.reception", title: "Reception", start: "2026-11-07T23:30:00Z", end: "2026-11-08T04:30:00Z" },
   ].map((e) => ({ ...e, s: Date.parse(e.start), e2: Date.parse(e.end) }));
 
   const t = (k, fb) => (window.t ? window.t(k) : fb);

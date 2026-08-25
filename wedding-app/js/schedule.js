@@ -1,11 +1,14 @@
 /* Schedule: per-event "Add to calendar" (.ics) + "Map" buttons. */
 (function () {
   "use strict";
+  // Times are UTC instants for America/New_York (EST, UTC-5, in Nov 2026).
   const EVENTS = {
-    haldi: { title: "Haldi", start: "20261106T150000Z", end: "20261106T170000Z", loc: "Conrad New York Downtown, 102 North End Ave, New York, NY 10282", map: "Conrad New York Downtown" },
+    haldi: { title: "Haldi", start: "20261106T160000Z", end: "20261106T180000Z", loc: "Conrad New York Downtown, 102 North End Ave, New York, NY 10282", map: "Conrad New York Downtown" },
     sangeet: { title: "Sangeet", start: "20261107T000000Z", end: "20261107T040000Z", loc: "The Lighthouse at Pier 61, Chelsea Piers, New York, NY 10011", map: "The Lighthouse at Pier 61 Chelsea Piers" },
-    ceremony: { title: "Wedding Ceremony", start: "20261107T210000Z", end: "20261107T230000Z", loc: "Conrad New York Downtown, 102 North End Ave, New York, NY 10282", map: "Conrad New York Downtown" },
-    reception: { title: "Reception", start: "20261108T000000Z", end: "20261108T040000Z", loc: "Hall des Lumières, 49 Chambers Street, New York, NY 10007", map: "Hall des Lumieres 49 Chambers Street New York" },
+    // The site lists no end time for Saturday brunch — the one-hour end is a calendar-export convenience.
+    satbrunch: { title: "Brunch", start: "20261107T150000Z", end: "20261107T160000Z", loc: "Conrad New York Downtown, 102 North End Ave, New York, NY 10282", map: "Conrad New York Downtown" },
+    ceremony: { title: "Wedding Ceremony", start: "20261107T173000Z", end: "20261107T203000Z", loc: "Conrad New York Downtown, 102 North End Ave, New York, NY 10282", map: "Conrad New York Downtown" },
+    reception: { title: "Reception", start: "20261107T233000Z", end: "20261108T043000Z", loc: "Hall des Lumières, 49 Chambers Street, New York, NY 10007", map: "Hall des Lumieres 49 Chambers Street New York" },
   };
 
   function ics(ev) {

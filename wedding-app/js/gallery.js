@@ -46,8 +46,10 @@
     capEl.hidden = !capEl.textContent;
     commentStatus.textContent = "";
     commentStatus.className = "lightbox__cstatus";
-    if (useSupa) { commentsEl.innerHTML = ""; commentsEl.hidden = true; }
-    else renderComments(photo);
+    const curated = !!photo.curated;
+    if (useSupa || curated) { commentsEl.innerHTML = ""; commentsEl.hidden = true; }
+    else { commentsEl.hidden = false; renderComments(photo); }
+    if (!useSupa && commentForm) commentForm.hidden = curated;
     lightbox.classList.add("open");
     lightbox.setAttribute("aria-hidden", "false");
   }
@@ -57,6 +59,14 @@
     activePhoto = null;
   }
   lightbox.addEventListener("click", (e) => { if (e.target === lightbox) closeLightbox(); });
+  // Curated "Moments Together" tiles open in the same lightbox (the href is the
+  // no-JS fallback).
+  document.querySelectorAll("#momentsGrid .moments__tile").forEach((a) => {
+    a.addEventListener("click", (e) => {
+      e.preventDefault();
+      openPhoto({ url: a.getAttribute("href"), caption: "", curated: true });
+    });
+  });
   lightbox.querySelector(".lightbox__close").addEventListener("click", closeLightbox);
   document.addEventListener("keydown", (e) => { if (e.key === "Escape" && lightbox.classList.contains("open")) closeLightbox(); });
 
@@ -192,6 +202,8 @@
   const fileInput = document.getElementById("photoInput");
   const cameraBtn = document.getElementById("cameraBtn");
   const cameraInput = document.getElementById("cameraInput");
+  // The shared Supabase schema stores no captions, so hide the caption field there.
+  if (useSupa && form.elements["caption"]) form.elements["caption"].hidden = true;
   function setStatus(msg, kind) {
     status.textContent = msg;
     status.className = "share__status" + (kind ? " " + kind : "");
@@ -199,11 +211,14 @@
 
   function upload(file) {
     if (!file) return setStatus("Please choose a photo first.", "err");
-    if (file.size > 15 * 1024 * 1024) return setStatus("That photo is over the 15 MB limit.", "err");
+    // Same rules as the website: type/extension allowlist + 8 MB cap.
+    const okType = /^image\/(jpeg|png|webp|avif|gif|heic|heif)$/i.test(file.type || "") ||
+      /\.(jpe?g|png|webp|avif|gif|heic|heif)$/i.test(file.name || "");
+    if (!okType) return setStatus("Please choose a JPEG, PNG, WebP, AVIF, GIF, or HEIC image.", "err");
+    if (file.size > 8 * 1024 * 1024) return setStatus("Please choose an image under 8 MB.", "err");
 
     if (useSupa) {
       // Matches the website: upload to the guest-uploads bucket, then a moderated row.
-      const caption = form.elements["caption"].value.trim();
       const ext = (file.name.split(".").pop() || "jpg").toLowerCase().replace(/[^a-z0-9]/g, "") || "jpg";
       const rand = Math.random().toString(36).slice(2);
       const path = Date.now() + "-" + rand + "." + ext;
@@ -212,7 +227,8 @@
         if (!sb) return setStatus("Couldn't connect — please try again.", "err");
         sb.storage.from("guest-uploads").upload(path, file, { contentType: file.type }).then((u) => {
           if (u.error) return setStatus("Upload failed — please try again.", "err");
-          sb.from("gallery_photos").insert({ storage_path: path, alt_text: caption || "Guest photo" }).then((i) => {
+          // Matches the website: alt_text is always "Guest photo" — no captions stored.
+          sb.from("gallery_photos").insert({ storage_path: path, alt_text: "Guest photo" }).then((i) => {
             if (i.error) { sb.storage.from("guest-uploads").remove([path]).catch(() => {}); return setStatus("Upload failed — please try again.", "err"); }
             form.reset();
             setStatus("Thank you! Your photo will appear once it's approved. 💛", "ok");

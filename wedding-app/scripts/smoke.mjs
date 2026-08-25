@@ -49,7 +49,7 @@ const swShell = (() => {
 })();
 
 const PAGES = ["/", "/index.html", "/schedule.html", "/rsvp.html", "/pass.html", "/gallery.html", "/guestbook.html", "/story.html", "/admin.html"];
-const ASSETS = ["/manifest.json", "/sw.js", "/css/styles.css", "/robots.txt", "/sitemap.xml"];
+const ASSETS = ["/manifest.webmanifest", "/sw.js", "/css/styles.css", "/robots.txt"];
 
 await new Promise((r) => server.listen(0, r));
 const base = `http://127.0.0.1:${server.address().port}`;

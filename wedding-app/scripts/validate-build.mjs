@@ -73,6 +73,8 @@ const DEV_PATTERNS = [
 ];
 const frontendText = walk(ROOT, (f) => /\.(html|css|js|json|webmanifest)$/i.test(f));
 for (const f of frontendText) {
+  // Vendored third-party libraries legitimately mention localhost internally.
+  if (/(^|\/)vendor\//.test(rel(f))) continue;
   const txt = fs.readFileSync(f, "utf8");
   for (const re of DEV_PATTERNS) {
     const m = txt.match(re);
@@ -99,14 +101,14 @@ const site = fs.readFileSync(path.join(ROOT, "js", "site.js"), "utf8");
 if (!/serviceWorker\s*\.\s*register\(\s*["']sw\.js["']/.test(site))
   fail('js/site.js: service worker is not registered with register("sw.js")');
 
-/* ---- manifest.json: valid JSON + required fields + icons exist ---- */
+/* ---- manifest.webmanifest: valid JSON + required fields + icons exist ---- */
 try {
-  const mani = JSON.parse(fs.readFileSync(path.join(ROOT, "manifest.json"), "utf8"));
-  for (const k of ["name", "start_url", "display", "icons"]) if (!(k in mani)) fail(`manifest.json: missing "${k}"`);
-  if (!Array.isArray(mani.icons) || !mani.icons.length) fail("manifest.json: no icons declared");
-  for (const ic of mani.icons || []) if (ic.src && !exists(ic.src)) fail(`manifest.json: icon "${ic.src}" is missing`);
+  const mani = JSON.parse(fs.readFileSync(path.join(ROOT, "manifest.webmanifest"), "utf8"));
+  for (const k of ["name", "start_url", "display", "icons"]) if (!(k in mani)) fail(`manifest.webmanifest: missing "${k}"`);
+  if (!Array.isArray(mani.icons) || !mani.icons.length) fail("manifest.webmanifest: no icons declared");
+  for (const ic of mani.icons || []) if (ic.src && !exists(ic.src)) fail(`manifest.webmanifest: icon "${ic.src}" is missing`);
 } catch (e) {
-  fail(`manifest.json: invalid JSON — ${e.message}`);
+  fail(`manifest.webmanifest: invalid JSON — ${e.message}`);
 }
 
 /* ---- Required PWA icons ---- */

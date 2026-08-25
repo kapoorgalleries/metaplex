@@ -11,6 +11,12 @@
     e.preventDefault();
     const q = form.elements["q"].value.trim();
     if (!q) return;
+    // Shared-site (Supabase) mode has no /api seating lookup — tables are
+    // assigned closer to the day, so show the friendly pending note.
+    if (window.Supa && window.Supa.enabled) {
+      card(`<p class="seat__pending">${t("seat.pending", "You're on the list! Your table will be assigned closer to the day.")}</p>`);
+      return;
+    }
     result.innerHTML = `<p class="seat__searching">${t("seat.searching", "Searching…")}</p>`;
     fetch("/api/seating?q=" + encodeURIComponent(q))
       .then((r) => (r.ok ? r.json() : { matches: [] }))

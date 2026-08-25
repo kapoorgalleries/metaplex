@@ -1,6 +1,6 @@
 # Priya &amp; Sanjay — Wedding App (2026)
 
-A **phone app** for **Priya &amp; Sanjay**, October 17, 2026 · Udaipur, India.
+A **phone app** for **Priya &amp; Sanjay**, November 6 &amp; 7, 2026 · New York City.
 
 It's an **installable PWA** (Progressive Web App): on a phone, open it in the browser and
 choose **Add to Home Screen** — it then launches full-screen with its own icon, a native
@@ -63,11 +63,11 @@ npm start         # run the full app (static site + API) on :8080
 - **`validate`** (`scripts/validate-build.mjs`) checks the source: every expected
   page exists; every CSS/JS/asset referenced by HTML resolves; no broken relative
   paths and no accidental local-dev paths (`localhost`, `file://`, machine paths);
-  every service-worker-cached file exists; `manifest.json` is valid with real
+  every service-worker-cached file exists; `manifest.webmanifest` is valid with real
   icons; the SW is registered with `register("sw.js")`; and every JS file parses.
 - **`build`** (`scripts/build.mjs`) deletes stale output and copies **only** the
-  deployable frontend (HTML, `css/`, `js/`, `icons/`, `assets/`, `manifest.json`,
-  `sw.js`, `robots.txt`, `sitemap.xml`) into `dist/`. Server code, tooling,
+  deployable frontend (HTML, `css/`, `js/`, `icons/`, `assets/`, `manifest.webmanifest`,
+  `sw.js`, `robots.txt`) into `dist/`. Server code, tooling,
   `node_modules`, local data/uploads, docs, and any `.env`/`.log`/key files are
   excluded. `dist/` is git-ignored and reproducible from a clean checkout.
 - **`scan`** (`scripts/scan-dist.mjs`) fails if `dist/` contains any backend/tooling
@@ -98,13 +98,13 @@ Pages — and how the static `dist/` and the API relate).
 - **Events** — Mehndi &amp; Haldi, Sangeet, Ceremony, Reception, each with time, venue and dress code.
 - **Add to calendar** — generates a downloadable `.ics` with all four events.
 - **Travel &amp; Stay** — airport info, hotel room block, venue map links.
-- **Installable + offline** — web app manifest (`manifest.json`), app icons (`icons/`), and
+- **Installable + offline** — web app manifest (`manifest.webmanifest`), app icons (`icons/`), and
   a service worker (`sw.js`) that caches the app shell so it opens offline.
 - **Mobile app chrome** — top app bar (back / title / More) and a bottom tab bar, rendered
   on every page by `js/site.js`.
 - **Photos** — browse a shared gallery and upload your own from the weekend.
 - **Guestbook** — guests leave public well-wishes (optionally screened by Claude).
-- **RSVP** — saved to the backend; per-event selection, meal prefs, hotel-block, notes.
+- **RSVP** — invitation-gated like the website; collects attendee names, children under 12, phone (with SMS consent), postal address, a song request, and notes.
 - **RSVP admin dashboard** (`admin.html`) — password-protected page with live headcounts,
   per-event tallies, the full response table, and CSV export.
 - **Wedding concierge** — a Claude-powered chat bubble (on every screen) that answers guest
@@ -131,7 +131,7 @@ Pages — and how the static `dist/` and the API relate).
 wedding-app/
 ├── index.html  schedule.html  story.html  travel.html  things-to-do.html
 ├── party.html  gallery.html   guestbook.html  rsvp.html  faq.html  admin.html
-├── manifest.json     # PWA manifest (installable)
+├── manifest.webmanifest  # PWA manifest (installable)
 ├── sw.js             # service worker (offline app shell)
 ├── icons/            # app icons (192 / 512 / maskable)
 ├── css/styles.css    # theme + app-shell layout (marigold / maroon / gold)
@@ -214,7 +214,7 @@ guest) and skips image types vision can't read (e.g. HEIC). Disable it with `PHO
 | Calendar event times | `events[]` in `js/main.js` |
 | Gallery photos | replace `.gallery__tile` gradients with `<img>` in `js/main.js` / `index.html` |
 | Colours &amp; fonts | CSS variables in `:root` (`css/styles.css`) |
-| Registry / honeymoon-fund links | the `.registry__links` anchors in `index.html` |
+| Gifts &amp; Blessings (Zelle) | `registry.html` + `assets/zelle-qr.png` |
 
 ## Wiring up a real RSVP backend
 

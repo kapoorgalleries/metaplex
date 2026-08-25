@@ -19,8 +19,8 @@
   --shadow: 0 18px 40px -20px rgba(74, 14, 24, 0.45);
   --radius: 18px;
 
-  --serif: "Cormorant Garamond", Georgia, serif;
-  --display: "Marcellus", "Cormorant Garamond", serif;
+  --serif: "Cormorant Garamond", Georgia, "Noto Serif Devanagari", "Noto Serif Kannada", serif;
+  --display: "Marcellus", "Cormorant Garamond", "Noto Serif Devanagari", "Noto Serif Kannada", serif;
   --sans: "Jost", system-ui, sans-serif;
 
   /* Refined ease-out for entrances (easeOutQuint-ish) */

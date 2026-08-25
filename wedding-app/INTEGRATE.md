@@ -1,4 +1,4 @@
-# Integrating the app with priyasanjay.pages.dev
+# Integrating the app with sanjaywedspriya.com
 
 A practical guide for the couple / hosts: how to put the installable wedding app on the
 same domain as the website, share one Supabase data source, and run the day-to-day
@@ -12,8 +12,12 @@ You have **two pieces that live on one domain**:
 
 | Piece | What it is | Where it lives |
 |---|---|---|
-| **Website** | Marketing/info site (Bolt/Vite) at `https://priyasanjay.pages.dev` | Repo `kapoorgalleries/sb1-vuxiwzek`, hosted on **Cloudflare Pages**, backed by **Supabase** (project ref `xgsfrltjnigsglkxhmsq`) |
+| **Website** | Static wedding site at `https://sanjaywedspriya.com` (Pages origin `priyasanjay.pages.dev`) | Repo `kapoorgalleries/sb1-vuxiwzek`, branch **`wedding-site`** (NOT `main` — `main` is an unrelated project), hosted on **Cloudflare Pages**, backed by **Supabase** (project ref `xgsfrltjnigsglkxhmsq`). Deploys copy an **allowlist** of files via `scripts/build-pages.mjs`, and `_worker.js` passcode-gates the whole host. |
 | **App** (this folder, `wedding-app/`) | Installable PWA — schedule, RSVP, guestbook, photo gallery, travel, FAQ, and more; works offline | Built to `wedding-app/dist/` by `npm run ci`; deployed under the website at `/app/` (recommended) or as its own Pages project |
+
+> **Note:** the website currently installs **itself** as a PWA (its "The Guest App"
+> section is an Add-to-home-screen button, not a link to this app). Deploying this
+> richer app at `/app/` is additive — see Section 4 for linking it from the site.
 
 When the app's **Supabase mode** is turned on (Section 5), both pieces read and write the
 **same Supabase data**: one guestbook, one photo gallery, one RSVP list, one Hosts
@@ -26,8 +30,21 @@ flip it on deliberately.
 ## 2. Deploy workflow — recommended: app at `/app`
 
 Serve the app from the website's own Pages project so guests get one domain:
-`https://priyasanjay.pages.dev/app/`. The app already uses relative asset paths, so it
+`https://sanjaywedspriya.com/app/`. The app already uses relative asset paths, so it
 works unmodified under the subpath.
+
+Three website-repo realities to respect (all handled by the steps below):
+
+1. The site lives on branch **`wedding-site`** — never push app files to `main`.
+2. `scripts/build-pages.mjs` copies an **explicit allowlist** into the deploy
+   artifact — an `app/` directory ships only after you add `"app"` to that
+   allowlist (with its file extensions).
+3. `_worker.js` passcode-gates the host and returns **404 for any path whose file
+   name looks sensitive** (`*.json`, `*.txt`, `*.xml`, `*.md`, …). That's why the
+   app's manifest is named `manifest.webmanifest` and why `robots.txt` /
+   `sitemap.xml` / `package.json` must be left out of the copied artifact.
+   Guests who entered the passcode on the site are automatically unlocked for
+   `/app/` too (the auth cookie is host-wide).
 
 **Step 1 — turn on Supabase mode before building** (so the deployed app shares the
 website's data). In `wedding-app/js/supa.js`, change the `enabled` line so the default is
@@ -52,31 +69,39 @@ npm ci
 npm run ci        # validate → build → scan → smoke; output in wedding-app/dist/
 ```
 
-**Step 3 — copy the CONTENTS of `dist/` into the website repo** at `public/app/`.
-Vite/Bolt copies everything in `public/` verbatim to the site root, so `public/app/`
-serves at `/app/`:
+**Step 3 — copy the CONTENTS of `dist/` into the website repo** at `app/` (repo
+root of the **`wedding-site`** branch — the site has no `public/` directory), and
+drop the files the site's worker would 404 anyway:
 
 ```bash
 # from the parent directory that holds both repos
-rm -rf sb1-vuxiwzek/public/app
-mkdir -p sb1-vuxiwzek/public/app
-cp -r metaplex/wedding-app/dist/. sb1-vuxiwzek/public/app/
+cd sb1-vuxiwzek && git checkout wedding-site && cd ..
+rm -rf sb1-vuxiwzek/app
+mkdir -p sb1-vuxiwzek/app
+cp -r metaplex/wedding-app/dist/. sb1-vuxiwzek/app/
+rm -f sb1-vuxiwzek/app/robots.txt sb1-vuxiwzek/app/package.json sb1-vuxiwzek/app/package-lock.json
 ```
 
-**Step 4 — commit & push the website repo.** Cloudflare Pages auto-builds on push:
+**Step 4 — allowlist `app/` in the site's deploy script** (one-time). In
+`sb1-vuxiwzek/scripts/build-pages.mjs`, add the `app` directory to the copied
+trees (alongside `img/` and `vendor/`), permitting these extensions:
+`.html .css .js .webmanifest .png .jpg .jpeg .webp .avif .svg .mp3 .ico`.
+Then commit & push the website repo — Cloudflare Pages auto-builds on push:
 
 ```bash
 cd sb1-vuxiwzek
-git add public/app
+git add app scripts/build-pages.mjs
 git commit -m "Add installable wedding app at /app"
-git push
+git push origin wedding-site
 ```
 
 **Step 5 — verify.** After the Pages build finishes, the app is live at:
 
 ```
-https://priyasanjay.pages.dev/app/
+https://sanjaywedspriya.com/app/
 ```
+
+(You'll pass the site's passcode gate first if your browser hasn't already.)
 
 Open it on a phone, check "Add to Home Screen" works, and run the Supabase verification
 in Section 5.
@@ -86,7 +111,8 @@ Notes:
   (Cloudflare Pages serves the site's own 404 for the whole origin) — that's fine. At a
   standalone root deploy, the app's own `404.html` still works because all its links are
   relative.
-- Repeat Steps 2–4 whenever you change app content (see Section 8).
+- Repeat Steps 2–3 + the push whenever you change app content (see Section 8) — the
+  allowlist edit in Step 4 is one-time.
 
 ---
 
@@ -126,8 +152,14 @@ Concierge and Push also won't work here (Section 10).
 
 ## 4. Homepage link
 
-Add this to the website's homepage (e.g. in the hero or nav). Style-neutral — inherits
-the site's own styles, or restyle the `<a>` however you like:
+**Current site behavior:** the website's "The Guest App" section installs the *site
+itself* as a PWA (`Add to home screen →` on `#app` — its code notes "this site IS the
+app"). It links nowhere external, so deploying this app will NOT surface it to guests
+until you add a link.
+
+If/when you want to point guests at this richer app, add this to the website's
+homepage (e.g. inside the `#app` section). Style-neutral — inherits the site's own
+styles, or restyle the `<a>` however you like:
 
 ```html
 <!-- Link to the wedding app -->
@@ -138,8 +170,9 @@ the site's own styles, or restyle the `<a>` however you like:
 </a>
 ```
 
-If you chose the separate-project route (Section 3), point `href` at that origin instead,
-e.g. `href="https://priya-sanjay-app.pages.dev/"` or `href="https://app.<your-domain>/"`.
+If you chose the separate-project route (Section 3), point `href` at that origin
+instead, e.g. `href="https://priya-sanjay-app.pages.dev/"` or
+`href="https://app.sanjaywedspriya.com/"`.
 
 ---
 
@@ -242,13 +275,15 @@ To change dates, venues, the story, FAQ answers, schedule details, etc.:
    npm run ci
    ```
 
-3. Recopy the artifact into the website repo and push (same as Section 2, Steps 3–4):
+3. Recopy the artifact into the website repo (branch `wedding-site`) and push
+   (same as Section 2, Step 3):
 
    ```bash
-   rm -rf sb1-vuxiwzek/public/app
-   mkdir -p sb1-vuxiwzek/public/app
-   cp -r metaplex/wedding-app/dist/. sb1-vuxiwzek/public/app/
-   cd sb1-vuxiwzek && git add public/app && git commit -m "Update app content" && git push
+   rm -rf sb1-vuxiwzek/app
+   mkdir -p sb1-vuxiwzek/app
+   cp -r metaplex/wedding-app/dist/. sb1-vuxiwzek/app/
+   rm -f sb1-vuxiwzek/app/robots.txt sb1-vuxiwzek/app/package.json sb1-vuxiwzek/app/package-lock.json
+   cd sb1-vuxiwzek && git add app && git commit -m "Update app content" && git push origin wedding-site
    ```
 
 Cloudflare Pages redeploys automatically. The service worker picks up the new build on

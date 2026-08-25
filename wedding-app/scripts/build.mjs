@@ -14,7 +14,7 @@ const DIST = path.join(ROOT, "dist");
 
 // Explicit allow-list of what ships. Anything not listed is excluded by default.
 const INCLUDE_DIRS = ["css", "js", "icons", "assets"];
-const INCLUDE_FILES = ["manifest.json", "sw.js", "robots.txt", "sitemap.xml"];
+const INCLUDE_FILES = ["manifest.webmanifest", "sw.js", "robots.txt"];
 // Everything else (server/, scripts/, data/, uploads/, package*.json, README.md,
 // DEPLOY.md, .gitignore, .env*, *.log, node_modules/, dist/) is intentionally omitted.
 

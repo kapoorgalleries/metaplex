@@ -10,13 +10,255 @@
   const tabsEl = document.getElementById("adminTabs");
   const countEl = document.getElementById("tabCount");
 
-  const EVENTS = ["Haldi", "Sangeet", "Ceremony", "Reception", "Farewell Brunch"];
+  // The four RSVP events, exactly as stored by the site's RSVP form.
+  const EVENTS = ["Haldi", "Sangeet", "Wedding Ceremony", "Reception"];
   const esc = (v) => window.escapeHtml(v == null ? "" : v);
   let token = sessionStorage.getItem("adminToken") || "";
   let active = "rsvps";
   const data = { rsvps: [], guestbook: [], songs: [], photos: [] };
 
   const headers = () => ({ "x-admin-token": token });
+
+  /* =========================================================
+     Supabase (shared-site) mode — when the app shares the
+     website's data (window.Supa), the hosts dashboard speaks
+     the site's RPC contract instead of the Node /api.
+     The passcode lives in memory only — never persisted
+     (site policy: never store the host passcode or guest
+     phone numbers on the device).
+     ========================================================= */
+  if (window.Supa && window.Supa.enabled) {
+    const supaPanel = document.getElementById("supaPanel");
+    const summaryEl = document.getElementById("supaSummary");
+    const pendingTitle = document.getElementById("supaPendingTitle");
+    const pendingEl = document.getElementById("supaPending");
+    const supaStatus = document.getElementById("supaStatus");
+
+    // Re-word the gate for the site's passcode (not the Node password).
+    const gateHeading = gate.querySelector("h3");
+    if (gateHeading) gateHeading.textContent = "Enter the dashboard passcode";
+    pwInput.placeholder = "Passcode";
+    pwInput.setAttribute("autocomplete", "off");
+    const loginBtn = loginForm.querySelector('button[type="submit"]');
+    if (loginBtn) loginBtn.textContent = "Load";
+
+    let pass = null;
+    const sb = () => window.Supa.client();
+    const h3 = (label, tag) =>
+      `<h3 class="hd-h3">${label}${tag != null ? ` <span class="hd-tag">${esc(tag)}</span>` : ""}</h3>`;
+
+    function renderSummary(d) {
+      const perEvent = d.per_event || {};
+      let H = "";
+
+      H += `<div class="admin__stats">` + [
+        [d.guests_invited, "Invited"],
+        [d.rsvps_received, "Responded"],
+        [d.guests_coming, "Guests coming"],
+        [d.not_replied, "Not replied"],
+      ].map(([n, l]) => `<div class="admin__stat"><strong>${esc(n == null ? "—" : n)}</strong><span>${l}</span></div>`).join("") + `</div>`;
+
+      const issues = Array.isArray(d.party_issues) ? d.party_issues : [];
+      if (issues.length) {
+        H += h3("Invitation problems reported", issues.length);
+        issues.forEach((pi) => {
+          H += `<div class="hd-row hd-row--urgent"><div><strong>${esc(pi.household)}</strong>${pi.who ? " · " + esc(pi.who) : ""}</div>` +
+            `<div>${esc(pi.message)}</div>` +
+            `<div class="hd-sub">${esc(String(pi.at || "").slice(0, 16).replace("T", " "))}</div></div>`;
+        });
+      }
+
+      const selfAdd = Array.isArray(d.self_review) ? d.self_review : [];
+      if (selfAdd.length) {
+        H += h3("Self-added — tick to approve", selfAdd.length);
+        selfAdd.forEach((s) => {
+          H += `<div class="hd-row hd-row--flex"><span>${esc(s.name)}</span>` +
+            `<span class="hd-mini"><span class="hd-tag">${esc(s.at || "")}</span>` +
+            `<button class="hd-approve" data-selfrev="${esc(s.id)}">✓ Approve</button></span></div>`;
+        });
+      }
+
+      const reps = Array.isArray(d.rsvps) ? d.rsvps : [];
+      H += h3("Who has replied", reps.length);
+      if (reps.length) reps.forEach((r) => {
+        const evs = (r.events || []).join(", ");
+        const kids = r.children ? ` · ${esc(r.children)} under 12` : "";
+        const extra = [];
+        if (r.attending) {
+          if (r.who) extra.push(`<strong>Coming:</strong> ${esc(r.who)}`);
+          const miss = (r.names_missing == null) ? (r.who ? 0 : (r.count || 0)) : r.names_missing;
+          if (miss > 0) extra.push(`<span class="hd-warn">` +
+            (r.who ? `${esc(miss)} more not yet named` : `${esc(miss)} guest${miss == 1 ? "" : "s"} not yet named`) + `</span>`);
+          if (r.names_over > 0) extra.push(`<span class="hd-warn">${esc(r.names_over)} more named than seats — check plus-ones</span>`);
+        }
+        if (r.email) extra.push(esc(r.email));
+        if (r.address) extra.push("✉ " + esc(r.address));
+        if (r.phone) extra.push(esc(r.phone));
+        if (r.song) extra.push("♪ " + esc(r.song));
+        if (r.note) extra.push("“" + esc(r.note) + "”");
+        H += `<div class="hd-row"><div class="hd-row--flex"><span><strong>${esc(r.name)}</strong>` +
+          (r.attending ? ` · ${r.count != null ? esc(r.count) + " " : ""}attending${kids}` : " · <em>regrets</em>") +
+          `</span><span class="hd-tag">${esc(r.at || "")}</span></div>` +
+          (r.attending && evs ? `<div class="hd-ev">${esc(evs)}</div>` : "") +
+          (extra.length ? `<div class="hd-sub">${extra.join(" · ")}</div>` : "") + `</div>`;
+      });
+      else H += `<div class="hd-row">No replies yet.</div>`;
+
+      H += h3("Headcount by event");
+      EVENTS.forEach((e) => {
+        H += `<div class="hd-row hd-row--flex"><span>${e}</span><span class="hd-tag">${esc(perEvent[e] || 0)} guests</span></div>`;
+      });
+      H += `<div class="hd-row hd-row--flex"><span>Children under 12</span><span class="hd-tag">${esc(d.children_coming || 0)} coming</span></div>`;
+
+      const songs = Array.isArray(d.songs) ? d.songs : [];
+      H += h3("Song requests", songs.length);
+      if (songs.length) songs.forEach((s) => { H += `<div class="hd-row">${esc(s)}</div>`; });
+      else H += `<div class="hd-row">None yet</div>`;
+
+      const nr = Array.isArray(d.not_replied_list) ? d.not_replied_list : [];
+      H += h3("Not yet replied", nr.length);
+      nr.forEach((g) => {
+        H += `<div class="hd-row hd-row--flex"><span>${esc(g.name)}</span><span class="hd-tag">${esc(g.code || "")}</span></div>`;
+      });
+
+      summaryEl.innerHTML = H;
+      pendingTitle.innerHTML = `To approve <span class="hd-tag">${esc(d.pending_photos || 0)} photos · ${esc(d.pending_messages || 0)} notes</span>`;
+
+      // Self-added review: real only once the server confirms it — the
+      // passcode is checked in review_self_add, never in the browser.
+      summaryEl.querySelectorAll("button[data-selfrev]").forEach((btn) =>
+        btn.addEventListener("click", () => {
+          btn.disabled = true;
+          sb().then((cli) => cli && cli.rpc("review_self_add", { p_pass: pass, p_guest_id: btn.getAttribute("data-selfrev") }))
+            .then((r) => {
+              if (!r || r.error || !r.data || r.data.error || !r.data.ok) { btn.disabled = false; return; }
+              const rowEl = btn.closest(".hd-row");
+              if (rowEl) rowEl.remove();
+              if (window.toast) window.toast("Approved ✓", "ok");
+            })
+            .catch(() => { btn.disabled = false; });
+        })
+      );
+    }
+
+    function loadSummary() {
+      return sb().then((cli) => {
+        if (!cli) throw new Error("Couldn't reach the server — check your connection and try again.");
+        return cli.rpc("get_rsvp_summary", { p_pass: pass });
+      }).then((r) => {
+        // A transport/server error is not a wrong passcode — say so.
+        if (r.error) throw new Error("Couldn't reach the server — check your connection and try again.");
+        const d = r.data;
+        if (!d || d.error) throw new Error("That passcode didn't work. After several tries the login pauses for a while.");
+        renderSummary(d);
+      });
+    }
+
+    function loadPending() {
+      pendingEl.innerHTML = `<p style="color:var(--muted)">Loading…</p>`;
+      sb().then((cli) => cli && cli.rpc("get_pending", { p_pass: pass })).then((r) => {
+        if (!r || r.error || !r.data || r.data.error) {
+          pendingEl.innerHTML = `<div class="hd-row">Couldn’t load the approvals queue — refresh to try again.</div>`;
+          return;
+        }
+        const d = r.data;
+        let H = "";
+        const photos = Array.isArray(d.photos) ? d.photos : [];
+        if (photos.length) {
+          H += `<div class="hd-pgrid">` + photos.map((p) =>
+            `<div class="hd-pcard"><img loading="lazy" src="${esc(window.Supa.photoUrl(p.path))}" alt="" />` +
+            `<div class="hd-pa"><button class="hd-approve" data-kind="photo" data-act="approve" data-id="${esc(p.id)}">Approve</button>` +
+            `<button class="hd-reject" data-kind="photo" data-act="reject" data-id="${esc(p.id)}">Reject</button></div></div>`
+          ).join("") + `</div>`;
+        }
+        (Array.isArray(d.messages) ? d.messages : []).forEach((m) => {
+          H += `<div class="hd-row hd-row--flex"><span><strong>${esc(m.name)}</strong>: ${esc(m.message)}</span>` +
+            `<span class="hd-mini"><button class="hd-approve" data-kind="message" data-act="approve" data-id="${esc(m.id)}">Approve</button>` +
+            `<button class="hd-reject" data-kind="message" data-act="reject" data-id="${esc(m.id)}">Reject</button></span></div>`;
+        });
+        pendingEl.innerHTML = H || `<div class="hd-row">Nothing waiting.</div>`;
+        pendingEl.querySelectorAll("button[data-id]").forEach((b) =>
+          b.addEventListener("click", () => {
+            b.disabled = true;
+            sb().then((cli) => cli && cli.rpc("moderate_item", {
+              p_pass: pass,
+              p_kind: b.getAttribute("data-kind"),
+              p_id: b.getAttribute("data-id"),
+              p_action: b.getAttribute("data-act"),
+            })).then(() => { loadPending(); loadSummary().catch(() => {}); })
+              .catch(() => { b.disabled = false; });
+          })
+        );
+      }).catch(() => {
+        pendingEl.innerHTML = `<div class="hd-row">Couldn’t load the approvals queue — refresh to try again.</div>`;
+      });
+    }
+
+    /* Announcement banner: posts/clears the notice guests see. */
+    const annFormS = document.getElementById("supaAnnForm");
+    const annTextS = document.getElementById("supaAnnText");
+    const annStatusS = document.getElementById("supaAnnStatus");
+    const annClearS = document.getElementById("supaAnnClear");
+    function annSay(msg, ok) {
+      annStatusS.className = "rsvp__status" + (ok === true ? " ok" : ok === false ? " err" : "");
+      annStatusS.textContent = msg;
+    }
+    function prefillAnnouncement() {
+      sb().then((cli) => cli && cli.rpc("get_announcement")).then((r) => {
+        const d = r && r.data;
+        const msg = d && (d.message || (Array.isArray(d) && d[0] && d[0].message));
+        if (msg) { annTextS.value = msg; annSay("Live now."); }
+      }).catch(() => {});
+    }
+    annFormS.addEventListener("submit", (e) => {
+      e.preventDefault();
+      const m = annTextS.value.trim();
+      if (!m) return annSay("Type a message first.", false);
+      annSay("Posting…");
+      sb().then((cli) => cli && cli.rpc("set_announcement", { p_pass: pass, p_message: m }))
+        .then((r) => { (r && r.data && r.data.ok) ? annSay("Posted — live on the site.", true) : annSay("Error, try again.", false); })
+        .catch(() => annSay("Error, try again.", false));
+    });
+    annClearS.addEventListener("click", () => {
+      annSay("Clearing…");
+      sb().then((cli) => cli && cli.rpc("clear_announcement", { p_pass: pass }))
+        .then((r) => {
+          if (r && r.data && r.data.ok) { annTextS.value = ""; annSay("Cleared.", true); }
+          else annSay("Error.", false);
+        })
+        .catch(() => annSay("Error.", false));
+    });
+
+    function unlockSupa() {
+      loginStatus.className = "rsvp__status";
+      loginStatus.textContent = "Checking…";
+      loadSummary().then(() => {
+        loginStatus.textContent = "";
+        gate.hidden = true;
+        panel.hidden = true;
+        supaPanel.hidden = false;
+        loadPending();
+        prefillAnnouncement();
+      }).catch((err) => {
+        pass = null;
+        loginStatus.className = "rsvp__status err";
+        loginStatus.textContent = err.message;
+      });
+    }
+    loginForm.addEventListener("submit", (e) => {
+      e.preventDefault();
+      pass = pwInput.value.trim();
+      if (!pass) return;
+      unlockSupa();
+    });
+    document.getElementById("supaRefresh").addEventListener("click", () => {
+      supaStatus.textContent = "Refreshing…";
+      loadSummary()
+        .then(() => { supaStatus.textContent = ""; loadPending(); })
+        .catch((err) => { supaStatus.textContent = err.message; });
+    });
+    return; // The Node-mode wiring below is not used in Supabase mode.
+  }
 
   async function get(url) {
     const r = await fetch(url, { headers: headers() });

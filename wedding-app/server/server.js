@@ -104,24 +104,40 @@ RSVP DEADLINE: August 31, 2026
 CONTACT: the couple's planners — sonal@sjsevents.com (cc ginny@sjsevents.com)
 
 EVENTS:
-- Haldi — Fri, Nov 6, morning, Conrad New York Downtown (102 North End Avenue, New York, NY 10282). A bright morning of turmeric, music and blessings.
-- Sangeet — Fri, Nov 6, 7:00 PM, The Lighthouse at Pier 61 (Chelsea Piers, Pier 61, W 23rd St & the Hudson, New York, NY 10011). An evening of music and dance.
-- Wedding Ceremony — Sat, Nov 7, daytime, Conrad New York Downtown (102 North End Avenue, New York, NY 10282).
-- Reception — Sat, Nov 7, evening, Hall des Lumières (49 Chambers Street, New York, NY 10007).
+- Haldi — Fri, Nov 6, 11:00 AM – 1:00 PM, Conrad New York Downtown (102 North End Avenue, New York, NY 10282). A bright morning of turmeric, music and blessings.
+- Sangeet — Fri, Nov 6, 7:00 PM, The Lighthouse at Pier 61 (Chelsea Piers, Pier 61, W 23rd St & the Hudson, New York, NY 10011). An evening of music, dance, and performances from both families.
+- Brunch — Sat, Nov 7, 10:00 AM, Conrad New York Downtown (102 North End Avenue, New York, NY 10282).
+- Wedding Ceremony — Sat, Nov 7: Baraat 12:30 PM, Ceremony 1:30–3:30 PM, Conrad New York Downtown (102 North End Avenue, New York, NY 10282). The baraat and the mandap ceremony — the heart of the weekend.
+- Reception — Sat, Nov 7: Cocktails 6:30 PM, Reception 7:30–11:30 PM, Hall des Lumières (49 Chambers Street, New York, NY 10007). Dinner, dancing, and a true celebration to close the weekend.
 - Farewell Brunch — Sun, Nov 8, late morning (optional; details to follow).
 
 ATTIRE:
-- Indian festive attire is warmly encouraged all weekend — wear your most colourful outfits.
-- Please AVOID red, maroon, gold, white, and ivory (traditionally reserved for the couple).
-- By event: Haldi — bright colours you don't mind getting a little turmeric on; Sangeet — colourful & celebratory; Ceremony — traditional; Reception — formal.
+- Indian festive attire is warmly encouraged across the weekend — please wear your most colourful outfits!
+- Haldi — bright, easy colours you won't mind catching a little turmeric.
+- Sangeet — colourful and celebratory — something you can dance in.
+- Wedding Ceremony — traditional and festive; modest coverage is kindly appreciated. Please reserve red and ivory for the bride and groom.
+- Reception — Indian traditional or black tie — bring a little sparkle for the dance floor.
 
 TRAVEL & STAY:
-- Room block at the Conrad New York Downtown (102 North End Avenue), group rate from $409/night, rooms held Nov 5–8. Direct booking link & group code to follow.
+- Room block at the Conrad New York Downtown (102 North End Avenue), an all-suite hotel in Battery Park City. Group rate from $409/night, rooms held Nov 5–8.
+- Book with group code KMWED26 by October 6, 2026 to secure the group rate: https://book.passkey.com/go/KapoorMallikarjunaWedding
 - All three celebration venues are in Manhattan: the Conrad and Hall des Lumières in Lower Manhattan, The Lighthouse at Pier 61 in Chelsea.
+
+TRANSPORT:
+- Shuttle service from the airport to the hotel will not be provided — guests are kindly asked to arrange their own transportation.
+- Group transport between venues will run from the Conrad — timings to follow.
+
+DINING:
+- Wedding meals will be served buffet-style, with many vegetarian options available.
+- Guests with nut allergies should notify a banquet server before approaching the buffet so the team can provide guidance regarding the available dishes.
+
+GIFTS:
+- Your presence is the greatest gift of all. The couple gently requests no boxed or wrapped gifts.
+- For those who wish to give, a gift may be sent by Zelle (see the Gifts & Blessings / registry page), or simply speak to the bride or groom.
 
 FAQ:
 - Plus-ones / party size: your invitation and RSVP reflect the seats reserved for you; if unsure, ask the planners.
-- Children: include everyone in your party in the guest count.
+- Children: the RSVP form asks how many of your party are children under 12 — they are counted within your reserved seats.
 - Dress code: see ATTIRE above.
 - The Sunday farewell brunch is optional; details to follow.
 - For anything at all, email sonal@sjsevents.com (cc ginny@sjsevents.com).
@@ -334,10 +350,11 @@ const push = createPush(DATA_DIR);
 // Day-of reminders (UTC start times; 2 hours before each event).
 // Times are US Eastern (EST = UTC-5 in November); startISO is the event start in UTC.
 push.initReminders([
-  { key: "haldi", title: "Haldi", startISO: "2026-11-06T15:00:00Z", timeLabel: "Morning", loc: "Conrad New York Downtown" },
+  { key: "haldi", title: "Haldi", startISO: "2026-11-06T16:00:00Z", timeLabel: "11:00 AM", loc: "Conrad New York Downtown" },
   { key: "sangeet", title: "Sangeet", startISO: "2026-11-07T00:00:00Z", timeLabel: "7:00 PM", loc: "The Lighthouse at Pier 61" },
-  { key: "ceremony", title: "Wedding Ceremony", startISO: "2026-11-07T21:00:00Z", timeLabel: "Daytime", loc: "Conrad New York Downtown" },
-  { key: "reception", title: "Reception", startISO: "2026-11-08T00:00:00Z", timeLabel: "Evening", loc: "Hall des Lumières" },
+  { key: "satbrunch", title: "Brunch", startISO: "2026-11-07T15:00:00Z", timeLabel: "10:00 AM", loc: "Conrad New York Downtown" },
+  { key: "ceremony", title: "Wedding Ceremony", startISO: "2026-11-07T17:30:00Z", timeLabel: "12:30 PM", loc: "Conrad New York Downtown" },
+  { key: "reception", title: "Reception", startISO: "2026-11-07T23:30:00Z", timeLabel: "6:30 PM", loc: "Hall des Lumières" },
 ]);
 
 app.get("/api/push/key", (_req, res) => res.json({ enabled: push.enabled, key: push.publicKey() }));
@@ -397,11 +414,15 @@ app.post("/api/rsvp", limitWrites, honeypot, (req, res) => {
     name,
     email,
     attending,
-    guests: Math.max(1, Math.min(10, parseInt(b.guests, 10) || 1)),
+    phone: trimStr(b.phone, 40),
+    guests: Math.max(1, Math.min(12, parseInt(b.guests, 10) || 1)),
+    children_under_12: Math.max(0, Math.min(12, parseInt(b.children_under_12, 10) || 0)),
     events: Array.isArray(b.events) ? b.events.map((e) => trimStr(e, 60)).filter(Boolean).slice(0, 10) : [],
-    meal: trimStr(b.meal, 40),
-    hotelBlock: Boolean(b.hotelBlock),
-    note: trimStr(b.note, 1000),
+    attendee_names: trimStr(b.attendee_names, 600),
+    mailing_address: trimStr(b.mailing_address, 500),
+    song: trimStr(b.song, 160),
+    note: trimStr(b.note, 1200),
+    party_issue: trimStr(b.party_issue, 1000),
     table: "",
     submittedAt: new Date().toISOString(),
   };
@@ -459,11 +480,15 @@ app.post("/api/rsvp/update", limitWrites, honeypot, (req, res) => {
   const e = list[idx];
   if (b.name != null && trimStr(b.name, 120)) e.name = trimStr(b.name, 120);
   if (b.attending === "yes" || b.attending === "no") e.attending = b.attending;
-  e.guests = Math.max(1, Math.min(10, parseInt(b.guests, 10) || e.guests || 1));
+  e.guests = Math.max(1, Math.min(12, parseInt(b.guests, 10) || e.guests || 1));
+  e.children_under_12 = Math.max(0, Math.min(12, parseInt(b.children_under_12, 10) || 0));
   e.events = Array.isArray(b.events) ? b.events.map((x) => trimStr(x, 60)).filter(Boolean).slice(0, 10) : e.events;
-  e.meal = trimStr(b.meal, 40);
-  e.hotelBlock = Boolean(b.hotelBlock);
-  e.note = trimStr(b.note, 1000);
+  e.phone = trimStr(b.phone, 40);
+  e.attendee_names = trimStr(b.attendee_names, 600);
+  e.mailing_address = trimStr(b.mailing_address, 500);
+  e.song = trimStr(b.song, 160);
+  e.note = trimStr(b.note, 1200);
+  e.party_issue = trimStr(b.party_issue, 1000);
   e.updatedAt = new Date().toISOString();
   writeJsonFile("rsvps.json", list);
   res.json({ ok: true });

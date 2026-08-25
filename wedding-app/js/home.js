@@ -1,7 +1,8 @@
 /* Home page: countdown + add-to-calendar (.ics) */
 (function () {
   "use strict";
-  const WEDDING_DATE = new Date("2026-11-07T16:00:00-05:00");
+  // Counts down to midnight going into Friday, Nov 6 — "until the wedding weekend begins".
+  const WEDDING_DATE = new Date("2026-11-06T00:00:00-05:00");
   const cd = {
     days: document.getElementById("cd-days"),
     hours: document.getElementById("cd-hours"),
@@ -25,11 +26,14 @@
   tick();
   setInterval(tick, 1000);
 
+  // UTC instants for America/New_York (EST, UTC-5, in Nov 2026). The site lists no
+  // end time for Saturday brunch — the one-hour end is a calendar-export convenience.
   const events = [
-    { title: "Priya & Sanjay — Haldi", start: "20261106T150000Z", end: "20261106T170000Z", loc: "Conrad New York Downtown, 102 North End Ave, New York, NY 10282" },
+    { title: "Priya & Sanjay — Haldi", start: "20261106T160000Z", end: "20261106T180000Z", loc: "Conrad New York Downtown, 102 North End Ave, New York, NY 10282" },
     { title: "Priya & Sanjay — Sangeet", start: "20261107T000000Z", end: "20261107T040000Z", loc: "The Lighthouse at Pier 61, Chelsea Piers, New York, NY 10011" },
-    { title: "Priya & Sanjay — Wedding Ceremony", start: "20261107T210000Z", end: "20261107T230000Z", loc: "Conrad New York Downtown, 102 North End Ave, New York, NY 10282" },
-    { title: "Priya & Sanjay — Reception", start: "20261108T000000Z", end: "20261108T040000Z", loc: "Hall des Lumières, 49 Chambers Street, New York, NY 10007" },
+    { title: "Priya & Sanjay — Brunch", start: "20261107T150000Z", end: "20261107T160000Z", loc: "Conrad New York Downtown, 102 North End Ave, New York, NY 10282" },
+    { title: "Priya & Sanjay — Wedding Ceremony", start: "20261107T173000Z", end: "20261107T203000Z", loc: "Conrad New York Downtown, 102 North End Ave, New York, NY 10282" },
+    { title: "Priya & Sanjay — Reception", start: "20261107T233000Z", end: "20261108T043000Z", loc: "Hall des Lumières, 49 Chambers Street, New York, NY 10007" },
   ];
   function ics() {
     const lines = ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//PriyaSanjay2026//EN"];

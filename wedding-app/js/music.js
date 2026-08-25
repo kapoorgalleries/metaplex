@@ -1,11 +1,22 @@
-/* Song requests: load + submit. */
+/* Song requests: load + submit (Node mode). On the static shared deployment
+   (Supabase mode) there is no /api — song requests are collected with the RSVP
+   (p_song_request), so this page just points guests to the RSVP form. */
 (function () {
   "use strict";
   const form = document.getElementById("songForm");
   const status = document.getElementById("songStatus");
   const list = document.getElementById("songList");
   const empty = document.getElementById("songEmpty");
+  const viaRsvp = document.getElementById("songViaRsvp");
   let count = 0;
+
+  if (window.Supa && window.Supa.enabled) {
+    if (viaRsvp) viaRsvp.hidden = false;
+    if (form) form.hidden = true;
+    if (list) list.hidden = true;
+    if (empty) empty.hidden = true;
+    return;
+  }
 
   function setStatus(msg, kind) {
     status.textContent = msg;

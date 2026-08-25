@@ -4,24 +4,25 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta name="description" content="Request a song for Priya & Sanjay's reception." />
-  <link rel="canonical" href="https://priyasanjay.pages.dev/music.html" />
+  <meta name="robots" content="noindex, nofollow" />
+  <link rel="canonical" href="https://sanjaywedspriya.com/app/music.html" />
   <meta property="og:type" content="website" />
   <meta property="og:site_name" content="Priya & Sanjay 2026" />
   <meta property="og:title" content="Song Requests · Priya &amp; Sanjay" />
   <meta property="og:description" content="Request a song for Priya & Sanjay's reception." />
-  <meta property="og:url" content="https://priyasanjay.pages.dev/music.html" />
-  <meta property="og:image" content="https://priyasanjay.pages.dev/assets/og.png" />
+  <meta property="og:url" content="https://sanjaywedspriya.com/app/music.html" />
+  <meta property="og:image" content="https://sanjaywedspriya.com/app/assets/og.jpg" />
   <meta property="og:image:width" content="1200" />
   <meta property="og:image:height" content="630" />
   <meta name="twitter:card" content="summary_large_image" />
   <meta name="twitter:title" content="Song Requests · Priya &amp; Sanjay" />
   <meta name="twitter:description" content="Request a song for Priya & Sanjay's reception." />
-  <meta name="twitter:image" content="https://priyasanjay.pages.dev/assets/og.png" />
+  <meta name="twitter:image" content="https://sanjaywedspriya.com/app/assets/og.jpg" />
   <meta name="theme-color" content="#7A1F23" />
   <title>Song Requests · Priya &amp; Sanjay</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,400;0,500;0,600;1,400&family=Marcellus&family=Jost:wght@300;400;500&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,400;0,500;0,600;1,400&family=Marcellus&family=Jost:wght@300;400;500&family=Noto+Serif+Devanagari:wght@400;600&family=Noto+Serif+Kannada:wght@400;600&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="css/styles.css" />
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🪔</text></svg>" />
 </head>
@@ -36,6 +37,10 @@
 
     <section class="section">
       <div class="songs">
+        <div class="registry" id="songViaRsvp" hidden>
+          <p data-i18n="mu.viaRsvp">Song requests are collected with your RSVP — add a song to get you on the dance floor when you reply, and the DJ will see it.</p>
+          <div class="registry__links"><a class="btn btn--solid" href="rsvp.html" data-i18n="mu.goRsvp">Go to RSVP</a></div>
+        </div>
         <form class="songs__form" id="songForm">
           <div class="hp" aria-hidden="true"><label>Website<input type="text" name="website" tabindex="-1" autocomplete="off" /></label></div>
           <div class="rsvp__row">
@@ -57,6 +62,7 @@
   </main>
   <div id="site-footer"></div>
   <script src="js/site.js"></script>
+  <script src="js/supa.js"></script>
   <script src="js/music.js"></script>
 </body>
 </html>

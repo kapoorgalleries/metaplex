@@ -1,5 +1,5 @@
 /* Priya & Sanjay 2026 — service worker (offline app shell) */
-const CACHE = "psw-2026-v15";
+const CACHE = "psw-2026-v16";
 const SHELL = [
   "index.html",
   "404.html",
@@ -17,6 +17,10 @@ const SHELL = [
   "seating.html",
   "pass.html",
   "css/styles.css",
+  "css/party.css",
+  "css/registry.css",
+  "css/rsvp.css",
+  "css/moments.css",
   "js/site.js",
   "js/supa.js",
   "js/home.js",
@@ -28,7 +32,7 @@ const SHELL = [
   "js/seating.js",
   "js/pass.js",
   "js/now.js",
-  "manifest.json",
+  "manifest.webmanifest",
   "icons/icon-192.png",
   "icons/icon-512.png",
 ];
@@ -82,6 +86,10 @@ self.addEventListener("fetch", (event) => {
     event.respondWith(fetch(req).catch(() => new Response("", { status: 503 })));
     return;
   }
+  // Only cache good, same-origin, cache-friendly responses — never the
+  // passcode gate page (always no-store) or errors/opaque responses.
+  const cacheable = (res) =>
+    res.ok && res.type === "basic" && !(res.headers.get("cache-control") || "").includes("no-store");
   // Cache-first for the app shell, network fallback that fills the cache.
   event.respondWith(
     caches.match(req).then(
@@ -89,8 +97,10 @@ self.addEventListener("fetch", (event) => {
         cached ||
         fetch(req)
           .then((res) => {
-            const copy = res.clone();
-            caches.open(CACHE).then((c) => c.put(req, copy)).catch(() => {});
+            if (cacheable(res)) {
+              const copy = res.clone();
+              caches.open(CACHE).then((c) => c.put(req, copy)).catch(() => {});
+            }
             return res;
           })
           .catch(() => cached)

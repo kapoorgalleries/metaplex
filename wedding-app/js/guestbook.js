@@ -26,16 +26,24 @@
 
   const useSupa = !!(window.Supa && window.Supa.enabled);
 
+  function loadFailed() {
+    const note = document.createElement("p");
+    note.className = "guestbook__empty";
+    note.textContent = window.t ? window.t("gb.loadfail") : "Guestbook notes couldn't load just now. You can still leave a message.";
+    entries.appendChild(note);
+  }
+
   function load() {
     if (useSupa) {
       window.Supa.client().then((sb) => {
-        if (!sb) return;
-        sb.from("guestbook").select("name,message").eq("approved", true).order("created_at", { ascending: false })
-          .then((r) => {
-            if (r.error || !Array.isArray(r.data)) { if (empty) empty.hidden = false; return; }
-            r.data.forEach((e) => addEntry(e, false));
-            if (empty) empty.hidden = count > 0;
-          });
+        if (!sb) return loadFailed();
+        // Matches the website: reads go through the list_guestbook RPC
+        // (direct table access is revoked for anon).
+        sb.rpc("list_guestbook").then((r) => {
+          if (r.error || !Array.isArray(r.data)) return loadFailed();
+          r.data.forEach((e) => addEntry(e, false));
+          if (empty) empty.hidden = count > 0;
+        });
       });
       return;
     }
@@ -59,13 +67,15 @@
     setStatus("Signing…", "");
 
     if (useSupa) {
-      // Matches the website: moderated insert (approved defaults to false).
+      // Matches the website: moderated write via the submit_guestbook RPC,
+      // which validates lengths, rate-limits, and inserts approved=false.
       window.Supa.client().then((sb) => {
         if (!sb) return setStatus("Couldn't connect — please try again.", "err");
-        sb.from("guestbook").insert({ name, message }).then((r) => {
-          if (r.error) return setStatus("Couldn't send — please try again.", "err");
+        sb.rpc("submit_guestbook", { p_name: name.slice(0, 80), p_message: message.slice(0, 600) }).then((r) => {
+          // The RPC returns human-readable validation/rate-limit text — show it verbatim.
+          if (r.error) return setStatus(r.error.message, "err");
           form.reset();
-          setStatus("Thank you! Your note will appear once it's approved. 💛", "ok");
+          setStatus(window.t ? window.t("gb.success") : "Thank you! Your note will appear once approved.", "ok");
         });
       });
       return;
