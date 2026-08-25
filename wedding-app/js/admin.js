@@ -310,7 +310,7 @@
         ? `<input class="admin__table-input" data-id="${esc(x.id)}" value="${esc(x.table || "")}" placeholder="—" />`
         : "";
       return `<tr><td>${esc(x.name)}</td><td>${esc(x.email)}</td><td>${badge}</td><td>${esc(x.guests)}</td>
-        <td>${esc((x.events || []).join(", "))}</td><td>${esc(x.meal)}</td><td>${x.hotelBlock ? "✓" : ""}</td>
+        <td>${esc(x.children_under_12 || 0)}</td><td>${esc((x.events || []).join(", "))}</td><td>${esc(x.attendee_names || "")}</td>
         <td>${table}</td><td>${esc(x.note)}</td><td>${esc(when(x.submittedAt))}</td></tr>`;
     }).join("");
     document.querySelectorAll(".admin__table-input").forEach((inp) =>
@@ -392,7 +392,7 @@
   });
 
   const COLS = {
-    rsvps: ["name", "email", "attending", "guests", "events", "meal", "hotelBlock", "table", "note", "submittedAt"],
+    rsvps: ["name", "email", "phone", "attending", "guests", "children_under_12", "events", "attendee_names", "mailing_address", "song", "note", "table", "submittedAt"],
     guestbook: ["name", "message", "at"],
     songs: ["song", "artist", "by", "note", "at"],
   };
@@ -491,46 +491,41 @@
   document.getElementById("autoAssignBtn").addEventListener("click", () => autoAssign());
   document.getElementById("clearTablesBtn").addEventListener("click", () => clearTables());
 
-  /* ---------- Catering: dietary headcounts for the caterer ---------- */
+  /* ---------- Catering: buffet headcounts for the caterer ----------
+     Meals are buffet-style (no per-guest meal preference is collected, matching
+     the website) — the caterer needs total plates, children under 12, and any
+     dietary notes guests left in the free-text note field. ---------- */
   const mealSummaryEl = document.getElementById("mealSummary");
 
-  function mealTally() {
+  function cateringTally() {
     const accepting = data.rsvps.filter((x) => x.attending === "yes");
-    const meals = {}; // label -> { households, heads }
-    accepting.forEach((x) => {
-      const label = (x.meal && x.meal.trim()) || "No preference";
-      const heads = parseInt(x.guests, 10) || 1;
-      if (!meals[label]) meals[label] = { households: 0, heads: 0 };
-      meals[label].households += 1;
-      meals[label].heads += heads;
-    });
     const totalHeads = accepting.reduce((n, x) => n + (parseInt(x.guests, 10) || 1), 0);
-    const hotel = accepting.filter((x) => x.hotelBlock).length;
-    // Most specific diets first; "No preference" last.
-    const order = Object.keys(meals).sort((a, b) => (a === "No preference" ? 1 : b === "No preference" ? -1 : a.localeCompare(b)));
-    return { meals, order, totalHeads, hotel };
+    const children = accepting.reduce((n, x) => n + (parseInt(x.children_under_12, 10) || 0), 0);
+    const dietaryNotes = accepting.filter((x) => (x.note || "").trim()).map((x) => ({ name: x.name, note: x.note.trim() }));
+    return { totalHeads, children, households: accepting.length, dietaryNotes };
   }
 
   function renderCatering() {
-    const { meals, order, totalHeads, hotel } = mealTally();
+    const { totalHeads, children, households } = cateringTally();
     if (!totalHeads) {
       mealSummaryEl.innerHTML = `<p style="color:var(--muted)">No accepting guests yet.</p>`;
       return;
     }
-    const chips = order
-      .map((label) => `<div class="admin__meal"><strong>${meals[label].heads}</strong><span>${esc(label)}</span><em>${meals[label].households} hh</em></div>`)
-      .join("");
     mealSummaryEl.innerHTML =
-      chips +
-      `<div class="admin__meal admin__meal--total"><strong>${totalHeads}</strong><span>Total plates</span><em>${hotel} want hotel</em></div>`;
+      `<div class="admin__meal"><strong>${totalHeads}</strong><span>Total plates</span><em>${households} hh</em></div>` +
+      `<div class="admin__meal"><strong>${children}</strong><span>Children under 12</span><em>included</em></div>` +
+      `<div class="admin__meal admin__meal--total"><strong>Buffet</strong><span>many vegetarian options</span><em>nut allergies: tell a server</em></div>`;
   }
 
   document.getElementById("exportMeals").addEventListener("click", () => {
-    const { meals, order, totalHeads, hotel } = mealTally();
-    const rows = [["Meal preference", "Households", "Guests (plates)"]];
-    order.forEach((label) => rows.push([label, meals[label].households, meals[label].heads]));
-    rows.push(["TOTAL", "", totalHeads]);
-    rows.push(["Hotel-block requests", hotel, ""]);
+    const { totalHeads, children, households, dietaryNotes } = cateringTally();
+    const rows = [["Item", "Count"]];
+    rows.push(["Total plates (buffet)", totalHeads]);
+    rows.push(["Children under 12 (included)", children]);
+    rows.push(["Households attending", households]);
+    rows.push(["", ""]);
+    rows.push(["Guest notes (may include dietary needs)", ""]);
+    dietaryNotes.forEach((d) => rows.push([d.name, d.note]));
     const csv = rows.map((r) => r.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(",")).join("\r\n");
     const url = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
     const a = document.createElement("a");

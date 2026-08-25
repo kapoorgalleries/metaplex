@@ -93,10 +93,10 @@ Pages — and how the static `dist/` and the API relate).
 
 ## Features
 
-- **Hero + live countdown** to the ceremony date.
+- **Hero + live countdown** to the start of the wedding weekend (midnight into Friday, Nov 6).
 - **Our Story** scroll-reveal timeline.
-- **Events** — Mehndi &amp; Haldi, Sangeet, Ceremony, Reception, each with time, venue and dress code.
-- **Add to calendar** — generates a downloadable `.ics` with all four events.
+- **Events** — Haldi, Sangeet, Saturday Brunch, Wedding Ceremony, Reception (plus the optional Sunday Farewell Brunch), each with time, venue and dress code.
+- **Add to calendar** — generates a downloadable `.ics` with all five events.
 - **Travel &amp; Stay** — airport info, hotel room block, venue map links.
 - **Installable + offline** — web app manifest (`manifest.webmanifest`), app icons (`icons/`), and
   a service worker (`sw.js`) that caches the app shell so it opens offline.
@@ -210,9 +210,9 @@ guest) and skips image types vision can't read (e.g. HEIC). Disable it with `PHO
 | What | Where |
 |------|-------|
 | Names, dates, venues, copy | `index.html` |
-| Countdown target date | `WEDDING_DATE` in `js/main.js` |
-| Calendar event times | `events[]` in `js/main.js` |
-| Gallery photos | replace `.gallery__tile` gradients with `<img>` in `js/main.js` / `index.html` |
+| Countdown target date | `WEDDING_DATE` in `js/home.js` |
+| Calendar event times | `events[]` in `js/home.js` (plus `EVENTS` in `js/schedule.js`, `js/pass.js`, `js/now.js`, and `server/server.js` facts) |
+| Gallery photos | curated grid in `gallery.html` + `assets/photos/g/`; guest uploads via `js/gallery.js` |
 | Colours &amp; fonts | CSS variables in `:root` (`css/styles.css`) |
 | Gifts &amp; Blessings (Zelle) | `registry.html` + `assets/zelle-qr.png` |
 
@@ -220,7 +220,7 @@ guest) and skips image types vision can't read (e.g. HEIC). Disable it with `PHO
 
 Submissions are stored in the browser's `localStorage` by default so the app works
 offline with zero setup. To collect responses centrally, replace the `localStorage`
-block in `js/main.js` (clearly marked with a `TODO (backend hook)` comment) with a
+block in `js/rsvp.js` (clearly marked with a `TODO (backend hook)` comment) with a
 `fetch()` to a form endpoint such as [Formspree](https://formspree.io), Google Forms,
 or your own API. The `data` object is already assembled and ready to POST as JSON.
 
