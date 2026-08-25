@@ -132,7 +132,7 @@ DINING:
 - Guests with nut allergies should notify a banquet server before approaching the buffet so the team can provide guidance regarding the available dishes.
 
 GIFTS:
-- Your love and blessings mean the world to us.
+- Your love and blessings mean the world to us — your presence is the greatest gift of all. The couple gently requests no boxed or wrapped gifts.
 - For those who wish to give, a gift may be sent by Zelle (see the Gifts & Blessings / registry page), or simply speak to the bride or groom.
 
 FAQ:
