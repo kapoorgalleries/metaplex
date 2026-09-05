@@ -143,7 +143,9 @@ elseif ($MyInvocation.MyCommand.Path) {
     $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 }
 
-$FallbackDir = Join-Path $env:LOCALAPPDATA 'QnapPreserve'
+$localAppData = $env:LOCALAPPDATA
+if (-not $localAppData) { $localAppData = [System.IO.Path]::GetTempPath() }
+$FallbackDir = Join-Path $localAppData 'QnapPreserve'
 
 if (-not $ScriptDir -or -not (Test-Path -LiteralPath $ScriptDir)) {
     $ScriptDir = $FallbackDir
@@ -445,17 +447,7 @@ function Find-NasShares {
     # enumeration rides on SMB1, so failure here is expected, not fatal.
     $r = Invoke-Native -Command 'net.exe' -Arguments @('view', "\\$NasHost")
     if ($r.ExitCode -eq 0) {
-        foreach ($line in $r.Output) {
-            $text = [string]$line
-            # Share names may contain spaces, so anchor on the column gap before
-            # the type rather than on the first whitespace run. A regex of
-            # ^(\S+)\s+Disk silently drops "Family Photos" and that share is
-            # then never copied.
-            if ($text -match '^(\S.*?)\s\s+Disk(\s|$)') {
-                $name = $Matches[1].Trim()
-                if ($name -and $name -ne 'Share name') { [void]$found.Add($name) }
-            }
-        }
+        foreach ($name in (Read-NetViewShares -Lines $r.Output)) { [void]$found.Add($name) }
     }
 
     if ($found.Count -gt 0) {
@@ -533,6 +525,85 @@ function Get-RobocopyArgs {
     return $a.ToArray()
 }
 
+function Read-RobocopySummary {
+    <#
+        Pure parser for robocopy's trailing summary block, separated from the
+        command invocation so it can be tested against real robocopy output
+        without a NAS. This is the highest-consequence logic in the script: its
+        answer alone decides whether a share is recorded as preserved.
+
+        The block looks like:
+
+                       Total    Copied   Skipped  Mismatch    FAILED    Extras
+            Dirs :        12         0        12         0         0         0
+           Files :       345        12       333         0         0         0
+    #>
+    param([object[]] $Lines)
+
+    $miss = [pscustomobject]@{
+        Parsed = $false; Total = -1; Copied = -1; Skipped = -1
+        Mismatch = -1; Failed = -1; Extras = -1; Outstanding = -1
+    }
+
+    if (-not $Lines) { return $miss }
+
+    foreach ($line in $Lines) {
+        $text = [string]$line
+        if ($text -match '^\s*Files\s*:\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s*$') {
+            $copied   = [int]$Matches[2]
+            $mismatch = [int]$Matches[4]
+            $failed   = [int]$Matches[5]
+            return [pscustomobject]@{
+                Parsed   = $true
+                Total    = [int]$Matches[1]
+                Copied   = $copied
+                Skipped  = [int]$Matches[3]
+                Mismatch = $mismatch
+                Failed   = $failed
+                Extras   = [int]$Matches[6]
+                # Outstanding is everything not already identical at the
+                # destination. Reading only Copied reports a share with FAILED
+                # entries as having nothing left to do.
+                Outstanding = $copied + $mismatch + $failed
+            }
+        }
+    }
+
+    return $miss
+}
+
+function Read-NetViewShares {
+    <#
+        Pure parser for `net view \\host` output, separated for testability.
+
+        Share names may contain spaces, so this anchors on the gap before the
+        type column rather than on the first whitespace run. A regex of
+        ^(\S+)\s+Disk silently drops "Family Photos", and that share is then
+        never copied and never reported missing.
+    #>
+    param([object[]] $Lines)
+
+    $found = New-Object System.Collections.ArrayList
+    # Leading comma throughout: PowerShell unwraps a single-element array on
+    # return, so a lone share would come back as a bare string and any caller
+    # indexing it would walk its characters instead of its elements.
+    if (-not $Lines) { return , $found.ToArray() }
+
+    foreach ($line in $Lines) {
+        $text = [string]$line
+        # Name, whitespace, the literal type "Disk", then either the comment
+        # column (2+ spaces) or end of line. Tolerates a single space before
+        # the type, which happens when a long share name collapses the column.
+        # Greedy on purpose: a share genuinely named "Backup Disk" would be
+        # truncated to "Backup" by a non-greedy match.
+        if ($text -match '^(.+)\s+Disk(\s{2,}|\s*$)') {
+            $name = $Matches[1].Trim()
+            if ($name -and $name -ne 'Share name') { [void]$found.Add($name) }
+        }
+    }
+    return , $found.ToArray()
+}
+
 function Get-RobocopyResidual {
     <#
         Runs a list-only pass and reports how much work robocopy still sees.
@@ -557,25 +628,9 @@ function Get-RobocopyResidual {
         }
     }
 
-    $parsed = $false
-    $total = 0; $outstanding = 0
+    $summary = Read-RobocopySummary -Lines $result.Output
 
-    foreach ($line in $result.Output) {
-        $text = [string]$line
-        # Files :  Total  Copied  Skipped  Mismatch  FAILED  Extras
-        if ($text -match '^\s*Files\s*:\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s*$') {
-            $total  = [int]$Matches[1]
-            # Outstanding work is everything not already identical at the
-            # destination: what robocopy would copy, plus mismatches, plus
-            # failures. Reading only the Copied column reports a share with
-            # FAILED entries as having nothing outstanding.
-            $outstanding = [int]$Matches[2] + [int]$Matches[4] + [int]$Matches[5]
-            $parsed = $true
-            break
-        }
-    }
-
-    if (-not $parsed) {
+    if (-not $summary.Parsed) {
         return [pscustomobject]@{
             Ok = $false; Outstanding = -1; Total = -1
             ExitCode = $result.ExitCode
@@ -584,7 +639,7 @@ function Get-RobocopyResidual {
     }
 
     return [pscustomobject]@{
-        Ok = $true; Outstanding = $outstanding; Total = $total
+        Ok = $true; Outstanding = $summary.Outstanding; Total = $summary.Total
         ExitCode = $result.ExitCode; Reason = ''
     }
 }
@@ -706,6 +761,40 @@ function Compare-TreeHashes {
         Checked = $checked; Mismatches = $mismatches.ToArray()
         Reliable = $reliable; Reason = $reason
     }
+}
+
+function Get-ShareSkipDecision {
+    <#
+        Decides whether -Resume may skip a share, given what the stored record
+        proves and what this run is asking for. Separated for testability: the
+        conditions are subtle, and getting them wrong means either re-copying
+        terabytes needlessly or - far worse - reporting a depth of verification
+        that never actually ran, immediately before someone wipes the source.
+    #>
+    param(
+        [hashtable] $Existing,
+        [bool] $Resume,
+        [bool] $Recheck,
+        [bool] $DryRun,
+        [bool] $WantDeep,
+        [bool] $WantHash
+    )
+
+    $complete = ($null -ne $Existing -and $Existing.ContainsKey('status') -and $Existing['status'] -eq 'complete')
+
+    # A stored record only lets us skip if it was verified at least as deeply
+    # as this run asks for. 'complete' from a plain run does not satisfy -Hash.
+    $deepEnough = $true
+    if ($complete -and $WantDeep) {
+        $deepEnough = ($Existing.ContainsKey('deepVerified') -and [bool]$Existing['deepVerified'])
+    }
+    if ($complete -and $WantHash -and $deepEnough) {
+        $deepEnough = ($Existing.ContainsKey('hashVerified') -and [bool]$Existing['hashVerified'])
+    }
+
+    $skip = ($Resume -and $complete -and $deepEnough -and (-not $Recheck) -and (-not $DryRun))
+
+    return [pscustomobject]@{ Complete = $complete; DeepEnough = $deepEnough; Skip = $skip }
 }
 
 function Copy-Share {
@@ -1051,25 +1140,16 @@ try {
             $existing = $null
             if ($state['shares'].ContainsKey($s)) { $existing = $state['shares'][$s] }
 
-            $alreadyDone = ($existing -and $existing.ContainsKey('status') -and $existing['status'] -eq 'complete')
+            $decision = Get-ShareSkipDecision -Existing $existing `
+                -Resume ([bool]$Resume) -Recheck ([bool]$Recheck) -DryRun ([bool]$DryRun) `
+                -WantDeep ([bool]$DeepVerify) -WantHash ([bool]$Hash)
 
-            # Only skip if the stored record was verified at least as deeply as
-            # this run asks for. Skipping a count-verified share during a -Hash
-            # run would report hash verification that never happened.
-            $deepEnough = $true
-            if ($alreadyDone -and $DeepVerify) {
-                $deepEnough = ($existing.ContainsKey('deepVerified') -and $existing['deepVerified'])
-            }
-            if ($alreadyDone -and $Hash -and $deepEnough) {
-                $deepEnough = ($existing.ContainsKey('hashVerified') -and $existing['hashVerified'])
-            }
-
-            if ($Resume -and $alreadyDone -and $deepEnough -and -not $Recheck -and -not $DryRun) {
+            if ($decision.Skip) {
                 Write-Log "Skipping '$s': verified complete on $($existing['verifiedAt'])." 'INFO'
                 [void]$skipped.Add($s)
                 continue
             }
-            if ($Resume -and $alreadyDone -and -not $deepEnough) {
+            if ($Resume -and $decision.Complete -and -not $decision.DeepEnough) {
                 Write-Log "'$s' is marked complete but was not verified to the depth this run requests. Re-verifying." 'WARN'
             }
 

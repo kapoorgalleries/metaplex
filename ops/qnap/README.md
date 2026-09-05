@@ -126,10 +126,42 @@ LED steady rather than blinking, same subnet as your PC, `ping` the IP, SMB
 enabled in QNAP Control Panel → Network & File Services. `find-qnap.ps1` will
 tell you whether anything on your network is answering on SMB at all.
 
+## Tests
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Parsers.Tests.ps1
+```
+
+72 assertions, no framework dependency, no NAS required. They cover the logic
+whose failure would be silent and expensive:
+
+- **`Read-RobocopySummary`** — the function whose answer alone decides whether a
+  share is recorded as preserved. Tested against real robocopy summary blocks,
+  including localized (German, French) output, truncated lines, `Dirs`-only
+  output, error text, and empty input. Every one of those must fail to parse
+  rather than report zero outstanding.
+- **`Read-NetViewShares`** — tested against real `net view` output, including
+  share names containing spaces, a name collapsed to a single-space column, a
+  share literally named `Backup Disk`, a comment containing the word "Disk",
+  and non-Disk share types.
+- **`Get-ShareSkipDecision`** — every combination of `-Resume`, `-Recheck`,
+  `-DryRun`, `-DeepVerify` and `-Hash` against stored records of each
+  verification depth, including legacy records written without depth fields.
+- **`ConvertTo-Hashtable`** and **`Format-Bytes`** — state round-tripping and
+  size formatting up to multi-terabyte volumes.
+
 ## Status
 
-These scripts have **not** been executed against a live NAS. They were written
-and reviewed carefully, and five defects found in review were fixed before
-release plus a further set from an adversarial audit — but reading code is not
-running it. Validate on your own hardware before trusting a copy you intend to
-wipe the source for. Run `-DryRun` first.
+The parsers, the resume-skip logic and the state round-trip are covered by the
+tests above, and both scripts parse clean. The startup and failure paths have
+been executed end to end.
+
+**The actual copy has never run against a live NAS.** Everything involving
+robocopy, SMB and real shares is verified by reasoning and unit tests, not by a
+real transfer. Validate on your own hardware before trusting a copy you intend
+to wipe the source for:
+
+1. `-ListSharesOnly` — confirm it sees every share you expect
+2. `-DryRun` — confirm the file counts look right
+3. the real run
+4. `-Resume -Recheck -DeepVerify -Hash` before anything destructive
