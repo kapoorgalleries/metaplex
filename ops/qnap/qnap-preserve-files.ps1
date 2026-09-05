@@ -331,12 +331,23 @@ function Connect-Nas {
     $user = $Cred.UserName
     $pass = $Cred.GetNetworkCredential().Password
 
-    # Drop any stale session first; a half-open session with wrong credentials
-    # produces misleading "access denied" on every subsequent share.
-    & net.exe use $ipc /delete /y 2>&1 | Out-Null
+    # Same NativeCommandError hazard as robocopy: net.exe writes to stderr on a
+    # failed or absent session, which 2>&1 would turn into a terminating error.
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        # Drop any stale session first; a half-open session with wrong
+        # credentials produces misleading "access denied" on every share.
+        & net.exe use $ipc /delete /y 2>&1 | Out-Null
 
-    $output = & net.exe use $ipc /user:$user $pass 2>&1
-    if ($LASTEXITCODE -eq 0) {
+        $output = & net.exe use $ipc /user:$user $pass 2>&1
+        $code   = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $previous
+    }
+
+    if ($code -eq 0) {
         [void]$script:MappedSessions.Add($ipc)
         Write-Log "Authenticated to $NasHost as $user" 'OK'
         return $true
@@ -392,6 +403,8 @@ function Find-NasShares {
 
     # Preferred: ask the server. Often blocked on modern Windows because share
     # enumeration rides on SMB1, so failure here is expected, not fatal.
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
     try {
         $view = & net.exe view "\\$NasHost" 2>&1
         if ($LASTEXITCODE -eq 0) {
@@ -403,6 +416,7 @@ function Find-NasShares {
         }
     }
     catch { }
+    finally { $ErrorActionPreference = $previous }
 
     if ($found.Count -gt 0) {
         Write-Log "Enumerated $($found.Count) share(s) from the NAS." 'OK'
@@ -484,8 +498,20 @@ function Get-RobocopyArgs {
 function Invoke-Robocopy {
     param([string[]] $Arguments)
 
-    $output = & robocopy.exe @Arguments 2>&1
-    $code   = $LASTEXITCODE
+    # $ErrorActionPreference = 'Stop' turns a native command's stderr, once
+    # merged with 2>&1, into a terminating NativeCommandError. Robocopy writes
+    # to stderr on ordinary conditions such as an inaccessible directory, so
+    # without this the script would abort mid-copy on a recoverable error.
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $output = & robocopy.exe @Arguments 2>&1
+        $code   = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $previous
+    }
+
     return [pscustomobject]@{ ExitCode = $code; Output = $output }
 }
 
@@ -494,8 +520,9 @@ function Get-RobocopyResidual {
     # outstanding. Zero is the only thing that proves a share is complete.
     param([string] $Source, [string] $Dest)
 
-    $args   = Get-RobocopyArgs -Source $Source -Dest $Dest -LogPath $null -ListOnly
-    $result = Invoke-Robocopy -Arguments $args
+    # Not named $args: that is an automatic variable in PowerShell.
+    $roboArgs = Get-RobocopyArgs -Source $Source -Dest $Dest -LogPath $null -ListOnly
+    $result   = Invoke-Robocopy -Arguments $roboArgs
 
     if ($result.ExitCode -ge 8) {
         return [pscustomobject]@{ Ok = $false; Files = -1; Bytes = -1; ExitCode = $result.ExitCode }
@@ -601,6 +628,9 @@ function Copy-Share {
             passes   = 0
             note     = 'source not accessible at last attempt'
         }
+        # Persist it: without this the share's status is lost if the run is
+        # interrupted, and the next -Resume has no record it was ever tried.
+        Write-State -State $State -Path $StateFile
         return $false
     }
 
@@ -618,6 +648,13 @@ function Copy-Share {
     $pass    = 0
     $success = $false
 
+    # Initialised before the loop on purpose. The loop can exit before robocopy
+    # ever runs - the NAS never came back, or -MaxPasses was set below 1 - and
+    # under StrictMode reading an unassigned variable afterwards is a
+    # terminating error. An unreachable NAS is this script's whole premise, so
+    # that path is ordinary, not exotic.
+    $lastExit = -1
+
     while ($pass -lt $MaxPasses) {
         $pass++
         Write-Log "Pass $pass of $MaxPasses for '$ShareName'." 'INFO'
@@ -627,8 +664,9 @@ function Copy-Share {
             break
         }
 
-        $args   = Get-RobocopyArgs -Source $source -Dest $dest -LogPath $logPath
-        $result = Invoke-Robocopy -Arguments $args
+        $roboArgs = Get-RobocopyArgs -Source $source -Dest $dest -LogPath $logPath
+        $result   = Invoke-Robocopy -Arguments $roboArgs
+        $lastExit = $result.ExitCode
 
         # Robocopy exit codes are a bitmask. Anything under 8 is a success;
         # 8 means some files failed, 16 is fatal.
@@ -661,7 +699,7 @@ function Copy-Share {
 
     $entry = @{
         status     = $(if ($success) { 'complete' } else { 'incomplete' })
-        lastExit   = $result.ExitCode
+        lastExit   = $lastExit
         passes     = $pass
         verifiedAt = $(if ($success) { (Get-Date).ToUniversalTime().ToString('o') } else { '' })
         log        = $logPath
