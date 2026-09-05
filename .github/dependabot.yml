@@ -11,3 +11,16 @@ updates:
     open-pull-requests-limit: 3
     ignore:
       - dependency-name: "cbindgen"
+
+  # Keeps the GitHub Action pins in .github/workflows current. Five pins rotted
+  # here for years because `cargo` was the only ecosystem watched, and two of
+  # them were eventually refused outright by GitHub.
+  #
+  # Deliberately no `automerge` label: .mergify.yml merges any labelled PR once
+  # all_github_action_checks succeeds, and an action major bump should be read
+  # by a human before it lands.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 3
