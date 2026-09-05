@@ -115,11 +115,41 @@ $ErrorActionPreference = 'Stop'
 # Paths and constants
 # ---------------------------------------------------------------------------
 
-if ($PSScriptRoot) { $ScriptDir = $PSScriptRoot }
-else { $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition }
+# Where to keep state and logs. $PSScriptRoot is empty when the script is not
+# run from a file, and MyCommand.Definition then holds the script TEXT rather
+# than a path, so only MyCommand.Path is safe to feed to Split-Path.
+$ScriptDir = $null
+if ($PSScriptRoot) {
+    $ScriptDir = $PSScriptRoot
+}
+elseif ($MyInvocation.MyCommand.Path) {
+    $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+}
+
+$FallbackDir = Join-Path $env:LOCALAPPDATA 'QnapPreserve'
+
+if (-not $ScriptDir -or -not (Test-Path -LiteralPath $ScriptDir)) {
+    # Pasted into a console, dot-sourced from memory, or otherwise fileless.
+    $ScriptDir = $FallbackDir
+    Write-Warning "Not running from a script file. State and logs will go to $ScriptDir."
+    Write-Warning "Save this script as a .ps1 and run it with -File; pasting it into the console will not bind parameters."
+}
 
 $WorkDir = Join-Path $ScriptDir '.qnap-preserve'
-if (-not (Test-Path -LiteralPath $WorkDir)) {
+try {
+    if (-not (Test-Path -LiteralPath $WorkDir)) {
+        New-Item -ItemType Directory -Path $WorkDir -Force -ErrorAction Stop | Out-Null
+    }
+    # Prove it is actually writable rather than assuming; running from a
+    # protected location such as C:\Windows\System32 otherwise fails later,
+    # mid-copy, instead of here.
+    $probe = Join-Path $WorkDir '.write-test'
+    Set-Content -LiteralPath $probe -Value 'ok' -ErrorAction Stop
+    Remove-Item -LiteralPath $probe -Force -ErrorAction SilentlyContinue
+}
+catch {
+    Write-Warning "Cannot write to $WorkDir ($($_.Exception.Message)). Falling back to $FallbackDir."
+    $WorkDir = Join-Path $FallbackDir '.qnap-preserve'
     New-Item -ItemType Directory -Path $WorkDir -Force | Out-Null
 }
 
