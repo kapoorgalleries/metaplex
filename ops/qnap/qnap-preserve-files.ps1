@@ -9,72 +9,87 @@
     you need a complete, trustworthy local copy BEFORE you touch firmware, RAID,
     or a factory reset.
 
+    The governing rule is that every check fails CLOSED. Anything this script
+    cannot positively verify is reported as unverified, never as done. A share
+    is marked complete only on affirmative evidence; absence of evidence is
+    treated as failure, because the cost of a false "complete" here is losing
+    files you then wipe.
+
     Design decisions that matter:
 
     * Runs on Windows PowerShell 5.1. No PowerShell 7 / pwsh required.
     * Copies with robocopy in restartable mode (/Z), which survives dropped SMB
       sessions mid-file.
     * NEVER mirrors. /E only. Nothing on the destination is ever deleted.
-    * Resume is verified, not assumed. A share is only marked complete after a
-      robocopy list-only pass proves zero files remain outstanding. A crashed or
-      half-finished pass can therefore never cause a file to be silently skipped.
-    * UNC paths only. Mapped drive letters are resolved to UNC up front, because
-      an elevated session does not inherit the drive mappings of the normal user
-      and the script would otherwise report a healthy share as missing.
+    * Resume is verified, not assumed. A share is marked complete only after a
+      robocopy list-only pass is successfully PARSED and shows zero files
+      outstanding, counting Copied, Mismatch and FAILED. An unparseable summary
+      is a verification failure, not a pass.
+    * An empty source is treated as suspicious, not as success. A QNAP whose
+      volume failed to mount still presents its shares, and they enumerate
+      empty. Copying nothing from one and calling it preserved is the worst
+      thing this script could do, so that requires -AllowEmptyShares.
+    * UNC paths only. Mapped drive letters are resolved to UNC where possible.
     * /FFT and /DST are on by default. NAS filesystems report timestamps at
       coarser granularity than NTFS; without these robocopy re-copies unchanged
       files forever and resume never converges.
 
 .PARAMETER Nas
-    Hostname or IP of the NAS, e.g. 192.168.1.50 or QNAP-TS453. Stored in the
-    state file on first run so later -Resume calls need no arguments.
+    Hostname or IP of the NAS. Stored in the state file on first run so later
+    -Resume calls need no arguments.
 
 .PARAMETER Share
-    One or more share names to preserve. If omitted the script probes for shares
-    it can reach and asks you to confirm the list.
+    Share names to preserve. If omitted the script enumerates them, falling back
+    to probing common names. A probed list is explicitly NOT treated as
+    authoritative - see -Share in the notes below.
 
 .PARAMETER Destination
-    Local (or external-drive) folder that will receive the copy. One subfolder is
-    created per share. Stored in state on first run.
+    Local or external folder to receive the copy. One subfolder per share.
 
 .PARAMETER Credential
-    NAS credentials. If omitted the script first tries your current Windows
-    credentials, then prompts.
+    NAS credentials. If omitted, the current Windows identity is tried first and
+    you are prompted only if that is refused (unless -NonInteractive).
 
 .PARAMETER Resume
-    Continue a previous run from its state file. Shares already proven complete
-    are skipped; everything else is retried.
+    Continue a previous run. Shares proven complete are skipped; anything else
+    is retried.
 
 .PARAMETER Recheck
-    With -Resume, re-verify shares already marked complete instead of skipping
-    them. Slower, but this is the paranoid option before you wipe the NAS.
+    With -Resume, re-verify shares already marked complete instead of skipping.
 
 .PARAMETER Force
-    Discard existing state and start a fresh run. Does not delete copied data.
+    Discard existing state and start fresh. Does not delete copied data.
 
 .PARAMETER DryRun
-    List what would be copied without copying anything (robocopy /L).
+    Report what would be copied. Copies nothing, and never reports a share as
+    complete.
 
 .PARAMETER Threads
     Use robocopy multi-threading (/MT:N) instead of restartable mode (/Z).
-    Much faster on many small files, but loses mid-file restart. Only use this
-    if the link has proven stable.
+    Faster on many small files, but loses mid-file restart.
 
 .PARAMETER DeepVerify
-    After copying, compare recursive file counts and total bytes between source
-    and destination, in addition to the standard robocopy residual check.
+    Additionally compare recursive file counts and total bytes. An enumeration
+    that hits errors is reported as unreliable rather than passing.
 
 .PARAMETER Hash
-    Full SHA-256 comparison of every copied file. Authoritative and very slow.
-    Reserve for the final pass on irreplaceable data.
+    Full SHA-256 comparison of every file. Authoritative and very slow.
+
+.PARAMETER AllowEmptyShares
+    Accept a share that contains no files as legitimately empty. Without this,
+    an empty source is flagged rather than marked complete.
+
+.PARAMETER NonInteractive
+    Never prompt for credentials; fail instead. For scheduled runs.
 
 .PARAMETER IncludeSystemFolders
     Include QNAP internal folders (@Recycle, .@__thumb, @Recently-Snapshot,
-    @Transcode, .streams). Excluded by default as they are regenerable junk.
+    @Transcode, .streams). Excluded by default as regenerable. Note that
+    @Recycle can contain deleted files you may still want.
 
 .PARAMETER WithAcls
     Also copy security descriptors (/COPY:DATSOU). Off by default: NAS-to-NTFS
-    ACL copies commonly fail and produce spurious errors that mask real ones.
+    ACL copies commonly fail and bury real errors.
 
 .EXAMPLE
     .\qnap-preserve-files.ps1 -Nas 192.168.1.50 -Destination E:\QNAP-Rescue
@@ -83,7 +98,7 @@
     .\qnap-preserve-files.ps1 -Resume
 
 .EXAMPLE
-    .\qnap-preserve-files.ps1 -Resume -Recheck -DeepVerify
+    .\qnap-preserve-files.ps1 -Resume -Recheck -DeepVerify -Hash
 #>
 
 [CmdletBinding()]
@@ -99,6 +114,8 @@ param(
     [int]      $Threads = 0,
     [switch]   $DeepVerify,
     [switch]   $Hash,
+    [switch]   $AllowEmptyShares,
+    [switch]   $NonInteractive,
     [switch]   $IncludeSystemFolders,
     [switch]   $WithAcls,
     [int]      $RetryCount = 3,
@@ -115,9 +132,9 @@ $ErrorActionPreference = 'Stop'
 # Paths and constants
 # ---------------------------------------------------------------------------
 
-# Where to keep state and logs. $PSScriptRoot is empty when the script is not
-# run from a file, and MyCommand.Definition then holds the script TEXT rather
-# than a path, so only MyCommand.Path is safe to feed to Split-Path.
+# $PSScriptRoot is empty when the script is not run from a file, and
+# MyCommand.Definition then holds the script TEXT rather than a path, so only
+# MyCommand.Path is safe to feed to Split-Path.
 $ScriptDir = $null
 if ($PSScriptRoot) {
     $ScriptDir = $PSScriptRoot
@@ -129,7 +146,6 @@ elseif ($MyInvocation.MyCommand.Path) {
 $FallbackDir = Join-Path $env:LOCALAPPDATA 'QnapPreserve'
 
 if (-not $ScriptDir -or -not (Test-Path -LiteralPath $ScriptDir)) {
-    # Pasted into a console, dot-sourced from memory, or otherwise fileless.
     $ScriptDir = $FallbackDir
     Write-Warning "Not running from a script file. State and logs will go to $ScriptDir."
     Write-Warning "Save this script as a .ps1 and run it with -File; pasting it into the console will not bind parameters."
@@ -140,9 +156,6 @@ try {
     if (-not (Test-Path -LiteralPath $WorkDir)) {
         New-Item -ItemType Directory -Path $WorkDir -Force -ErrorAction Stop | Out-Null
     }
-    # Prove it is actually writable rather than assuming; running from a
-    # protected location such as C:\Windows\System32 otherwise fails later,
-    # mid-copy, instead of here.
     $probe = Join-Path $WorkDir '.write-test'
     Set-Content -LiteralPath $probe -Value 'ok' -ErrorAction Stop
     Remove-Item -LiteralPath $probe -Force -ErrorAction SilentlyContinue
@@ -162,11 +175,8 @@ if (-not (Test-Path -LiteralPath $LogDir)) {
 }
 $RunLog = Join-Path $LogDir ("run-$RunStamp.log")
 
-# QNAP internal folders that are regenerable and usually huge.
 $QnapSystemFolders = @('@Recycle', '.@__thumb', '@Recently-Snapshot', '@Transcode', '.streams', '@Thumbnail')
 
-# Share names QNAP creates out of the box; used only for probing when the user
-# did not name shares explicitly and share enumeration is blocked.
 $CommonQnapShares = @(
     'Public', 'Multimedia', 'Download', 'Web', 'homes', 'home', 'Recordings',
     'Backup', 'Photo', 'Music', 'Video', 'Documents', 'Archive', 'Media',
@@ -207,13 +217,34 @@ function Format-Bytes {
     return ('{0:N0} B' -f $Bytes)
 }
 
+function Invoke-Native {
+    # $ErrorActionPreference = 'Stop' turns a native command's stderr, once
+    # merged with 2>&1, into a terminating NativeCommandError. Robocopy and
+    # net.exe both write to stderr on ordinary recoverable conditions, so
+    # without this the script aborts on errors it is designed to survive.
+    param(
+        [Parameter(Mandatory = $true)][string]   $Command,
+        [Parameter(Mandatory = $true)][string[]] $Arguments
+    )
+
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $output = & $Command @Arguments 2>&1
+        $code   = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $previous
+    }
+    return [pscustomobject]@{ ExitCode = $code; Output = $output }
+}
+
 # ---------------------------------------------------------------------------
 # State
 # ---------------------------------------------------------------------------
 
 function ConvertTo-Hashtable {
-    # ConvertFrom-Json returns PSCustomObject on 5.1 (no -AsHashtable). Normalise
-    # so downstream code is version-agnostic.
+    # ConvertFrom-Json returns PSCustomObject on 5.1 (no -AsHashtable).
     param($InputObject)
 
     if ($null -eq $InputObject) { return $null }
@@ -243,11 +274,12 @@ function ConvertTo-Hashtable {
 
 function New-State {
     return @{
-        version     = 1
-        createdUtc  = (Get-Date).ToUniversalTime().ToString('o')
-        nas         = ''
-        destination = ''
-        shares      = @{}
+        version         = 2
+        createdUtc      = (Get-Date).ToUniversalTime().ToString('o')
+        nas             = ''
+        destination     = ''
+        shareListSource = ''
+        shares          = @{}
     }
 }
 
@@ -269,7 +301,6 @@ function Write-State {
     param([hashtable] $State, [string] $Path)
     $State['updatedUtc'] = (Get-Date).ToUniversalTime().ToString('o')
     $tmp = "$Path.tmp"
-    # Write to a temp file then move, so a crash mid-write cannot corrupt state.
     ($State | ConvertTo-Json -Depth 8) | Set-Content -LiteralPath $tmp -Encoding UTF8
     Move-Item -LiteralPath $tmp -Destination $Path -Force
 }
@@ -292,9 +323,17 @@ function Test-TcpPort {
     finally { try { $client.Close() } catch { } }
 }
 
+function Get-HostAddresses {
+    param([string] $Name)
+    try {
+        return @([System.Net.Dns]::GetHostAddresses($Name) |
+            Where-Object { $_.AddressFamily -eq 'InterNetwork' } |
+            ForEach-Object { $_.IPAddressToString })
+    }
+    catch { return @() }
+}
+
 function Resolve-ToUnc {
-    # An elevated session does not see drive mappings made by the interactive
-    # user, so any Z:\-style path is converted to its UNC form here.
     param([string] $Path)
 
     if ([string]::IsNullOrWhiteSpace($Path)) { return $Path }
@@ -305,12 +344,19 @@ function Resolve-ToUnc {
     try {
         $drive = Get-CimInstance -ClassName Win32_LogicalDisk -Filter "DeviceID='$driveLetter'" -ErrorAction Stop
     }
-    catch { return $Path }
+    catch { $drive = $null }
 
     if ($drive -and $drive.DriveType -eq 4 -and $drive.ProviderName) {
         $unc = $drive.ProviderName + $Path.Substring(2)
         Write-Log "Resolved mapped drive $driveLetter to UNC $unc" 'INFO'
         return $unc
+    }
+
+    if (-not $drive) {
+        # Win32_LogicalDisk is per-logon-session, so an elevated process cannot
+        # see the interactive user's mappings any more than Test-Path can. Say
+        # so plainly rather than letting it surface later as "path not found".
+        Write-Log "Drive $driveLetter is not visible to this session. If you mapped it as a normal user and this window is elevated, that mapping does not exist here - pass the UNC path (\\server\share\...) instead." 'WARN'
     }
     return $Path
 }
@@ -323,43 +369,37 @@ function Connect-Nas {
 
     $ipc = "\\$NasHost\IPC$"
 
-    if (-not $Cred) {
-        Write-Log "No credential supplied; trying current Windows identity." 'INFO'
-        return $true
-    }
+    if (-not $Cred) { return $true }
 
     $user = $Cred.UserName
     $pass = $Cred.GetNetworkCredential().Password
 
-    # Same NativeCommandError hazard as robocopy: net.exe writes to stderr on a
-    # failed or absent session, which 2>&1 would turn into a terminating error.
-    $previous = $ErrorActionPreference
-    $ErrorActionPreference = 'Continue'
-    try {
-        # Drop any stale session first; a half-open session with wrong
-        # credentials produces misleading "access denied" on every share.
-        & net.exe use $ipc /delete /y 2>&1 | Out-Null
-
-        $output = & net.exe use $ipc /user:$user $pass 2>&1
-        $code   = $LASTEXITCODE
-    }
-    finally {
-        $ErrorActionPreference = $previous
+    if ($pass -match '^/') {
+        # net.exe would parse a leading-slash password as a switch.
+        Write-Log "Password begins with '/', which net.exe parses as a switch. Change the password or connect the share manually first." 'ERROR'
+        return $false
     }
 
-    if ($code -eq 0) {
+    # Drop stale sessions first; a half-open session with wrong credentials
+    # produces misleading "access denied" on every subsequent share.
+    [void](Invoke-Native -Command 'net.exe' -Arguments @('use', $ipc, '/delete', '/y'))
+
+    $r = Invoke-Native -Command 'net.exe' -Arguments @('use', $ipc, "/user:$user", $pass)
+    if ($r.ExitCode -eq 0) {
         [void]$script:MappedSessions.Add($ipc)
         Write-Log "Authenticated to $NasHost as $user" 'OK'
         return $true
     }
 
-    Write-Log "Authentication to $NasHost failed: $($output -join ' ')" 'ERROR'
+    # Never log $r.Output verbatim: net.exe can echo the supplied password back
+    # in its usage text when it mis-parses an argument.
+    Write-Log "Authentication to $NasHost failed (net.exe exit $($r.ExitCode))." 'ERROR'
     return $false
 }
 
 function Disconnect-Nas {
     foreach ($session in $script:MappedSessions) {
-        try { & net.exe use $session /delete /y 2>&1 | Out-Null } catch { }
+        try { [void](Invoke-Native -Command 'net.exe' -Arguments @('use', $session, '/delete', '/y')) } catch { }
     }
     $script:MappedSessions.Clear()
 }
@@ -403,24 +443,24 @@ function Find-NasShares {
 
     # Preferred: ask the server. Often blocked on modern Windows because share
     # enumeration rides on SMB1, so failure here is expected, not fatal.
-    $previous = $ErrorActionPreference
-    $ErrorActionPreference = 'Continue'
-    try {
-        $view = & net.exe view "\\$NasHost" 2>&1
-        if ($LASTEXITCODE -eq 0) {
-            foreach ($line in $view) {
-                if ($line -match '^(\S+)\s+Disk') {
-                    [void]$found.Add($Matches[1])
-                }
+    $r = Invoke-Native -Command 'net.exe' -Arguments @('view', "\\$NasHost")
+    if ($r.ExitCode -eq 0) {
+        foreach ($line in $r.Output) {
+            $text = [string]$line
+            # Share names may contain spaces, so anchor on the column gap before
+            # the type rather than on the first whitespace run. A regex of
+            # ^(\S+)\s+Disk silently drops "Family Photos" and that share is
+            # then never copied.
+            if ($text -match '^(\S.*?)\s\s+Disk(\s|$)') {
+                $name = $Matches[1].Trim()
+                if ($name -and $name -ne 'Share name') { [void]$found.Add($name) }
             }
         }
     }
-    catch { }
-    finally { $ErrorActionPreference = $previous }
 
     if ($found.Count -gt 0) {
         Write-Log "Enumerated $($found.Count) share(s) from the NAS." 'OK'
-        return $found.ToArray()
+        return [pscustomobject]@{ Names = $found.ToArray(); Source = 'enumerated' }
     }
 
     Write-Log "Share enumeration blocked. Probing common QNAP share names instead." 'WARN'
@@ -434,7 +474,7 @@ function Find-NasShares {
         }
         catch { }
     }
-    return $found.ToArray()
+    return [pscustomobject]@{ Names = $found.ToArray(); Source = 'probed' }
 }
 
 # ---------------------------------------------------------------------------
@@ -453,8 +493,8 @@ function Get-RobocopyArgs {
     [void]$a.Add($Source.TrimEnd('\'))
     [void]$a.Add($Dest.TrimEnd('\'))
 
-    [void]$a.Add('/E')            # include subdirectories, including empty ones
-    [void]$a.Add('/DCOPY:DAT')    # preserve directory timestamps
+    [void]$a.Add('/E')
+    [void]$a.Add('/DCOPY:DAT')
 
     if ($WithAcls) { [void]$a.Add('/COPY:DATSOU') } else { [void]$a.Add('/COPY:DAT') }
 
@@ -464,18 +504,16 @@ function Get-RobocopyArgs {
     [void]$a.Add('/FFT')
     [void]$a.Add('/DST')
 
-    [void]$a.Add('/XJ')           # skip junctions; avoids infinite recursion
+    [void]$a.Add('/XJ')
     [void]$a.Add("/R:$RetryCount")
     [void]$a.Add("/W:$RetryWaitSeconds")
-    [void]$a.Add('/NP')           # no per-file percentage spam
+    [void]$a.Add('/NP')
 
     if ($Threads -gt 0) {
-        # /MT and /Z are mutually exclusive in practice: multi-threaded copies
-        # are not restartable. Caller opted into speed over resilience.
         [void]$a.Add("/MT:$Threads")
     }
     else {
-        [void]$a.Add('/Z')        # restartable mode: survives a dropped session
+        [void]$a.Add('/Z')
     }
 
     if (-not $IncludeSystemFolders) {
@@ -495,73 +533,59 @@ function Get-RobocopyArgs {
     return $a.ToArray()
 }
 
-function Invoke-Robocopy {
-    param([string[]] $Arguments)
-
-    # $ErrorActionPreference = 'Stop' turns a native command's stderr, once
-    # merged with 2>&1, into a terminating NativeCommandError. Robocopy writes
-    # to stderr on ordinary conditions such as an inaccessible directory, so
-    # without this the script would abort mid-copy on a recoverable error.
-    $previous = $ErrorActionPreference
-    $ErrorActionPreference = 'Continue'
-    try {
-        $output = & robocopy.exe @Arguments 2>&1
-        $code   = $LASTEXITCODE
-    }
-    finally {
-        $ErrorActionPreference = $previous
-    }
-
-    return [pscustomobject]@{ ExitCode = $code; Output = $output }
-}
-
 function Get-RobocopyResidual {
-    # Runs a list-only pass and returns how many files robocopy still considers
-    # outstanding. Zero is the only thing that proves a share is complete.
+    <#
+        Runs a list-only pass and reports how much work robocopy still sees.
+
+        This is the single check that decides whether a share is complete, so it
+        fails closed in every direction: an unparseable summary, a non-English
+        robocopy, empty output or a list-pass error all return Ok = $false. The
+        earlier version initialised the count to zero and returned it whether or
+        not the summary was ever matched, which turned "I could not read the
+        result" into "nothing left to do" and marked unpreserved shares done.
+    #>
     param([string] $Source, [string] $Dest)
 
     # Not named $args: that is an automatic variable in PowerShell.
     $roboArgs = Get-RobocopyArgs -Source $Source -Dest $Dest -LogPath $null -ListOnly
-    $result   = Invoke-Robocopy -Arguments $roboArgs
+    $result   = Invoke-Native -Command 'robocopy.exe' -Arguments $roboArgs
 
     if ($result.ExitCode -ge 8) {
-        return [pscustomobject]@{ Ok = $false; Files = -1; Bytes = -1; ExitCode = $result.ExitCode }
+        return [pscustomobject]@{
+            Ok = $false; Outstanding = -1; Total = -1
+            ExitCode = $result.ExitCode; Reason = "list pass failed (exit $($result.ExitCode))"
+        }
     }
 
-    $files = 0
-    $bytes = 0
+    $parsed = $false
+    $total = 0; $outstanding = 0
+
     foreach ($line in $result.Output) {
         $text = [string]$line
-        if ($text -match '^\s*Files\s*:\s+(\d+)\s+(\d+)') { $files = [int]$Matches[2] }
-        elseif ($text -match '^\s*Bytes\s*:\s+(\S+)\s+(\S+)') { }
+        # Files :  Total  Copied  Skipped  Mismatch  FAILED  Extras
+        if ($text -match '^\s*Files\s*:\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s*$') {
+            $total  = [int]$Matches[1]
+            # Outstanding work is everything not already identical at the
+            # destination: what robocopy would copy, plus mismatches, plus
+            # failures. Reading only the Copied column reports a share with
+            # FAILED entries as having nothing outstanding.
+            $outstanding = [int]$Matches[2] + [int]$Matches[4] + [int]$Matches[5]
+            $parsed = $true
+            break
+        }
     }
 
-    return [pscustomobject]@{ Ok = $true; Files = $files; Bytes = $bytes; ExitCode = $result.ExitCode }
-}
-
-function Compare-TreeCounts {
-    param([string] $Source, [string] $Dest)
-
-    Write-Log "Deep verify: enumerating both trees (this can take a while)..." 'INFO'
-    try {
-        $srcFiles = @(Get-ChildItem -LiteralPath $Source -Recurse -File -Force -ErrorAction SilentlyContinue |
-            Where-Object { $IncludeSystemFolders -or -not (Test-IsSystemPath $_.FullName) })
-        $dstFiles = @(Get-ChildItem -LiteralPath $Dest -Recurse -File -Force -ErrorAction SilentlyContinue)
+    if (-not $parsed) {
+        return [pscustomobject]@{
+            Ok = $false; Outstanding = -1; Total = -1
+            ExitCode = $result.ExitCode
+            Reason = 'could not parse the robocopy summary (a non-English robocopy will do this)'
+        }
     }
-    catch {
-        Write-Log "Deep verify could not enumerate: $($_.Exception.Message)" 'WARN'
-        return $null
-    }
-
-    $srcBytes = 0; foreach ($f in $srcFiles) { $srcBytes += $f.Length }
-    $dstBytes = 0; foreach ($f in $dstFiles) { $dstBytes += $f.Length }
 
     return [pscustomobject]@{
-        SourceFiles = $srcFiles.Count
-        DestFiles   = $dstFiles.Count
-        SourceBytes = $srcBytes
-        DestBytes   = $dstBytes
-        Match       = ($srcFiles.Count -eq $dstFiles.Count -and $srcBytes -eq $dstBytes)
+        Ok = $true; Outstanding = $outstanding; Total = $total
+        ExitCode = $result.ExitCode; Reason = ''
     }
 }
 
@@ -573,6 +597,66 @@ function Test-IsSystemPath {
     return $false
 }
 
+function Test-HasJunctions {
+    param([string] $Root)
+    try {
+        $dirs = Get-ChildItem -LiteralPath $Root -Recurse -Directory -Force -ErrorAction SilentlyContinue
+        foreach ($d in $dirs) {
+            if ($d.Attributes -band [System.IO.FileAttributes]::ReparsePoint) { return $true }
+        }
+    }
+    catch { }
+    return $false
+}
+
+function Compare-TreeCounts {
+    <#
+        Independent count/byte comparison. Reports Reliable = $false whenever
+        enumeration hit errors, since -ErrorAction SilentlyContinue would
+        otherwise drop unreadable subtrees from the SOURCE side and let a
+        truncated source match the destination exactly.
+    #>
+    param([string] $Source, [string] $Dest)
+
+    Write-Log "Deep verify: enumerating both trees (this can take a while)..." 'INFO'
+
+    $srcErr = @(); $dstErr = @()
+    try {
+        $srcAll = @(Get-ChildItem -LiteralPath $Source -Recurse -File -Force -ErrorAction SilentlyContinue -ErrorVariable +srcErr)
+        $dstAll = @(Get-ChildItem -LiteralPath $Dest   -Recurse -File -Force -ErrorAction SilentlyContinue -ErrorVariable +dstErr)
+    }
+    catch {
+        return [pscustomobject]@{ Reliable = $false; Reason = "enumeration failed: $($_.Exception.Message)" }
+    }
+
+    $srcFiles = @($srcAll | Where-Object { $IncludeSystemFolders -or -not (Test-IsSystemPath $_.FullName) })
+    $dstFiles = @($dstAll | Where-Object { $IncludeSystemFolders -or -not (Test-IsSystemPath $_.FullName) })
+
+    $reasons = New-Object System.Collections.ArrayList
+    if ($srcErr.Count -gt 0) { [void]$reasons.Add("$($srcErr.Count) error(s) reading the source; unreadable subtrees would be silently excluded") }
+    if ($dstErr.Count -gt 0) { [void]$reasons.Add("$($dstErr.Count) error(s) reading the destination") }
+
+    # Get-ChildItem -Recurse traverses junctions in 5.1; robocopy is told not to
+    # with /XJ. When junctions exist the two disagree by design, so the counts
+    # are not comparable and must not be reported as a mismatch.
+    if (Test-HasJunctions -Root $Source) {
+        [void]$reasons.Add('source contains junctions, which robocopy skips (/XJ) but Get-ChildItem follows')
+    }
+
+    $srcBytes = 0; foreach ($f in $srcFiles) { $srcBytes += $f.Length }
+    $dstBytes = 0; foreach ($f in $dstFiles) { $dstBytes += $f.Length }
+
+    return [pscustomobject]@{
+        Reliable    = ($reasons.Count -eq 0)
+        Reason      = ($reasons -join '; ')
+        SourceFiles = $srcFiles.Count
+        DestFiles   = $dstFiles.Count
+        SourceBytes = $srcBytes
+        DestBytes   = $dstBytes
+        Match       = ($srcFiles.Count -eq $dstFiles.Count -and $srcBytes -eq $dstBytes)
+    }
+}
+
 function Compare-TreeHashes {
     param([string] $Source, [string] $Dest)
 
@@ -580,7 +664,9 @@ function Compare-TreeHashes {
     $mismatches = New-Object System.Collections.ArrayList
     $checked    = 0
 
-    $srcFiles = Get-ChildItem -LiteralPath $Source -Recurse -File -Force -ErrorAction SilentlyContinue
+    $srcErr   = @()
+    $srcFiles = @(Get-ChildItem -LiteralPath $Source -Recurse -File -Force -ErrorAction SilentlyContinue -ErrorVariable +srcErr)
+
     foreach ($sf in $srcFiles) {
         if (-not $IncludeSystemFolders -and (Test-IsSystemPath $sf.FullName)) { continue }
 
@@ -597,16 +683,38 @@ function Compare-TreeHashes {
             if ($h1 -ne $h2) { [void]$mismatches.Add("DIFFERS: $relative") }
         }
         catch {
+            # A path 5.1 cannot open (over MAX_PATH, locked) is unverified, not
+            # verified. Report it rather than counting it as a pass.
             [void]$mismatches.Add("UNREADABLE: $relative ($($_.Exception.Message))")
         }
         $checked++
         if ($checked % 250 -eq 0) { Write-Log "  hashed $checked files..." 'INFO' }
     }
 
-    return [pscustomobject]@{ Checked = $checked; Mismatches = $mismatches.ToArray() }
+    $reliable = $true
+    $reason   = ''
+    if ($srcErr.Count -gt 0) {
+        $reliable = $false
+        $reason   = "$($srcErr.Count) error(s) enumerating the source"
+    }
+    elseif ($checked -eq 0 -and $srcFiles.Count -gt 0) {
+        $reliable = $false
+        $reason   = 'no files were hashed despite a non-empty source'
+    }
+
+    return [pscustomobject]@{
+        Checked = $checked; Mismatches = $mismatches.ToArray()
+        Reliable = $reliable; Reason = $reason
+    }
 }
 
 function Copy-Share {
+    <#
+        Returns a status string, not a boolean: 'complete', 'incomplete',
+        'unreachable', 'empty-source', or 'dryrun'. A boolean could not
+        distinguish "copied and verified" from "listed nothing because -DryRun",
+        which previously made a dry run report every share as complete.
+    #>
     param(
         [string]    $NasHost,
         [string]    $ShareName,
@@ -620,18 +728,27 @@ function Copy-Share {
 
     Write-Log "Share '$ShareName'  ->  $dest" 'STEP'
 
-    if (-not (Test-Path -LiteralPath $source)) {
-        Write-Log "Source $source is not accessible. Skipping for now; it stays marked incomplete." 'ERROR'
+    # Wait for the NAS BEFORE testing the source. A momentary dropout would
+    # otherwise mark the share unreachable without ever entering the retry loop
+    # that exists to ride out exactly that.
+    if (-not (Wait-ForNas -NasHost $NasHost)) {
+        Write-Log "$NasHost is not reachable. Leaving '$ShareName' unfinished." 'ERROR'
         $State['shares'][$ShareName] = @{
-            status   = 'unreachable'
-            lastExit = -1
-            passes   = 0
-            note     = 'source not accessible at last attempt'
+            status = 'unreachable'; lastExit = -1; passes = 0
+            note   = 'NAS not reachable at last attempt'
         }
-        # Persist it: without this the share's status is lost if the run is
-        # interrupted, and the next -Resume has no record it was ever tried.
         Write-State -State $State -Path $StateFile
-        return $false
+        return 'unreachable'
+    }
+
+    if (-not (Test-Path -LiteralPath $source)) {
+        Write-Log "Source $source is not accessible (share missing, or access denied)." 'ERROR'
+        $State['shares'][$ShareName] = @{
+            status = 'unreachable'; lastExit = -1; passes = 0
+            note   = 'source not accessible at last attempt'
+        }
+        Write-State -State $State -Path $StateFile
+        return 'unreachable'
     }
 
     if (-not (Test-Path -LiteralPath $dest)) {
@@ -639,21 +756,24 @@ function Copy-Share {
     }
 
     if ($DryRun) {
-        Write-Log "DRY RUN: listing outstanding work only." 'WARN'
         $residual = Get-RobocopyResidual -Source $source -Dest $dest
-        Write-Log "Would copy approximately $($residual.Files) file(s)." 'INFO'
-        return $true
+        if ($residual.Ok) {
+            Write-Log "DRY RUN: $($residual.Outstanding) file(s) outstanding of $($residual.Total) total. Nothing copied." 'WARN'
+        }
+        else {
+            Write-Log "DRY RUN: could not determine outstanding work - $($residual.Reason)" 'WARN'
+        }
+        return 'dryrun'
     }
 
     $pass    = 0
     $success = $false
 
-    # Initialised before the loop on purpose. The loop can exit before robocopy
-    # ever runs - the NAS never came back, or -MaxPasses was set below 1 - and
+    # Initialised before the loop: it can exit before robocopy ever runs, and
     # under StrictMode reading an unassigned variable afterwards is a
-    # terminating error. An unreachable NAS is this script's whole premise, so
-    # that path is ordinary, not exotic.
+    # terminating error.
     $lastExit = -1
+    $lastResidual = $null
 
     while ($pass -lt $MaxPasses) {
         $pass++
@@ -665,60 +785,81 @@ function Copy-Share {
         }
 
         $roboArgs = Get-RobocopyArgs -Source $source -Dest $dest -LogPath $logPath
-        $result   = Invoke-Robocopy -Arguments $roboArgs
+        $result   = Invoke-Native -Command 'robocopy.exe' -Arguments $roboArgs
         $lastExit = $result.ExitCode
 
-        # Robocopy exit codes are a bitmask. Anything under 8 is a success;
-        # 8 means some files failed, 16 is fatal.
-        if ($result.ExitCode -ge 16) {
-            Write-Log "Robocopy fatal error (exit $($result.ExitCode)) on '$ShareName'." 'ERROR'
+        if ($lastExit -ge 16) {
+            Write-Log "Robocopy fatal error (exit $lastExit) on '$ShareName'." 'ERROR'
         }
-        elseif ($result.ExitCode -ge 8) {
-            Write-Log "Robocopy reported failures (exit $($result.ExitCode)) on '$ShareName'. Will retry." 'WARN'
+        elseif ($lastExit -ge 8) {
+            Write-Log "Robocopy reported failures (exit $lastExit) on '$ShareName'. Will retry." 'WARN'
         }
         else {
-            Write-Log "Robocopy pass completed (exit $($result.ExitCode))." 'OK'
+            Write-Log "Robocopy pass completed (exit $lastExit)." 'OK'
         }
 
-        $residual = Get-RobocopyResidual -Source $source -Dest $dest
-        if ($residual.Ok -and $residual.Files -eq 0) {
-            Write-Log "Verified: nothing outstanding for '$ShareName'." 'OK'
+        $residual     = Get-RobocopyResidual -Source $source -Dest $dest
+        $lastResidual = $residual
+
+        if (-not $residual.Ok) {
+            Write-Log "Could not verify '$ShareName': $($residual.Reason)" 'WARN'
+        }
+        elseif ($residual.Outstanding -eq 0) {
+            Write-Log "Verified: nothing outstanding for '$ShareName' ($($residual.Total) file(s))." 'OK'
             $success = $true
             break
         }
-
-        if ($residual.Ok) {
-            Write-Log "$($residual.Files) file(s) still outstanding for '$ShareName'." 'WARN'
-        }
         else {
-            Write-Log "Could not verify '$ShareName' (list pass exit $($residual.ExitCode))." 'WARN'
+            Write-Log "$($residual.Outstanding) file(s) still outstanding for '$ShareName'." 'WARN'
         }
 
         Start-Sleep -Seconds ([Math]::Min(60, 10 * $pass))
     }
 
     $entry = @{
-        status     = $(if ($success) { 'complete' } else { 'incomplete' })
-        lastExit   = $lastExit
-        passes     = $pass
-        verifiedAt = $(if ($success) { (Get-Date).ToUniversalTime().ToString('o') } else { '' })
-        log        = $logPath
+        status       = 'incomplete'
+        lastExit     = $lastExit
+        passes       = $pass
+        verifiedAt   = ''
+        log          = $logPath
+        deepVerified = $false
+        hashVerified = $false
+    }
+
+    if ($lastResidual -and $lastResidual.Ok) { $entry['sourceTotal'] = $lastResidual.Total }
+
+    # A share that verifies as complete while containing nothing is the failure
+    # this script most needs to catch: a QNAP whose volume did not mount still
+    # publishes its shares, and they enumerate empty. Copying nothing from one
+    # and recording it preserved is how the files get wiped.
+    if ($success -and $lastResidual -and $lastResidual.Total -eq 0 -and -not $AllowEmptyShares) {
+        Write-Log "'$ShareName' contains no files. That is either genuinely empty or a volume that failed to mount - refusing to record it as preserved. Re-run with -AllowEmptyShares if it really is empty." 'ERROR'
+        $entry['status'] = 'empty-source'
+        $State['shares'][$ShareName] = $entry
+        Write-State -State $State -Path $StateFile
+        return 'empty-source'
     }
 
     if ($success -and $DeepVerify) {
         $cmp = Compare-TreeCounts -Source $source -Dest $dest
-        if ($cmp) {
+        if (-not $cmp -or -not $cmp.Reliable) {
+            $why = 'enumeration failed'
+            if ($cmp) { $why = $cmp.Reason }
+            Write-Log "Deep verify could not be trusted for '$ShareName': $why. Not recording as verified." 'ERROR'
+            $success = $false
+        }
+        else {
             $entry['sourceFiles'] = $cmp.SourceFiles
             $entry['destFiles']   = $cmp.DestFiles
             $entry['sourceBytes'] = $cmp.SourceBytes
             $entry['destBytes']   = $cmp.DestBytes
             if ($cmp.Match) {
+                $entry['deepVerified'] = $true
                 Write-Log "Deep verify OK: $($cmp.SourceFiles) files, $(Format-Bytes $cmp.SourceBytes)." 'OK'
             }
             else {
                 Write-Log ("Deep verify MISMATCH: source {0} files / {1}; dest {2} files / {3}." -f `
                         $cmp.SourceFiles, (Format-Bytes $cmp.SourceBytes), $cmp.DestFiles, (Format-Bytes $cmp.DestBytes)) 'ERROR'
-                $entry['status'] = 'incomplete'
                 $success = $false
             }
         }
@@ -727,21 +868,32 @@ function Copy-Share {
     if ($success -and $Hash) {
         $hres = Compare-TreeHashes -Source $source -Dest $dest
         $entry['hashChecked'] = $hres.Checked
-        if ($hres.Mismatches.Count -gt 0) {
+        if (-not $hres.Reliable) {
+            Write-Log "Hash verify could not be trusted for '$ShareName': $($hres.Reason)." 'ERROR'
+            $success = $false
+        }
+        elseif ($hres.Mismatches.Count -gt 0) {
             Write-Log "Hash verify found $($hres.Mismatches.Count) problem(s) in '$ShareName'." 'ERROR'
             foreach ($m in $hres.Mismatches | Select-Object -First 20) { Write-Log "  $m" 'ERROR' }
-            $entry['status'] = 'incomplete'
             $entry['hashMismatches'] = $hres.Mismatches.Count
             $success = $false
         }
         else {
+            $entry['hashVerified'] = $true
             Write-Log "Hash verify OK across $($hres.Checked) files." 'OK'
         }
     }
 
+    if ($success) {
+        $entry['status']     = 'complete'
+        $entry['verifiedAt'] = (Get-Date).ToUniversalTime().ToString('o')
+    }
+
     $State['shares'][$ShareName] = $entry
     Write-State -State $State -Path $StateFile
-    return $success
+
+    if ($success) { return 'complete' }
+    return 'incomplete'
 }
 
 # ---------------------------------------------------------------------------
@@ -755,6 +907,7 @@ try {
     Write-Log "PowerShell $($PSVersionTable.PSVersion) on $env:COMPUTERNAME as $env:USERNAME"
     Write-Log "Log: $RunLog"
     Write-Log "State: $StateFile"
+    if ($DryRun) { Write-Log "DRY RUN: nothing will be copied and no share will be recorded as complete." 'WARN' }
 
     if ($Force -and (Test-Path -LiteralPath $StateFile)) {
         Remove-Item -LiteralPath $StateFile -Force
@@ -765,36 +918,13 @@ try {
     if (-not $state) { $state = New-State }
     if (-not $state.ContainsKey('shares') -or $null -eq $state['shares']) { $state['shares'] = @{} }
     if ($state['shares'] -isnot [hashtable]) { $state['shares'] = ConvertTo-Hashtable $state['shares'] }
+    if (-not $state.ContainsKey('shareListSource')) { $state['shareListSource'] = '' }
 
-    # Fill in from state so `-Resume` alone is a valid invocation.
     if (-not $Nas -and $state['nas']) { $Nas = $state['nas'] }
     if (-not $Destination -and $state['destination']) { $Destination = $state['destination'] }
 
     if (-not $Nas) {
         throw "No NAS specified and none found in state. Run once with -Nas <host-or-ip> -Destination <folder>."
-    }
-
-    if ($ListSharesOnly) {
-        if ($Credential) { [void](Connect-Nas -NasHost $Nas -Cred $Credential) }
-        if (-not (Test-NasReachable -NasHost $Nas)) { throw "$Nas is not reachable on SMB." }
-        $shares = Find-NasShares -NasHost $Nas
-        Write-Log "Shares visible on ${Nas}: $($shares -join ', ')" 'OK'
-        return
-    }
-
-    if (-not $Destination) {
-        throw "No destination specified and none found in state. Run once with -Destination <folder>."
-    }
-
-    $Destination = Resolve-ToUnc $Destination
-    if (-not (Test-Path -LiteralPath $Destination)) {
-        New-Item -ItemType Directory -Path $Destination -Force | Out-Null
-        Write-Log "Created destination $Destination" 'INFO'
-    }
-
-    # Refuse to write the rescue copy back onto the machine we are rescuing.
-    if ($Destination -like "\\$Nas\*") {
-        throw "Destination $Destination is on the NAS itself. Choose local or external storage."
     }
 
     Write-Log "Checking whether $Nas answers on SMB..." 'STEP'
@@ -803,77 +933,184 @@ try {
     }
     Write-Log "$Nas is reachable." 'OK'
 
+    if (-not $Credential) {
+        # Try the current Windows identity first, and only ask for credentials
+        # if the NAS refuses it. Documented behaviour has to be real behaviour:
+        # without this, a permissions problem surfaced later as every share
+        # being "not accessible", which reads like a dead NAS.
+        $probeSession = Invoke-Native -Command 'net.exe' -Arguments @('use', "\\$Nas\IPC$")
+        if ($probeSession.ExitCode -eq 0) {
+            [void]$script:MappedSessions.Add("\\$Nas\IPC$")
+            Write-Log "Connected to $Nas as the current Windows user." 'OK'
+        }
+        elseif ($NonInteractive) {
+            Write-Log "$Nas refused the current Windows identity and -NonInteractive is set. Continuing unauthenticated; expect access failures." 'WARN'
+        }
+        else {
+            Write-Log "$Nas refused the current Windows identity. Enter NAS credentials." 'WARN'
+            $Credential = Get-Credential -Message "Credentials for $Nas"
+        }
+    }
+
     if ($Credential) {
         if (-not (Connect-Nas -NasHost $Nas -Cred $Credential)) {
             throw "Could not authenticate to $Nas."
         }
     }
 
-    if (-not $Share -or $Share.Count -eq 0) {
-        if ($state.ContainsKey('shareList') -and $state['shareList']) {
-            $Share = @($state['shareList'])
-            Write-Log "Using share list from state: $($Share -join ', ')" 'INFO'
+    if ($ListSharesOnly) {
+        $probeResult = Find-NasShares -NasHost $Nas
+        if ($probeResult.Source -eq 'probed') {
+            Write-Log "This list came from probing common names and may be INCOMPLETE." 'WARN'
         }
-        else {
-            $Share = Find-NasShares -NasHost $Nas
-            if (-not $Share -or $Share.Count -eq 0) {
-                throw "No shares found. Re-run with -Share <name1>,<name2> to name them explicitly."
-            }
-            Write-Log "Discovered shares: $($Share -join ', ')" 'OK'
-        }
-    }
-
-    # Free-space sanity check against the destination volume.
-    try {
-        $destRoot = [System.IO.Path]::GetPathRoot((Resolve-Path -LiteralPath $Destination).Path)
-        if ($destRoot -match '^[A-Za-z]:') {
-            $vol = Get-CimInstance -ClassName Win32_LogicalDisk -Filter "DeviceID='$($destRoot.TrimEnd('\'))'"
-            if ($vol) { Write-Log "Destination free space: $(Format-Bytes $vol.FreeSpace)" 'INFO' }
-        }
-    }
-    catch { }
-
-    $state['nas']         = $Nas
-    $state['destination'] = $Destination
-    $state['shareList']   = @($Share)
-    Write-State -State $state -Path $StateFile
-
-    $completed = New-Object System.Collections.ArrayList
-    $failed    = New-Object System.Collections.ArrayList
-    $skipped   = New-Object System.Collections.ArrayList
-
-    foreach ($s in $Share) {
-        $existing = $null
-        if ($state['shares'].ContainsKey($s)) { $existing = $state['shares'][$s] }
-
-        $alreadyDone = ($existing -and $existing.ContainsKey('status') -and $existing['status'] -eq 'complete')
-
-        if ($Resume -and $alreadyDone -and -not $Recheck) {
-            Write-Log "Skipping '$s': already verified complete on $($existing['verifiedAt']). Use -Recheck to re-verify." 'INFO'
-            [void]$skipped.Add($s)
-            continue
-        }
-
-        if (Copy-Share -NasHost $Nas -ShareName $s -DestRoot $Destination -State $state) {
-            [void]$completed.Add($s)
-        }
-        else {
-            [void]$failed.Add($s)
-        }
-    }
-
-    Write-Log "Summary" 'STEP'
-    Write-Log "Verified complete : $(if ($completed.Count) { $completed -join ', ' } else { 'none' })" 'OK'
-    if ($skipped.Count)  { Write-Log "Skipped (already done) : $($skipped -join ', ')" 'INFO' }
-    if ($failed.Count) {
-        Write-Log "Incomplete : $($failed -join ', ')" 'ERROR'
-        Write-Log "Re-run '.\qnap-preserve-files.ps1 -Resume' to continue where this left off." 'WARN'
-        $exitCode = 2
+        Write-Log "Shares visible on ${Nas}: $($probeResult.Names -join ', ')" 'OK'
+        $exitCode = 0
     }
     else {
-        Write-Log "Every requested share is copied and verified." 'OK'
+        if (-not $Destination) {
+            throw "No destination specified and none found in state. Run once with -Destination <folder>."
+        }
+
+        $Destination = Resolve-ToUnc $Destination
+        if (-not (Test-Path -LiteralPath $Destination)) {
+            New-Item -ItemType Directory -Path $Destination -Force | Out-Null
+            Write-Log "Created destination $Destination" 'INFO'
+        }
+
+        # Refuse to write the rescue copy back onto the machine being rescued.
+        # Compare resolved addresses, not spelling: \\192.168.1.50\backup and
+        # \\NAS\backup are the same device.
+        if ($Destination.StartsWith('\\')) {
+            $destHost = $Destination.TrimStart('\').Split('\')[0]
+            $sameName = ($destHost -eq $Nas)
+            $sharedIp = $false
+            $destIps  = Get-HostAddresses $destHost
+            $nasIps   = Get-HostAddresses $Nas
+            foreach ($d in $destIps) { if ($nasIps -contains $d) { $sharedIp = $true } }
+            if ($sameName -or $sharedIp) {
+                throw "Destination $Destination is on the NAS itself ($destHost). Choose local or external storage."
+            }
+        }
+
+        if (-not $Share -or $Share.Count -eq 0) {
+            $useStored = $false
+            if ($state.ContainsKey('shareList') -and $state['shareList'] -and $state['shareListSource'] -eq 'enumerated') {
+                $useStored = $true
+            }
+
+            if ($useStored) {
+                $Share = @($state['shareList'])
+                Write-Log "Using enumerated share list from state: $($Share -join ', ')" 'INFO'
+            }
+            else {
+                # A probed list is a guess. Re-discover every run rather than
+                # persisting a guess and treating it as the full set - a share
+                # missed by the probe would otherwise never be copied and never
+                # be reported missing.
+                $probeResult = Find-NasShares -NasHost $Nas
+                $Share = $probeResult.Names
+                $state['shareListSource'] = $probeResult.Source
+                if (-not $Share -or $Share.Count -eq 0) {
+                    throw "No shares found. Re-run with -Share <name1>,<name2> to name them explicitly."
+                }
+                if ($probeResult.Source -eq 'probed') {
+                    Write-Log "Discovered by PROBING common names: $($Share -join ', ')" 'WARN'
+                    Write-Log "This is a guess, not an enumeration. Shares with unusual names will be missed - pass -Share explicitly if you know them." 'WARN'
+                }
+                else {
+                    Write-Log "Discovered shares: $($Share -join ', ')" 'OK'
+                }
+            }
+        }
+        else {
+            $state['shareListSource'] = 'explicit'
+        }
+
+        try {
+            $destResolved = (Resolve-Path -LiteralPath $Destination).Path
+            $destRoot = [System.IO.Path]::GetPathRoot($destResolved)
+            if ($destRoot -match '^[A-Za-z]:') {
+                $vol = Get-CimInstance -ClassName Win32_LogicalDisk -Filter "DeviceID='$($destRoot.TrimEnd('\'))'"
+                if ($vol) { Write-Log "Destination free space: $(Format-Bytes $vol.FreeSpace)" 'INFO' }
+            }
+        }
+        catch { }
+
+        $state['nas']         = $Nas
+        $state['destination'] = $Destination
+        $state['shareList']   = @($Share)
+        Write-State -State $state -Path $StateFile
+
+        $completed = New-Object System.Collections.ArrayList
+        $failed    = New-Object System.Collections.ArrayList
+        $skipped   = New-Object System.Collections.ArrayList
+        $empty     = New-Object System.Collections.ArrayList
+        $dryrun    = New-Object System.Collections.ArrayList
+
+        foreach ($s in $Share) {
+            $existing = $null
+            if ($state['shares'].ContainsKey($s)) { $existing = $state['shares'][$s] }
+
+            $alreadyDone = ($existing -and $existing.ContainsKey('status') -and $existing['status'] -eq 'complete')
+
+            # Only skip if the stored record was verified at least as deeply as
+            # this run asks for. Skipping a count-verified share during a -Hash
+            # run would report hash verification that never happened.
+            $deepEnough = $true
+            if ($alreadyDone -and $DeepVerify) {
+                $deepEnough = ($existing.ContainsKey('deepVerified') -and $existing['deepVerified'])
+            }
+            if ($alreadyDone -and $Hash -and $deepEnough) {
+                $deepEnough = ($existing.ContainsKey('hashVerified') -and $existing['hashVerified'])
+            }
+
+            if ($Resume -and $alreadyDone -and $deepEnough -and -not $Recheck -and -not $DryRun) {
+                Write-Log "Skipping '$s': verified complete on $($existing['verifiedAt'])." 'INFO'
+                [void]$skipped.Add($s)
+                continue
+            }
+            if ($Resume -and $alreadyDone -and -not $deepEnough) {
+                Write-Log "'$s' is marked complete but was not verified to the depth this run requests. Re-verifying." 'WARN'
+            }
+
+            $status = Copy-Share -NasHost $Nas -ShareName $s -DestRoot $Destination -State $state
+            switch ($status) {
+                'complete'     { [void]$completed.Add($s) }
+                'empty-source' { [void]$empty.Add($s) }
+                'dryrun'       { [void]$dryrun.Add($s) }
+                default        { [void]$failed.Add($s) }
+            }
+        }
+
+        Write-Log "Summary" 'STEP'
+
+        if ($DryRun) {
+            Write-Log "DRY RUN complete. Nothing was copied and no share was marked complete." 'WARN'
+            Write-Log "Shares listed: $($dryrun -join ', ')" 'INFO'
+            $exitCode = 0
+        }
+        else {
+            Write-Log "Verified complete : $(if ($completed.Count) { $completed -join ', ' } else { 'none' })" 'OK'
+            if ($skipped.Count) { Write-Log "Skipped (already verified) : $($skipped -join ', ')" 'INFO' }
+            if ($empty.Count) {
+                Write-Log "EMPTY SOURCE - not recorded as preserved : $($empty -join ', ')" 'ERROR'
+                Write-Log "Check whether the NAS volume actually mounted before accepting these with -AllowEmptyShares." 'ERROR'
+                $exitCode = 2
+            }
+            if ($failed.Count) {
+                Write-Log "Incomplete : $($failed -join ', ')" 'ERROR'
+                Write-Log "Re-run '.\qnap-preserve-files.ps1 -Resume' to continue where this left off." 'WARN'
+                $exitCode = 2
+            }
+            if ($state['shareListSource'] -eq 'probed') {
+                Write-Log "The share list was PROBED, not enumerated. Shares with unusual names may exist and not have been copied." 'WARN'
+            }
+            if (-not $empty.Count -and -not $failed.Count) {
+                Write-Log "Every requested share is copied and verified." 'OK'
+            }
+        }
+        Write-Log "Full log: $RunLog" 'INFO'
     }
-    Write-Log "Full log: $RunLog" 'INFO'
 }
 catch {
     Write-Log $_.Exception.Message 'ERROR'
