@@ -4,10 +4,23 @@ defaults:
   run:
     working-directory: ./rust
 
+# Everything in this workflow builds and tests the Rust programs under rust/,
+# so it only runs when that tree changes. Pull requests that touch nothing
+# under rust/ (scripts, docs, configuration, the JS app) no longer run the Rust
+# pipeline at all. The workflow file itself is included so that an edit to the
+# pipeline is exercised by the pipeline, and is not merged untested.
+#
+# rust/ci/ holds the helper scripts; it is covered by rust/**.
 on:
   pull_request:
+    paths:
+      - "rust/**"
+      - ".github/workflows/pull-request.yml"
   push:
     branches: [master]
+    paths:
+      - "rust/**"
+      - ".github/workflows/pull-request.yml"
 
 jobs:
   all_github_action_checks:
