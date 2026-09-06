@@ -183,10 +183,10 @@ pub fn get_reservation_list(
 
     // For some reason when converting Key to u8 here, it becomes unreachable. Use direct constant instead.
     match version {
-        3 => return Ok(Box::new(ReservationListV1::from_account_info(account)?)),
-        5 => return Ok(Box::new(ReservationListV2::from_account_info(account)?)),
-        _ => return Err(MetadataError::DataTypeMismatch.into()),
-    };
+        3 => Ok(Box::new(ReservationListV1::from_account_info(account)?)),
+        5 => Ok(Box::new(ReservationListV2::from_account_info(account)?)),
+        _ => Err(MetadataError::DataTypeMismatch.into()),
+    }
 }
 
 #[repr(C)]
