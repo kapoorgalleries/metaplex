@@ -1,29 +1,46 @@
 # Cloudflare Workers (static assets) config for the Metaplex `web` app.
 #
-# Set the Workers Builds "Root directory" to `js` so that this file, package.json
-# and yarn.lock are all found at the root directory.
+# This file lives at the REPO ROOT on purpose. Workers Builds runs its deploy
+# command from the configured "Root directory", which for this project is the
+# repo root -- that is why the original failure was:
 #
-# Build command  (dashboard): bash ./cf-build.sh
-# Deploy command (dashboard): npx wrangler deploy
+#   ✘ [ERROR] Could not detect a directory containing static files
+#             (e.g. html, css and js) for the project
 #
-# `name` MUST match the Worker name in the Cloudflare dashboard or the build fails.
-name = "metaplex-web"
+# wrangler found no config, assumed an assets-only Worker, scanned the root and
+# its immediate children for an index.html, and found none (js/ has no
+# index.html, so the built site under js/build/web was invisible to it).
+#
+# `name` is advisory here: Workers Builds injects WRANGLER_CI_OVERRIDE_NAME and
+# overrides this value with the connected Worker's name, warning but not failing.
+name = "metaplex"
 compatibility_date = "2026-09-06"
+
+# The build. Kept here so the deploy works with no dashboard build command.
+#
+# NOTE: Cloudflare's docs state that Workers Builds "does not honor the
+# configurations set in Custom Builds within your Wrangler configuration file",
+# but wrangler itself does run this section for assets-only configs (verified on
+# 4.129.0). If the hosted runner turns out to ignore it, the deploy fails with
+# "The directory specified by the assets.directory field ... does not exist"
+# instead, and the fix is to set the dashboard Build command to the same line:
+#     bash ./js/cf-build.sh
+[build]
+command = "bash ./js/cf-build.sh"
 
 # There is no Worker script: this is an assets-only deployment, so no `main`
 # and no `assets.binding` (binding is only useful alongside `main`).
 [assets]
-# Relative to this config file. craco.config.js rewrites paths.appBuild to
-# ./../../build/web, so `yarn build` in packages/web emits here -- NOT to
-# packages/web/build.
-directory = "build/web"
+# craco.config.js rewrites paths.appBuild to ./../../build/web, so `yarn build`
+# in js/packages/web emits to js/build/web -- NOT to js/packages/web/build.
+directory = "js/build/web"
 
 # The app uses HashRouter (js/packages/web/src/routes.tsx), so every route lives
 # after a `#` and the server only ever needs to serve `/`. Combined with
-# "homepage": "." in packages/web/package.json (which emits RELATIVE asset paths
-# like ./static/js/main.js), a single-page-application fallback would return
-# index.html for a URL like /a/b and the browser would then resolve assets against
-# /a/, producing 404s. "none" returns a real 404 for unknown paths instead.
+# "homepage": "." in js/packages/web/package.json (which emits RELATIVE asset
+# paths like ./static/js/main.js), a single-page-application fallback would
+# return index.html for a URL like /a/b and the browser would then resolve
+# assets against /a/, producing 404s. "none" returns a real 404 instead.
 # If this app is ever migrated to BrowserRouter, change this to
 # "single-page-application" AND change "homepage" to "/".
 not_found_handling = "none"
