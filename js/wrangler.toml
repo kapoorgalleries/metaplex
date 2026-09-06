@@ -1,0 +1,29 @@
+# Cloudflare Workers (static assets) config for the Metaplex `web` app.
+#
+# Set the Workers Builds "Root directory" to `js` so that this file, package.json
+# and yarn.lock are all found at the root directory.
+#
+# Build command  (dashboard): bash ./cf-build.sh
+# Deploy command (dashboard): npx wrangler deploy
+#
+# `name` MUST match the Worker name in the Cloudflare dashboard or the build fails.
+name = "metaplex-web"
+compatibility_date = "2026-09-06"
+
+# There is no Worker script: this is an assets-only deployment, so no `main`
+# and no `assets.binding` (binding is only useful alongside `main`).
+[assets]
+# Relative to this config file. craco.config.js rewrites paths.appBuild to
+# ./../../build/web, so `yarn build` in packages/web emits here -- NOT to
+# packages/web/build.
+directory = "build/web"
+
+# The app uses HashRouter (js/packages/web/src/routes.tsx), so every route lives
+# after a `#` and the server only ever needs to serve `/`. Combined with
+# "homepage": "." in packages/web/package.json (which emits RELATIVE asset paths
+# like ./static/js/main.js), a single-page-application fallback would return
+# index.html for a URL like /a/b and the browser would then resolve assets against
+# /a/, producing 404s. "none" returns a real 404 for unknown paths instead.
+# If this app is ever migrated to BrowserRouter, change this to
+# "single-page-application" AND change "homepage" to "/".
+not_found_handling = "none"
