@@ -22,6 +22,13 @@ use {
     spl_token_vault::state::SafetyDepositBox,
 };
 
+// Ten of these parameters are the distinct accounts the
+// mint_printing_tokens_via_token CPI requires, and they are passed straight
+// through to it in that order. Grouping them into a struct would add an
+// indirection that has to be kept in sync with the instruction's account list
+// by hand, which is exactly the kind of mistake the explicit signature
+// prevents. Accepted rather than restructured.
+#[allow(clippy::too_many_arguments)]
 fn mint_printing_tokens<'a: 'b, 'b>(
     program: &AccountInfo<'a>,
     destination: &AccountInfo<'a>,

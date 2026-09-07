@@ -63,8 +63,8 @@ pub fn assert_data_valid(
                 let mut total: u8 = 0;
                 for i in 0..creators.len() {
                     let creator = &creators[i];
-                    for j in (i + 1)..creators.len() {
-                        if creators[j].address == creator.address {
+                    for other in creators.iter().skip(i + 1) {
+                        if other.address == creator.address {
                             return Err(MetadataError::DuplicateCreatorAddress.into());
                         }
                     }
@@ -106,10 +106,8 @@ pub fn assert_data_valid(
                                     }
                                 }
                             }
-                        } else {
-                            if creator.verified {
-                                return Err(MetadataError::CannotVerifyAnotherCreator.into());
-                            }
+                        } else if creator.verified {
+                            return Err(MetadataError::CannotVerifyAnotherCreator.into());
                         }
                     }
                 }
