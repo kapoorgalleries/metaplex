@@ -1,38 +1,30 @@
 # Deploying the web app to Cloudflare Workers
 
 The `web` app (`js/packages/web`) deploys to Cloudflare Workers as a static
-assets Worker. Almost all of the configuration lives in this repo; exactly one
-setting does not, and it is the one that is easy to miss.
+assets Worker. All of the configuration lives in this repo.
 
-## The one dashboard setting
+## No dashboard build command
 
-**Settings → Build → Build command** must be:
-
-```
-bash ./js/cf-build.sh
-```
-
-Leave **Root directory** at the repository root and **Deploy command** at its
-default `npx wrangler deploy`.
-
-This cannot be committed. Workers Builds
-[does not honor](https://developers.cloudflare.com/workers/ci-cd/builds/configuration/)
-the `[build]` section of a Wrangler configuration file, so a build command set
-in `wrangler.toml` is silently ignored by the hosted runner. The `[build]`
-section in `wrangler.toml` is kept anyway, because plain `npx wrangler deploy`
-*does* honor it — it makes a manual deploy a single command.
-
-Without the build command set, the build fails with:
+The `[build]` section of `wrangler.toml` drives the build. Workers Builds runs
+it before the deploy — its log shows:
 
 ```
-✘ [ERROR] The directory specified by the "assets.directory" field in your
-          configuration file does not exist
+[custom build] Running: bash ./js/cf-build.sh
 ```
 
-because nothing produced `js/build/web`.
+Cloudflare's own
+[docs](https://developers.cloudflare.com/workers/ci-cd/builds/configuration/)
+say the hosted runner does not honor custom builds. In practice it does, and
+the log above (build `5d91b1f9`, 2026-09-07) is the evidence. So:
 
-If there is no Wrangler config at all, the failure looks different and more
-confusing — wrangler falls back to guessing and reports:
+- Leave **Settings → Build → Build command** empty. If it is set to the same
+  script, the build runs twice per deploy: once from the dashboard, once from
+  `[build]`. Correct, but slow.
+- Leave **Root directory** at the repository root and **Deploy command** at its
+  default `npx wrangler deploy`.
+
+If there is no Wrangler config at all, wrangler falls back to guessing and
+reports:
 
 ```
 ✘ [ERROR] Could not detect a directory containing static files
@@ -49,13 +41,20 @@ confusing — wrangler falls back to guessing and reports:
 
 ## Things that will bite you
 
-- **The first build takes 10–15 minutes**, almost all of it `yarn install`.
-  That is normal for this dependency tree, not a hang. Enabling **Build cache**
-  cuts subsequent runs substantially.
-- **yarn must be 1.x.** The build image ships yarn 4, but `js/yarn.lock` is a
-  v1 lockfile and `lerna.json` sets `"npmClient": "yarn"`, so lerna shells out
-  to whatever `yarn` is on `PATH`. `cf-build.sh` pins yarn 1.22.22 onto `PATH`
-  itself, so this is handled — do not "simplify" that away.
+- **Expect a few minutes per build.** On Cloudflare, `yarn install` takes
+  about 70 seconds from a cold cache and the webpack build about 30. Enabling
+  **Build cache** cuts subsequent runs further.
+- **yarn must be 1.x, in every process.** `js/yarn.lock` is a v1 lockfile and
+  `lerna.json` sets `"npmClient": "yarn"`, so lerna shells out to bare `yarn`.
+  The build image provides yarn through a corepack shim beside the `node`
+  binary, and yarn 1's own `yarn run` prepends that directory to `PATH` for
+  every script it launches — so a yarn 1 placed earlier on `PATH` is bypassed
+  inside `yarn bootstrap`, and lerna got yarn 4 and died on `--mutex`.
+  Three things handle it, and each is load-bearing: `js/package.json` declares
+  `"packageManager": "yarn@1.22.22"` so the shim itself becomes yarn 1;
+  `cf-build.sh` pins yarn 1 onto `PATH` for images without corepack; and lerna
+  is invoked by path rather than through `yarn run`. Do not "simplify" any of
+  these away.
 - **`CI` must be false during the build.** Workers Builds sets `CI=true`, and
   create-react-app turns this app's ~50 pre-existing ESLint warnings into fatal
   errors. `cf-build.sh` exports `CI=false`.

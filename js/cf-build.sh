@@ -2,14 +2,10 @@
 #
 # Cloudflare Workers Builds - build entrypoint for the `web` app.
 #
-# Set this as the dashboard "Build command" (Settings > Build):
-#     bash ./js/cf-build.sh
-# with "Root directory" left at the repository root.
-#
-# Workers Builds does not honor the [build] section of a Wrangler config
-# (documented at /workers/ci-cd/builds/configuration/), so the build command
-# has to be set in the dashboard. This script is the whole build, so that is
-# the only dashboard setting required.
+# Invoked by the [build] section of wrangler.toml, which Workers Builds runs as
+#     [custom build] Running: bash ./js/cf-build.sh
+# ahead of the deploy. No dashboard Build command is needed; if one is set it
+# runs this script a second time, which is harmless but slow -- leave it empty.
 #
 # It is also safe to run by hand from a clean checkout, from any directory:
 #     bash js/cf-build.sh
@@ -23,23 +19,47 @@ set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 
 # ---------------------------------------------------------------------------
-# Pin yarn 1.x.
+# yarn must be 1.x, everywhere, including inside child processes.
 #
-# The Workers Builds image ships yarn 4.9.1 by default, but this workspace is
-# yarn 1: js/yarn.lock is a "yarn lockfile v1", which yarn 4 cannot consume
-# without migrating it, and yarn 4 rejects --frozen-lockfile outright (renamed
-# to --immutable in yarn 2).
+# This workspace is yarn 1: js/yarn.lock is a "yarn lockfile v1" that yarn 4
+# cannot consume, and lerna.json sets "npmClient": "yarn", so lerna shells out
+# to whatever `yarn` it finds.
 #
-# lerna.json sets "npmClient": "yarn", so lerna shells out to whatever `yarn`
-# is on PATH. Pinning therefore has to happen on PATH, not just at the call
-# sites below.
+# The build image provides yarn through a corepack shim in the node binary's
+# directory, and with no `packageManager` field that shim resolved to yarn 4.
+# Simply putting a yarn 1 earlier on PATH is not enough: yarn 1's own `yarn run`
+# prepends the node binary's directory to PATH for every script it launches, so
+# `yarn bootstrap` -> lerna -> `yarn install --mutex ...` picked up yarn 4 and
+# died with `Unsupported option name ("--mutex")`.
+#
+# Three layers, so no single mechanism has to hold:
+#   1. package.json declares "packageManager": "yarn@1.22.22", so the corepack
+#      shim itself resolves to yarn 1. This is the real fix.
+#   2. If the yarn on PATH still is not 1.x (no corepack), install yarn 1 into a
+#      temp prefix and put it first on PATH.
+#   3. lerna is invoked by path below, not via `yarn run`, so the one child that
+#      shells out to bare `yarn` never runs under a yarn-1-rewritten PATH.
 # ---------------------------------------------------------------------------
+export COREPACK_ENABLE_DOWNLOAD_PROMPT=0   # let the shim fetch yarn 1 non-interactively
+
 YARN_PIN="1.22.22"
 if [ "$(yarn --version 2>/dev/null | cut -d. -f1)" != "1" ]; then
   echo "==> pinning yarn ${YARN_PIN} (found: $(yarn --version 2>/dev/null || echo 'no yarn on PATH'))"
   YARN_HOME="$(mktemp -d)"
   npm install --no-save --no-audit --no-fund --prefix "$YARN_HOME" "yarn@${YARN_PIN}" >/dev/null
   export PATH="${YARN_HOME}/node_modules/.bin:${PATH}"
+fi
+
+# Guard for layer 3's blind spot: whatever `yarn` sits next to `node` is what a
+# `yarn run` child sees first. If it is still not 1.x, drop corepack's shim so
+# the PATH pin wins there too; if that leaves a non-corepack yarn 4, say so.
+NODE_BIN_DIR="$(dirname "$(command -v node)")"
+if [ -e "$NODE_BIN_DIR/yarn" ] && [ "$("$NODE_BIN_DIR/yarn" --version 2>/dev/null | cut -d. -f1)" != "1" ]; then
+  echo "==> yarn beside node is $("$NODE_BIN_DIR/yarn" --version 2>/dev/null); removing corepack shim"
+  corepack disable yarn 2>/dev/null || true
+  if [ -e "$NODE_BIN_DIR/yarn" ]; then
+    echo "==> WARNING: $NODE_BIN_DIR/yarn is not corepack-managed and is not yarn 1; scripts launched via 'yarn run' may see it"
+  fi
 fi
 
 # react-scripts 3.4.3 pulls webpack 4.42.0, which hashes modules with md4.
@@ -63,8 +83,10 @@ echo "==> node $(node -v) / yarn $(yarn --version) / NODE_OPTIONS=$NODE_OPTIONS"
 echo "==> yarn install"
 yarn install --frozen-lockfile --network-timeout 600000
 
+# Invoked by path, not `yarn bootstrap`: see layer 3 above.
 echo "==> lerna link/bootstrap"
-yarn bootstrap
+./node_modules/.bin/lerna link
+./node_modules/.bin/lerna bootstrap
 
 # @oyster/common's package.json main points at dist/lib/index.js, and its
 # components import sibling .css files that only exist after build-css. Both

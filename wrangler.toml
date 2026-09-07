@@ -16,15 +16,11 @@
 name = "metaplex"
 compatibility_date = "2026-09-06"
 
-# The build. Kept here so the deploy works with no dashboard build command.
-#
-# NOTE: Cloudflare's docs state that Workers Builds "does not honor the
-# configurations set in Custom Builds within your Wrangler configuration file",
-# but wrangler itself does run this section for assets-only configs (verified on
-# 4.129.0). If the hosted runner turns out to ignore it, the deploy fails with
-# "The directory specified by the assets.directory field ... does not exist"
-# instead, and the fix is to set the dashboard Build command to the same line:
-#     bash ./js/cf-build.sh
+# The build. Workers Builds DOES run this: its log shows
+#     [custom build] Running: bash ./js/cf-build.sh
+# ahead of the deploy (build 5d91b1f9, 2026-09-07), despite Cloudflare's docs
+# saying custom builds are not honored. So no dashboard Build command is needed.
+# Do not set one as well -- it would run the same script twice per deploy.
 [build]
 command = "bash ./js/cf-build.sh"
 
