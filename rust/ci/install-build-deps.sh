@@ -14,10 +14,15 @@
 # clang 14 through 20 in its own archive, so no third-party repository is
 # needed at all now.
 #
-# libssl1.1 is gone from Ubuntu entirely (noble ships OpenSSL 3). Nothing in
-# rust/Cargo.lock links against OpenSSL -- there is no openssl-sys in the
-# dependency tree -- so it is dropped rather than replaced. libssl-dev is kept
-# because it is cheap and anything added later will expect it.
+# libssl1.1 is gone from Ubuntu's archive for noble (it ships OpenSSL 3), and
+# nothing in rust/Cargo.lock links against OpenSSL -- there is no openssl-sys
+# in the dependency tree. It is still required, though: the prebuilt Solana
+# v1.6.2 toolchain that solana-version.sh installs (solana, cargo-build-bpf,
+# cargo-test-bpf, ...) was linked against libssl.so.1.1 and libcrypto.so.1.1
+# in 2021, and without them every one of those binaries fails to start. The
+# package is installed below from Ubuntu's focal security pocket, pinned to
+# one exact build and verified by checksum. libssl-dev is kept because it is
+# cheap and anything added later will expect it.
 #
 # binutils-dev and libunwind-dev are here for honggfuzz, which
 # install-program-deps.sh builds. libudev-dev is for the Solana client crates.
@@ -42,3 +47,20 @@ sudo apt-get install -y \
   libunwind-dev
 
 clang --version
+
+# OpenSSL 1.1 runtime for the prebuilt Solana toolchain (see header). The
+# package has no dependencies beyond libc6 and debconf, both present on every
+# Ubuntu runner, so a plain dpkg -i is enough. Skipped when the library is
+# already registered, so re-running this script is harmless.
+if ! ldconfig -p | grep -q 'libssl\.so\.1\.1 '; then
+  libssl_deb=libssl1.1_1.1.1f-1ubuntu2.24_amd64.deb
+  libssl_url=https://security.ubuntu.com/ubuntu/pool/main/o/openssl/$libssl_deb
+  libssl_sha256=7cf39d70a639017d1dd7c8d36daa2258063608688e449fddf40ffdd46f992a78
+  libssl_tmp=$(mktemp -d)
+  curl -sSfL --retry 5 --retry-delay 5 -o "$libssl_tmp/$libssl_deb" "$libssl_url"
+  echo "$libssl_sha256  $libssl_tmp/$libssl_deb" | sha256sum --check
+  sudo DEBIAN_FRONTEND=noninteractive dpkg -i "$libssl_tmp/$libssl_deb"
+  rm -rf "$libssl_tmp"
+fi
+
+ldconfig -p | grep 'libssl\.so\.1\.1 '
