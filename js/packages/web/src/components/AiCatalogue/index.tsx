@@ -319,7 +319,9 @@ export const AiCatalogueAssist = (props: {
                 <Button
                   type="link"
                   onClick={() =>
-                    setDetails(details.filter((entry, i) => i !== index))
+                    setDetails(
+                      details.slice(0, index).concat(details.slice(index + 1)),
+                    )
                   }
                 >
                   Remove
