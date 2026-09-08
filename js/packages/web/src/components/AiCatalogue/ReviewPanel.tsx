@@ -12,6 +12,7 @@ import {
   WarningCode,
 } from '../../ai/types';
 import {
+  MAX_NAME_BYTES,
   TRAIT_VOCABULARY,
   composeDescription,
   recordToTraits,
@@ -31,8 +32,26 @@ import { ELISION_PATTERN } from '../../ai/validate';
 
 const { TextArea } = Input;
 
-/** The mint form's own on-chain name limit; buildPatch slices to it. */
-const TITLE_MAX_CHARS = 50;
+/* The on-chain name limit, in UTF-8 BYTES not characters — the token-metadata
+ * program rejects a longer name with NameTooLong. Counting bytes matters in
+ * this field: IAST diacritics and Devanagari cost two or three bytes each, so
+ * a 30-character title can still be over. buildPatch truncates to the same
+ * limit; this counter is what warns before it silently shortens. */
+const TITLE_MAX_BYTES = MAX_NAME_BYTES;
+
+const utf8Length = (s: string): number => {
+  let bytes = 0;
+  for (let i = 0; i < s.length; i++) {
+    const code = s.codePointAt(i) as number;
+    if (code > 0xffff) {
+      i++;
+      bytes += 4;
+    } else {
+      bytes += code < 0x80 ? 1 : code < 0x800 ? 2 : 3;
+    }
+  }
+  return bytes;
+};
 
 const OVERRIDE_LABEL = 'I have checked this myself';
 
@@ -153,6 +172,33 @@ function withTraitValue(
   }
 }
 
+/**
+ * An editable trait cell must show what was typed, not what recordToTraits
+ * would write. The trait list is re-derived on every keystroke, and its
+ * write-time rules — trim(), the Materials comma-join, the Condition
+ * truncation — would eat the space or the comma that produced them, so a
+ * multi-word value could not be typed and a second material could never be
+ * entered. The cell therefore keeps its own draft while the user is in it and
+ * resyncs with the record on blur.
+ */
+const TraitCell = (props: {
+  value: string;
+  onChange: (value: string) => void;
+}) => {
+  const [draft, setDraft] = React.useState<string | null>(null);
+  return (
+    <Input
+      className="input"
+      value={draft === null ? props.value : draft}
+      onChange={info => {
+        setDraft(info.target.value);
+        props.onChange(info.target.value);
+      }}
+      onBlur={() => setDraft(null)}
+    />
+  );
+};
+
 export const ReviewPanel = (props: {
   result: CatalogueResult;
   record: CatalogueRecord;
@@ -250,6 +296,13 @@ export const ReviewPanel = (props: {
     return '';
   };
 
+  /* traitValue is display-formatted — Condition is truncated to 120 chars with
+   * an ellipsis — so an editable cell must be fed from the raw field it writes
+   * back to, or that '…' round-trips into condition.summary and the tail of
+   * the sentence is lost for good. */
+  const editableValue = (key: TraitKey): string =>
+    key === 'Condition' ? record.condition.summary : traitValue(key);
+
   // A checked row stays visible even after its value is cleared, so a dealer
   // who empties a cell to retype it does not watch the row disappear.
   const traitRows = TRAIT_VOCABULARY.filter(
@@ -269,8 +322,8 @@ export const ReviewPanel = (props: {
   const descriptionLocked = selection.includeInscription;
   const composed = composeDescription(record, selection.includeInscription);
 
-  const titleLength = record.title.length;
-  const titleOver = titleLength > TITLE_MAX_CHARS;
+  const titleLength = utf8Length(record.title);
+  const titleOver = titleLength > TITLE_MAX_BYTES;
 
   return (
     <div style={{ width: '100%', textAlign: 'left' }}>
@@ -323,7 +376,7 @@ export const ReviewPanel = (props: {
           className="field-info"
           style={titleOver ? { color: RED } : undefined}
         >
-          {titleLength} / {TITLE_MAX_CHARS} characters
+          {titleLength} / {TITLE_MAX_BYTES} bytes
           {titleOver ? ' — the rest is cut off when applied.' : ''}
         </span>
       </div>
@@ -474,12 +527,11 @@ export const ReviewPanel = (props: {
                       {derived ? (
                         <span>{traitValue(key)}</span>
                       ) : (
-                        <Input
-                          className="input"
-                          value={traitValue(key)}
-                          onChange={info =>
+                        <TraitCell
+                          value={editableValue(key)}
+                          onChange={value =>
                             props.onRecordChange(
-                              withTraitValue(record, key, info.target.value),
+                              withTraitValue(record, key, value),
                             )
                           }
                         />

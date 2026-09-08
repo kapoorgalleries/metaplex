@@ -393,7 +393,16 @@ export const AiCatalogueAssist = (props: {
       >
         {view === 'settings' && (
           <>
-            <SettingsPanel value={settings} onChange={setSettings} />
+            <SettingsPanel
+              value={settings}
+              onChange={next => {
+                /* Written through on every edit, not just on Done: otherwise
+                 * "Clear stored keys" only clears React state, and dismissing
+                 * the modal leaves the key sitting in localStorage. */
+                setSettings(next);
+                saveSettings(next);
+              }}
+            />
             <Row justify="end" style={{ marginTop: 24 }}>
               <Button
                 type="primary"

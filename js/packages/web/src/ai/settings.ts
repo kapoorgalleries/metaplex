@@ -11,7 +11,7 @@
  */
 
 import { AiProvider, AiSettings, ProviderId, ProviderSettings } from './types';
-import { PROVIDERS, PROVIDER_IDS } from './providers';
+import { PROVIDERS, PROVIDER_IDS, trimTrailingSlash } from './providers';
 
 export const AI_SETTINGS_KEY = 'kapoor.ai.settings.v1';
 
@@ -129,10 +129,6 @@ export function loadSettings(store?: SettingsStore): AiSettings {
   };
 }
 
-function trimTrailingSlash(url: string): string {
-  return url.replace(/\/+$/, '');
-}
-
 /** Never throws. Persistence is best-effort; losing it must not break a run. */
 export function saveSettings(next: AiSettings, store?: SettingsStore): void {
   const target = store || browserStore();
@@ -167,7 +163,14 @@ export function isProxyMode(
   cfg: ProviderSettings,
   provider: AiProvider,
 ): boolean {
-  return cfg.baseUrl !== provider.defaultBaseUrl;
+  /* Compared in canonical form: a stray trailing slash on the default URL is
+   * still the default endpoint. Reading it as proxy mode would suppress the
+   * stored-key warning and accept a blank key, both on a request that goes
+   * straight to the provider. */
+  return (
+    trimTrailingSlash(cfg.baseUrl) !==
+    trimTrailingSlash(provider.defaultBaseUrl)
+  );
 }
 
 /** '' when the configuration can be used as-is. */

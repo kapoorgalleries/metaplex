@@ -40,6 +40,14 @@ const PROVIDER_LABELS: Record<ProviderId, string> = {
 const TRUNCATED_MESSAGE =
   'The response was cut off before the translation finished, so nothing was applied. Raise "Max output tokens" in AI settings and run again.';
 
+/** Lives here rather than in settings.ts because both request builders need it
+ *  and settings.ts already imports this module — the other direction would be
+ *  a cycle. A user-typed Base URL keeps its trailing slash in memory, so the
+ *  URL builders must tolerate one rather than emit a double slash. */
+export function trimTrailingSlash(url: string): string {
+  return url.replace(/\/+$/, '');
+}
+
 /**
  * Shared HTTP status mapping for both providers, which is why it lives here
  * rather than in client.ts. It takes `model` because the 404 message names the
@@ -191,7 +199,7 @@ function geminiPlan(
 
   return {
     url:
-      cfg.baseUrl +
+      trimTrailingSlash(cfg.baseUrl) +
       '/models/' +
       encodeURIComponent(cfg.model) +
       ':generateContent',
@@ -366,7 +374,7 @@ function openaiPlan(
     : CATALOGUE_SYSTEM_PROMPT + OPENAI_FALLBACK_SYSTEM_SUFFIX;
 
   return {
-    url: cfg.baseUrl + '/chat/completions',
+    url: trimTrailingSlash(cfg.baseUrl) + '/chat/completions',
     method: 'POST',
     headers: openaiHeaders(cfg),
     body: JSON.stringify({

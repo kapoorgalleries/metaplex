@@ -21,6 +21,7 @@ import {
   HttpPlan,
   ProviderId,
   ProviderSettings,
+  TraitKey,
   isAiError,
 } from '../types';
 import {
@@ -42,12 +43,14 @@ import {
   SettingsStore,
   configProblem,
   defaultSettings,
+  isProxyMode,
   loadSettings,
   redactSecrets,
   saveSettings,
 } from '../settings';
 import { runCatalogue } from '../client';
 import {
+  MAX_NAME_BYTES,
   TRAIT_VOCABULARY,
   buildPatch,
   composeDescription,
@@ -1377,6 +1380,144 @@ describe('apply', () => {
       },
       META,
     );
-    expect(String(truncated.name).length).toBeLessThanOrEqual(50);
+    expect(String(truncated.name).length).toBeLessThanOrEqual(MAX_NAME_BYTES);
+  });
+
+  it('40. never emits a name longer than the on-chain byte limit', () => {
+    const utf8 = (s: string) => Buffer.byteLength(s, 'utf8');
+    const sel = {
+      title: true,
+      description: false,
+      traits: false,
+      includeInscription: false,
+      traitKeys: [] as TraitKey[],
+    };
+
+    // The token-metadata program rejects name.len() > 32 BYTES with
+    // NameTooLong, so an ASCII-character count is not the check that matters:
+    // IAST diacritics and Devanagari cost two and three bytes each.
+    const titles = [
+      'Gilt copper alloy figure of Padmapani Lokeshvara, Malla period',
+      'Śākyamuni, gilt copper alloy, Newar, Kathmandu Valley, 15th century',
+      'पद्मपाणि लोकेश्वर की गिल्ट ताम्र मूर्ति, मल्ल काल',
+      'Phurba',
+      '',
+    ];
+    titles.forEach(title => {
+      const record = recordFixture();
+      record.title = title;
+      const patch = buildPatch(record, sel, META);
+      expect(utf8(String(patch.name))).toBeLessThanOrEqual(MAX_NAME_BYTES);
+    });
+
+    // Truncation must not split a multi-byte character into invalid UTF-8.
+    const devanagari = recordFixture();
+    devanagari.title = 'पद्मपाणि लोकेश्वर की गिल्ट ताम्र मूर्ति, मल्ल काल';
+    const name = String(buildPatch(devanagari, sel, META).name);
+    expect(name).toBe(Buffer.from(name, 'utf8').toString('utf8'));
+    expect(name.indexOf('�')).toBe(-1);
+
+    // A short title is passed through untouched.
+    const short = recordFixture();
+    short.title = 'Phurba';
+    expect(buildPatch(short, sel, META).name).toBe('Phurba');
+  });
+
+  it('41. treats untranslatedPortions as an admission whatever completeness says', () => {
+    // An incoherent pair — a populated untranslatedPortions alongside a
+    // completeness that is not an admission — must not read as a full
+    // translation anywhere in the chain.
+    const record = recordFixture();
+    record.inscription.present = 'yes';
+    record.inscription.completeness = 'not-applicable';
+    record.inscription.untranslatedPortions =
+      'the lower two lines are worn and were not translated';
+
+    const warnings = auditRecord(record);
+    const partial = warnings.filter(w => w.code === 'partial-translation');
+    expect(partial.length).toBe(1);
+    expect(partial[0].severity).toBe('block');
+
+    expect(composeDescription(record, true)).toContain(
+      '[TRANSLATION INCOMPLETE',
+    );
+
+    // A piece with no inscription at all must not trip it.
+    const none = recordFixture();
+    none.inscription.present = 'no';
+    none.inscription.segments = [];
+    none.inscription.completeness = 'not-applicable';
+    none.inscription.untranslatedPortions = 'None.';
+    expect(
+      auditRecord(none).filter(w => w.code === 'partial-translation').length,
+    ).toBe(0);
+  });
+
+  it('42. rejects an elided translation behind closing punctuation', () => {
+    const quoted = [
+      '"Of those phenomena which arise from a cause..."',
+      '(…the remainder is a standard dedication…)',
+      'Homage to the Blessed One…]',
+      "'the merit is shared...'",
+    ];
+    quoted.forEach(translation => {
+      const record = recordFixture();
+      record.inscription.segments[0].translation = translation;
+      expect(() =>
+        parseCatalogueRecord(JSON.parse(JSON.stringify(record))),
+      ).toThrow();
+    });
+
+    // Still no false positive on an ellipsis inside a real sentence.
+    const legitimate = recordFixture();
+    legitimate.inscription.segments[0].translation =
+      'He said "... and then departed" before the donor formula begins here.';
+    expect(() =>
+      parseCatalogueRecord(JSON.parse(JSON.stringify(legitimate))),
+    ).not.toThrow();
+  });
+
+  it('43. routes a parameter-drift 400 to retryBody, not the schema fallback', () => {
+    // OpenAI's real drift message contains "is not supported", which must no
+    // longer claim the structured-output branch — retryBody is written for
+    // exactly this message, and a reasoning-family model depends on it.
+    const drift =
+      "Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead.";
+    const next = OPENAI.retryBody
+      ? OPENAI.retryBody(
+          { model: 'gpt-5', max_tokens: 4096, temperature: 0.2 },
+          drift,
+        )
+      : null;
+    expect(next).not.toBe(null);
+    const body = next as Record<string, unknown>;
+    expect(body.max_completion_tokens).toBe(4096);
+    expect('max_tokens' in body).toBe(false);
+    expect('temperature' in body).toBe(false);
+  });
+
+  it('44. reads a trailing slash on the default Base URL as the default, not a proxy', () => {
+    const cfg = {
+      apiKey: '',
+      model: GEMINI.defaultModel,
+      baseUrl: GEMINI.defaultBaseUrl + '/',
+    };
+    expect(isProxyMode(cfg, GEMINI)).toBe(false);
+    // ...so a blank key is still reported as a problem rather than silently
+    // accepted as proxy mode against the real provider endpoint.
+    expect(configProblem(cfg, GEMINI)).not.toBe('');
+    // ...and the request URL carries no double slash.
+    const plan = GEMINI.buildRequest(
+      {
+        images: [
+          { kind: 'inline', mimeType: 'image/jpeg', base64: 'AA', label: 'p' },
+        ],
+        dealerNotes: '',
+        maxOutputTokens: 1024,
+        temperature: 0.2,
+      },
+      { ...cfg, apiKey: 'k' },
+    );
+    expect(plan.url.indexOf('v1beta//')).toBe(-1);
   });
 });

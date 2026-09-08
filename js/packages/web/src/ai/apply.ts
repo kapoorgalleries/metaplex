@@ -172,11 +172,16 @@ export function composeDescription(
   const blocks = inscription.segments.map((seg, i) =>
     segmentLines(seg, numbered ? i + 1 : 0).join('\n'),
   );
+  /* Also fires when the model populated untranslatedPortions while labelling
+   * completeness something else: the admission governs, not the label, or an
+   * incoherent pair would write a silently abridged translation on chain. */
+  const untranslatedPortions = inscription.untranslatedPortions.trim();
   if (
     inscription.completeness === 'partial' ||
-    inscription.completeness === 'illegible'
+    inscription.completeness === 'illegible' ||
+    untranslatedPortions !== ''
   ) {
-    const untranslated = inscription.untranslatedPortions.trim();
+    const untranslated = untranslatedPortions;
     blocks.push(
       '[TRANSLATION INCOMPLETE — untranslated: ' +
         (untranslated === '' ? 'not specified' : untranslated) +
@@ -186,6 +191,34 @@ export function composeDescription(
 
   const block = INSCRIPTION_HEADING + '\n' + blocks.join('\n\n');
   return (prose + '\n\n' + block).trim();
+}
+
+/**
+ * The token-metadata program rejects a name longer than this with
+ * NameTooLong (rust/token-metadata/program/src/utils.rs:37, and
+ * MAX_NAME_LENGTH in @oyster/common). The limit is on UTF-8 BYTES, not
+ * characters — which matters here, because IAST diacritics and Devanagari
+ * in a title of this field cost two or three bytes each.
+ */
+export const MAX_NAME_BYTES = 32;
+
+/** Longest prefix of `s` that fits in `maxBytes` UTF-8 bytes, never splitting
+ *  a character or a surrogate pair. */
+export function truncateUtf8Bytes(s: string, maxBytes: number): string {
+  const trimmed = s.trim();
+  let bytes = 0;
+  let i = 0;
+  while (i < trimmed.length) {
+    const code = trimmed.codePointAt(i) as number;
+    const width = code > 0xffff ? 2 : 1;
+    const size = code < 0x80 ? 1 : code < 0x800 ? 2 : code < 0x10000 ? 3 : 4;
+    if (bytes + size > maxBytes) {
+      break;
+    }
+    bytes += size;
+    i += width;
+  }
+  return trimmed.slice(0, i).trim();
 }
 
 /** Structural supertype of the IMetadataExtension fields this feature writes.
@@ -203,8 +236,7 @@ export function buildPatch(
 ): MetadataPatch {
   const patch: MetadataPatch = {};
   if (sel.title) {
-    // 50 is the on-chain name limit the mint form enforces.
-    patch.name = r.title.slice(0, 50).trim();
+    patch.name = truncateUtf8Bytes(r.title, MAX_NAME_BYTES);
   }
   if (sel.description) {
     patch.description = composeDescription(r, sel.includeInscription);

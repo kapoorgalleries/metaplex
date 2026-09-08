@@ -41,7 +41,7 @@ import { NO_PROVENANCE_SENTINEL } from './prompt';
  * exact same rule the parser used.
  */
 export const ELISION_PATTERN =
-  /\[\s*\.\.\.\s*\]|\[\s*truncated|\(truncated\)|(?:\.\.\.|…)\s*$/i;
+  /\[\s*\.\.\.\s*\]|\[\s*truncated|\(truncated\)|(?:\.\.\.|…)[\s"'”’»)\]}]*$/i;
 
 const CONFIDENCE_LEVELS: ConfidenceLevel[] = [
   'high',
@@ -356,7 +356,18 @@ export function auditRecord(r: CatalogueRecord): RecordWarning[] {
   };
 
   const ins = r.inscription;
-  if (ins.completeness === 'partial' || ins.completeness === 'illegible') {
+  /* The model's own admission of untranslated text counts even when it
+   * labelled completeness something other than partial/illegible — an
+   * incoherent pair like completeness 'not-applicable' alongside a populated
+   * untranslatedPortions must not slip past as a full translation. Guarded on
+   * segments, so a piece with no inscription at all cannot trip it. */
+  const admitsUntranslated =
+    ins.untranslatedPortions.trim() !== '' && ins.segments.length > 0;
+  if (
+    ins.completeness === 'partial' ||
+    ins.completeness === 'illegible' ||
+    admitsUntranslated
+  ) {
     const untranslated = ins.untranslatedPortions.trim() || 'not specified';
     add(
       'partial-translation',

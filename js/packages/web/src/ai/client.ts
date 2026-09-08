@@ -23,7 +23,7 @@ import {
   aiError,
   isAiError,
 } from './types';
-import { PROVIDERS } from './providers';
+import { PROVIDERS, mapStatus } from './providers';
 import { auditRecord, parseCatalogueRecord } from './validate';
 import { redactSecrets } from './settings';
 
@@ -31,9 +31,16 @@ import { redactSecrets } from './settings';
  * A 400 matching this is the endpoint rejecting the structured-output
  * directive itself (an older Gemini route, a proxy that strips it, a gateway
  * that has never heard of json_schema) rather than rejecting our content.
+ *
+ * Every alternative must name a schema token. A bare `not supported` or
+ * `Unknown name` would also match OpenAI's parameter-drift 400 ("'max_tokens'
+ * is not supported with this model. Use 'max_completion_tokens'"), sending it
+ * down this branch and leaving OPENAI.retryBody — written for exactly that
+ * message — unreachable, so a reasoning-family model could never succeed.
+ * Gemini's own rejection still matches here on `responseSchema`.
  */
 const STRUCTURED_OUTPUT_REJECTED =
-  /response_format|json_schema|responseSchema|response_schema|not supported|Unknown name/i;
+  /response_format|json_schema|responseSchema|response_schema|structured output/i;
 
 const NETWORK_HINT =
   'A browser CORS block looks identical to a network failure — if this persists, set a proxy Base URL in AI settings.';
@@ -141,13 +148,20 @@ export function runCatalogue(
       try {
         body = await res.json();
       } catch (e) {
+        /* An error status whose body is not JSON (a proxy's HTML 502, a
+         * gateway timeout page) still carries a usable status: map it, rather
+         * than reporting an auth or rate-limit failure as a parse error. The
+         * provider message is dropped deliberately — an HTML body is not fit
+         * to show the user. */
         throw (
           stoppedBy() ||
-          aiError(
-            'parse',
-            'The provider returned a response that was not JSON.',
-            { providerId, status: res.status },
-          )
+          (res.status !== 200
+            ? mapStatus(res.status, '', providerId, cfg.model)
+            : aiError(
+                'parse',
+                'The provider returned a response that was not JSON.',
+                { providerId, status: res.status },
+              ))
         );
       }
 
