@@ -140,6 +140,7 @@ pub async fn create_auction(
     resource: &Pubkey,
     mint_keypair: &Pubkey,
     max_winners: usize,
+    price_floor: PriceFloor,
 ) -> Result<(), TransportError> {
     let transaction = Transaction::new_signed_with_payer(
         &[instruction::create_auction_instruction(
@@ -152,7 +153,7 @@ pub async fn create_auction(
                 resource: *resource,
                 token_mint: *mint_keypair,
                 winners: WinnerLimit::Capped(max_winners),
-                price_floor: PriceFloor::None([0u8; 32]),
+                price_floor,
             },
         )],
         Some(&payer.pubkey()),
