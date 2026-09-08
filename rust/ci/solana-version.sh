@@ -32,6 +32,18 @@ solana_release_sha256() {
   esac
 }
 
+# Commit each pinned release was built from, as recorded in the tarball's own
+# version.yml and reported by `solana --version` (src:...). The sha256 above
+# says the bytes are the ones pinned here; this says the pinned bytes are the
+# tagged build. Optional for versions not listed: set SOLANA_RELEASE_COMMIT to
+# check one, leave it unset to skip the check.
+solana_release_commit() {
+  case $1 in
+  v1.6.2) echo 03b21f2e9d2eab604421c71fa8eb5faf26e30cc4 ;;
+  *) echo "${SOLANA_RELEASE_COMMIT:-}" ;;
+  esac
+}
+
 # Install the pinned release from its GitHub release asset.
 #
 # This used to be `sh -c "$(curl -sSfL https://release.solana.com/$v/install)"`.
@@ -51,8 +63,9 @@ solana_release_sha256() {
 # the workflow are unchanged.
 #
 # The 1.6.x binaries link OpenSSL 1.1 (libssl.so.1.1, libcrypto.so.1.1), which
-# Ubuntu 24.04 no longer ships. install-build-deps.sh provides it; the
-# `solana --version` at the end is the first command that would fail without it.
+# Ubuntu 24.04 no longer ships. install-build-deps.sh provides it; the ldd
+# check after extraction names any library still missing, instead of letting
+# `solana --version` die with the loader's exit 127.
 solana_install_release() {
   local version=$1
   local asset=solana-release-x86_64-unknown-linux-gnu.tar.bz2
@@ -94,14 +107,54 @@ solana_install_release() {
 
   rm -rf "$dest"
   mkdir -p "$dest"
-  tar --extract --bzip2 --file "$tarball" --directory "$dest" --strip-components 1
+  tar --extract --bzip2 --file "$tarball" --directory "$dest" --strip-components 1 || {
+    echo "solana-version.sh: could not extract $asset ($version)" >&2
+    rm -rf "$dest"
+    return 1
+  }
+
+  # The release records the commit it was built from. Check it is the one the
+  # tag points at, so the checksum pin is anchored to something beyond itself.
+  local commit
+  commit=$(solana_release_commit "$version")
+  if [[ -n $commit ]] && ! grep -qs "^commit: $commit\$" "$dest/version.yml"; then
+    echo "solana-version.sh: $asset ($version) is not built from commit $commit:" >&2
+    [[ -f $dest/version.yml ]] && cat "$dest/version.yml" >&2
+    rm -rf "$dest"
+    return 1
+  fi
+
+  # The 2021 binaries are dynamically linked. Name any shared library this host
+  # lacks -- on noble that is libssl.so.1.1 and libcrypto.so.1.1 unless
+  # install-build-deps.sh has run -- rather than letting the first binary to
+  # run fail with the loader's exit 127 and no library name.
+  local missing
+  missing=$(
+    for bin in solana cargo-build-bpf cargo-test-bpf; do
+      ldd "$dest/bin/$bin" 2>/dev/null | awk '/not found/ {print $1}'
+    done | sort -u
+  )
+  if [[ -n $missing ]]; then
+    echo "solana-version.sh: the $version binaries need shared libraries this host lacks:" >&2
+    echo "$missing" | sed 's/^/solana-version.sh:   /' >&2
+    return 1
+  fi
 }
 
 if [[ -n $1 ]]; then
   case $1 in
   install)
     if solana_install_release "$solana_version"; then
-      solana --version
+      solana_version_output=$(solana --version)
+      echo "$solana_version_output"
+      # `solana --version` reports the build's source commit; it must be the
+      # pinned one, or PATH is resolving to some other install.
+      solana_expected_commit=$(solana_release_commit "$solana_version")
+      if [[ -n $solana_expected_commit ]] \
+        && ! grep -q "src:${solana_expected_commit:0:7}" <<<"$solana_version_output"; then
+        echo "solana-version.sh: installed solana does not report commit ${solana_expected_commit:0:7}" >&2
+        false
+      fi
     else
       echo "solana-version.sh: install of $solana_version failed" >&2
       false
