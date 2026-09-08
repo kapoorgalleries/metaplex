@@ -132,6 +132,10 @@ pub async fn get_token_supply(banks_client: &mut BanksClient, mint: &Pubkey) -> 
     account_info.supply
 }
 
+// Threading price_floor through takes this to 8 parameters. Same treatment as place_bid,
+// cancel_bid and claim_bid below: these mirror the instruction's own argument list, and
+// bundling them into a struct would add an indirection to keep in sync by hand.
+#[allow(clippy::too_many_arguments)]
 pub async fn create_auction(
     banks_client: &mut BanksClient,
     program_id: &Pubkey,

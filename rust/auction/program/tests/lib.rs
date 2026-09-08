@@ -487,9 +487,11 @@ async fn test_correct_runs() {
                         err.expect("claim_bid");
 
                         // Bid pot should be empty
-                        let balance =
-                            helpers::get_token_balance(&mut banks_client, &bidders[*index].1.pubkey())
-                                .await;
+                        let balance = helpers::get_token_balance(
+                            &mut banks_client,
+                            &bidders[*index].1.pubkey(),
+                        )
+                        .await;
                         assert_eq!(balance, 0);
                     }
 
