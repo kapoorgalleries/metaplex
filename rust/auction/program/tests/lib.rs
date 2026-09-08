@@ -182,7 +182,6 @@ enum Action {
     Cancel(usize),
     End,
 }
-/* Commenting out for now
 #[cfg(feature = "test-bpf")]
 #[tokio::test]
 async fn test_correct_runs() {
@@ -208,7 +207,7 @@ async fn test_correct_runs() {
                 Action::End,
             ],
             max_winners: 3,
-            price_floor: PriceFloor::None,
+            price_floor: PriceFloor::None([0; 32]),
             seller_collects: 9000,
             expect: vec![(1, 2000), (2, 3000), (3, 4000)],
         },
@@ -222,7 +221,7 @@ async fn test_correct_runs() {
             ],
             expect: vec![(0, 4000)],
             max_winners: 3,
-            price_floor: PriceFloor::None,
+            price_floor: PriceFloor::None([0; 32]),
             seller_collects: 4000,
         },
         // The top bidder when cancelling should allow room for lower bidders.
@@ -239,7 +238,7 @@ async fn test_correct_runs() {
             ],
             expect: vec![(2, 5500), (1, 6000), (3, 7000)],
             max_winners: 3,
-            price_floor: PriceFloor::None,
+            price_floor: PriceFloor::None([0; 32]),
             seller_collects: 18500,
         },
         // An auction where everyone cancels should still succeed, with no winners.
@@ -255,7 +254,7 @@ async fn test_correct_runs() {
             ],
             expect: vec![],
             max_winners: 3,
-            price_floor: PriceFloor::None,
+            price_floor: PriceFloor::None([0; 32]),
             seller_collects: 0,
         },
         // An auction where no one bids should still succeed.
@@ -263,7 +262,7 @@ async fn test_correct_runs() {
             actions: vec![Action::End],
             expect: vec![],
             max_winners: 3,
-            price_floor: PriceFloor::None,
+            price_floor: PriceFloor::None([0; 32]),
             seller_collects: 0,
         },
     ];
@@ -432,7 +431,7 @@ async fn test_correct_runs() {
                 }
 
                 // If the auction has ended, attempt to claim back SPL tokens into a new account.
-                if auction.ended(0) {
+                if auction.ended(0).unwrap() {
                     let collection = Keypair::new();
 
                     // Generate Collection Pot.
@@ -618,7 +617,7 @@ async fn test_incorrect_runs() {
         Test {
             actions: vec![Action::Cancel(0), Action::End],
             max_winners: 3,
-            price_floor: PriceFloor::None,
+            price_floor: PriceFloor::None([0; 32]),
         },
         // Cancel a non-existing bid.
         // Bidding less than the top bidder should fail.
@@ -693,4 +692,3 @@ async fn test_incorrect_runs() {
         assert!(failed);
     }
 }
-*/
