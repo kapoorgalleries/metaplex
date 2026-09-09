@@ -591,6 +591,8 @@ describe('validate', () => {
       'Of those phenomena which arise from a cause…',
       'Of those phenomena [...] the great sage has said.',
       'Of those phenomena [truncated] the great sage has said.',
+      'Of those phenomena [remainder omitted] the great sage has said.',
+      'Of those phenomena [ REMAINDER OMITTED ].',
     ];
     abridged.forEach(translation => {
       const err = thrownAiError(() =>
@@ -755,12 +757,17 @@ describe('providers', () => {
     expect('Authorization' in plan.headers).toBe(false);
   });
 
-  it('18. both fallback requests drop the structured-output directive', () => {
+  it('18. both fallbacks drop the structured directive but retain the complete schema in the prompt', () => {
     const gemini = geminiBody(
       GEMINI.buildFallbackRequest(twoInlineImages(), geminiCfg(GEMINI_KEY)),
     );
     expect('responseSchema' in gemini.generationConfig).toBe(false);
     expect(gemini.generationConfig.responseMimeType).toBe('application/json');
+    const serialised = JSON.stringify(CATALOGUE_JSON_SCHEMA);
+    const geminiSystem = gemini.systemInstruction.parts
+      .map(part => part.text)
+      .join('');
+    expect(geminiSystem.slice(-serialised.length)).toBe(serialised);
 
     const openai = openaiBody(
       OPENAI.buildFallbackRequest(
@@ -769,7 +776,6 @@ describe('providers', () => {
       ),
     );
     expect(openai.response_format).toEqual({ type: 'json_object' });
-    const serialised = JSON.stringify(CATALOGUE_JSON_SCHEMA);
     const system = systemText(openai);
     expect(system.slice(-serialised.length)).toBe(serialised);
   });

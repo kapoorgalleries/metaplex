@@ -41,7 +41,7 @@ import { NO_PROVENANCE_SENTINEL } from './prompt';
  * exact same rule the parser used.
  */
 export const ELISION_PATTERN =
-  /\[\s*\.\.\.\s*\]|\[\s*truncated|\(truncated\)|(?:\.\.\.|…)[\s"'”’»)\]}]*$/i;
+  /\[\s*\.\.\.\s*\]|\[\s*truncated|\(truncated\)|\[\s*remainder\s+omitted\s*\]|(?:\.\.\.|…)[\s"'”’»)\]}]*$/i;
 
 const CONFIDENCE_LEVELS: ConfidenceLevel[] = [
   'high',

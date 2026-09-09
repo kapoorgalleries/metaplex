@@ -40,6 +40,11 @@ const PROVIDER_LABELS: Record<ProviderId, string> = {
 const TRUNCATED_MESSAGE =
   'The response was cut off before the translation finished, so nothing was applied. Raise "Max output tokens" in AI settings and run again.';
 
+/** JSON mode alone does not tell either model which fields to return. */
+const FALLBACK_SYSTEM_SUFFIX =
+  '\n\nReturn a single JSON object conforming exactly to this JSON Schema:\n' +
+  JSON.stringify(CATALOGUE_JSON_SCHEMA);
+
 /** Lives here rather than in settings.ts because both request builders need it
  *  and settings.ts already imports this module — the other direction would be
  *  a cycle. A user-typed Base URL keeps its trailing slash in memory, so the
@@ -206,7 +211,15 @@ function geminiPlan(
     method: 'POST',
     headers: geminiHeaders(cfg),
     body: JSON.stringify({
-      systemInstruction: { parts: [{ text: CATALOGUE_SYSTEM_PROMPT }] },
+      systemInstruction: {
+        parts: [
+          {
+            text: withSchema
+              ? CATALOGUE_SYSTEM_PROMPT
+              : CATALOGUE_SYSTEM_PROMPT + FALLBACK_SYSTEM_SUFFIX,
+          },
+        ],
+      },
       contents: [{ role: 'user', parts: geminiParts(req) }],
       generationConfig: generationConfig,
       safetySettings: GEMINI_SAFETY_SETTINGS,
@@ -228,13 +241,14 @@ export const GEMINI: AiProvider = {
   id: 'gemini',
   label: 'Google Gemini',
   keyUrl: 'https://aistudio.google.com/apikey',
-  defaultModel: 'gemini-2.0-flash',
+  // Gemini 2.0 shut down on June 1, 2026. Keep the editable default on a
+  // supported stable model with image input and structured output.
+  defaultModel: 'gemini-2.5-flash',
   defaultBaseUrl: 'https://generativelanguage.googleapis.com/v1beta',
   modelSuggestions: [
-    'gemini-2.0-flash',
-    'gemini-2.0-flash-lite',
-    'gemini-1.5-pro',
-    'gemini-1.5-flash',
+    'gemini-2.5-flash',
+    'gemini-2.5-flash-lite',
+    'gemini-2.5-pro',
   ],
   supportsRemoteImageUrl: false,
 
@@ -318,10 +332,6 @@ type OpenAiContentPart =
  */
 const OPENAI_IMAGE_DETAIL = 'high';
 
-const OPENAI_FALLBACK_SYSTEM_SUFFIX =
-  '\n\nReturn a single JSON object conforming exactly to this JSON Schema:\n' +
-  JSON.stringify(CATALOGUE_JSON_SCHEMA);
-
 function openaiHeaders(cfg: ProviderSettings): Record<string, string> {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
@@ -371,7 +381,7 @@ function openaiPlan(
 
   const systemPrompt = withSchema
     ? CATALOGUE_SYSTEM_PROMPT
-    : CATALOGUE_SYSTEM_PROMPT + OPENAI_FALLBACK_SYSTEM_SUFFIX;
+    : CATALOGUE_SYSTEM_PROMPT + FALLBACK_SYSTEM_SUFFIX;
 
   return {
     url: trimTrailingSlash(cfg.baseUrl) + '/chat/completions',
