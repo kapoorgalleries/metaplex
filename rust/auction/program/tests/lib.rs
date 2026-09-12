@@ -31,6 +31,7 @@ mod helpers;
 async fn setup_auction(
     start: bool,
     max_winners: usize,
+    price_floor: PriceFloor,
 ) -> (
     Pubkey,
     BanksClient,
@@ -70,6 +71,7 @@ async fn setup_auction(
         &resource,
         &mint_keypair.pubkey(),
         max_winners,
+        price_floor,
     )
     .await
     .unwrap();
@@ -182,7 +184,6 @@ enum Action {
     Cancel(usize),
     End,
 }
-/* Commenting out for now
 #[cfg(feature = "test-bpf")]
 #[tokio::test]
 async fn test_correct_runs() {
@@ -208,7 +209,7 @@ async fn test_correct_runs() {
                 Action::End,
             ],
             max_winners: 3,
-            price_floor: PriceFloor::None,
+            price_floor: PriceFloor::None([0; 32]),
             seller_collects: 9000,
             expect: vec![(1, 2000), (2, 3000), (3, 4000)],
         },
@@ -222,7 +223,7 @@ async fn test_correct_runs() {
             ],
             expect: vec![(0, 4000)],
             max_winners: 3,
-            price_floor: PriceFloor::None,
+            price_floor: PriceFloor::None([0; 32]),
             seller_collects: 4000,
         },
         // The top bidder when cancelling should allow room for lower bidders.
@@ -239,7 +240,7 @@ async fn test_correct_runs() {
             ],
             expect: vec![(2, 5500), (1, 6000), (3, 7000)],
             max_winners: 3,
-            price_floor: PriceFloor::None,
+            price_floor: PriceFloor::None([0; 32]),
             seller_collects: 18500,
         },
         // An auction where everyone cancels should still succeed, with no winners.
@@ -255,7 +256,7 @@ async fn test_correct_runs() {
             ],
             expect: vec![],
             max_winners: 3,
-            price_floor: PriceFloor::None,
+            price_floor: PriceFloor::None([0; 32]),
             seller_collects: 0,
         },
         // An auction where no one bids should still succeed.
@@ -263,7 +264,7 @@ async fn test_correct_runs() {
             actions: vec![Action::End],
             expect: vec![],
             max_winners: 3,
-            price_floor: PriceFloor::None,
+            price_floor: PriceFloor::None([0; 32]),
             seller_collects: 0,
         },
     ];
@@ -280,7 +281,7 @@ async fn test_correct_runs() {
             mint_authority,
             auction_pubkey,
             recent_blockhash,
-        ) = setup_auction(true, strategy.max_winners).await;
+        ) = setup_auction(true, strategy.max_winners, strategy.price_floor.clone()).await;
 
         // Interpret test actions one by one.
         for action in strategy.actions.iter() {
@@ -412,27 +413,47 @@ async fn test_correct_runs() {
         )
         .unwrap();
 
-        // Verify BidState, all winners should be as expected
+        // Verify BidState, all winners should be as expected.
+        //
+        // Asserted through num_winners/winner_at/amount rather than by walking `bids` directly.
+        // Those are the accessors the auction program exposes as its stable interface, and the
+        // ones metaplex actually redeems through -- see metaplex/test/src/redeem_bid.rs:41-45,
+        // "Auction specifically does not expose internal state workings as it may change someday,
+        // but it does expose a point get-winner-at-index method". Reading `bids` positionally is
+        // what made this assertion wrong twice over: winners are the LAST `max` entries, and the
+        // array now also retains losing bids (max_array_size_for, processor.rs:247).
         match auction.bid_state {
             BidState::EnglishAuction { ref bids, .. } => {
-                // Zip internal bid state with the expected indices this strategy expects winners
-                // to result in.
-                let results: Vec<(_, _)> = strategy.expect.iter().zip(bids).collect();
-                for (index, bid) in results.iter() {
-                    let bidder = &bidders[index.0];
-                    let amount = index.1;
+                // The winner set is exactly the size expected -- no extras. The old zip() could
+                // not catch an extra winner, because zip stops at the shorter side.
+                assert_eq!(auction.num_winners(), strategy.expect.len() as u64);
 
-                    // Winners should match the keypair indices we expected.
-                    // bid.0 is the pubkey.
-                    // bidder.2 is the derived potkey we expect Bid.0 to be.
-                    assert_eq!(bid.0, bidder.2);
-                    // Must have bid the amount we expected.
-                    // bid.1 is the amount.
-                    assert_eq!(bid.1, amount);
+                // `expect` lists winners in ascending amount; winner_at(0) is the top bid
+                // (processor.rs:383-397 indexes from the end), so walk `expect` in reverse.
+                for (rank, (index, amount)) in strategy.expect.iter().rev().enumerate() {
+                    let bidder = &bidders[*index];
+
+                    // Bid identity is the bidder's own signing wallet, not either pot key.
+                    // place_bid.rs:321 records Bid(*accounts.bidder.key, ..) with the bidder
+                    // asserted as signer at place_bid.rs:112, and metaplex's common_redeem_checks
+                    // (metaplex/program/src/utils.rs:393 and :476-484) passes one key to both
+                    // is_winner() and the bidder_metadata derivation -- which only type-checks as
+                    // the wallet. bidder.1/bidder.2 are the pot token account and pot PDA.
+                    assert_eq!(auction.winner_at(rank), Some(bidder.0.pubkey()));
+                    assert_eq!(auction.bid_state.amount(rank), *amount);
+                    assert_eq!(auction.is_winner(&bidder.0.pubkey()), Some(rank));
+                }
+
+                // Any bid retained beyond the winner set must rank below every winner. This is
+                // the property the retention buffer is for; nothing asserted it before.
+                if let Some((_, lowest_winner)) = strategy.expect.first() {
+                    for rank in strategy.expect.len()..bids.len() {
+                        assert!(auction.bid_state.amount(rank) <= *lowest_winner);
+                    }
                 }
 
                 // If the auction has ended, attempt to claim back SPL tokens into a new account.
-                if auction.ended(0) {
+                if auction.ended(0).unwrap() {
                     let collection = Keypair::new();
 
                     // Generate Collection Pot.
@@ -448,15 +469,15 @@ async fn test_correct_runs() {
                     .unwrap();
 
                     // For each winning bid, claim into auction.
-                    for (index, bid) in results {
+                    for (index, _amount) in strategy.expect.iter() {
                         let err = helpers::claim_bid(
                             &mut banks_client,
                             &recent_blockhash,
                             &program_id,
                             &payer,
                             &payer,
-                            &bidders[index.0].0,
-                            &bidders[index.0].1,
+                            &bidders[*index].0,
+                            &bidders[*index].1,
                             &collection.pubkey(),
                             &resource,
                             &mint,
@@ -468,7 +489,7 @@ async fn test_correct_runs() {
                         // Bid pot should be empty
                         let balance = helpers::get_token_balance(
                             &mut banks_client,
-                            &bidders[index.0].1.pubkey(),
+                            &bidders[*index].1.pubkey(),
                         )
                         .await;
                         assert_eq!(balance, 0);
@@ -615,29 +636,43 @@ async fn test_incorrect_runs() {
     // A list of auction runs that should succeed. At the end of the run the winning bid state
     // should match the expected result.
     let strategies = [
+        // Cancelling a bid that was never placed should fail (IncorrectOwner).
         Test {
             actions: vec![Action::Cancel(0), Action::End],
             max_winners: 3,
-            price_floor: PriceFloor::None,
+            price_floor: PriceFloor::None([0; 32]),
         },
-        // Cancel a non-existing bid.
-        // Bidding less than the top bidder should fail.
+        // Bidding again without cancelling the previous bid should fail (BidAlreadyActive).
+        //
+        // This case used to be commented "Bidding less than the top bidder should fail" and ran a
+        // nine-action strategy. That intent is not something the program enforces -- a below-top
+        // bid is a valid lower-ranked bid, see the strategy below -- and the strategy passed only
+        // because its later repeat bids happened to trip BidAlreadyActive. It was green while
+        // testing nothing it claimed. Reduced to the rule that actually fired, stated honestly.
         Test {
             actions: vec![
                 Action::Bid(0, 5000),
                 Action::Bid(1, 6000),
-                Action::Bid(2, 5500),
-                Action::Bid(0, 1000),
-                Action::Bid(1, 2000),
-                Action::Bid(2, 3000),
-                Action::Bid(3, 4000),
-                Action::Bid(3, 4000),
+                Action::Bid(0, 7000),
                 Action::End,
             ],
             max_winners: 3,
             price_floor: PriceFloor::None([0; 32]),
         },
-        // Bidding less than any bidder should fail.
+        // Bidding below the auction's reserve price should fail (BidTooSmall).
+        //
+        // The original comment here was "Bidding less than any bidder should fail", with no price
+        // floor set. The program has no such rule and by design cannot: BidState::place_bid does a
+        // ranked insert, and its "Inserting at 0", mid-array and equal-amount branches
+        // (processor.rs:259-314) are unreachable for every possible input unless below-top bids
+        // are accepted. place_bid.rs:5-11 names small-bid spam as a considered attack and answers
+        // it by PRUNING (bids.remove(0)), not by rejection.
+        //
+        // The program's actual amount rule is the price floor, applied both at bid time
+        // (place_bid.rs:231-241 -> BidTooSmall) and at settlement, where is_winner/num_winners/
+        // winner_at all inject it as `minimum` (processor.rs:155-177). So set one: at a floor of
+        // 5000 the 5000 and 6000 bids stand and the 1000 bid is rejected. Note the boundary is
+        // `amount < min` since 377f6cd, so a bid exactly at the floor is accepted.
         Test {
             actions: vec![
                 Action::Bid(0, 5000),
@@ -646,9 +681,9 @@ async fn test_incorrect_runs() {
                 Action::End,
             ],
             max_winners: 3,
-            price_floor: PriceFloor::None([0; 32]),
+            price_floor: PriceFloor::MinimumPrice([5000, 0, 0, 0]),
         },
-        // Bidding after an auction has been explicitly ended should fail.
+        // Bidding after an auction has been explicitly ended should fail (InvalidState).
         Test {
             actions: vec![Action::Bid(0, 5000), Action::End, Action::Bid(1, 6000)],
             max_winners: 3,
@@ -668,7 +703,7 @@ async fn test_incorrect_runs() {
             mint_authority,
             auction_pubkey,
             recent_blockhash,
-        ) = setup_auction(true, strategy.max_winners).await;
+        ) = setup_auction(true, strategy.max_winners, strategy.price_floor.clone()).await;
 
         let mut failed = false;
 
@@ -693,4 +728,3 @@ async fn test_incorrect_runs() {
         assert!(failed);
     }
 }
-*/
