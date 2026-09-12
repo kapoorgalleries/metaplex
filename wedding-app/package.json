@@ -1,0 +1,20 @@
+{
+  "name": "priya-sanjay-wedding-app",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Priya & Sanjay 2026 — an installable wedding PWA (static frontend + independently-deployed Node/Express API).",
+  "scripts": {
+    "validate": "node scripts/validate-build.mjs",
+    "build": "node scripts/build.mjs",
+    "scan": "node scripts/scan-dist.mjs",
+    "smoke": "node scripts/smoke.mjs",
+    "ci": "npm run validate && npm run build && npm run scan && npm run smoke",
+    "test": "npm run validate",
+    "setup": "npm --prefix server ci",
+    "start": "node server/server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "Apache-2.0"
+}

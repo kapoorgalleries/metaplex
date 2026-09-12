@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="description" content="RSVP for Priya & Sanjay's wedding." />
+  <meta name="robots" content="noindex, nofollow" />
+  <link rel="canonical" href="https://sanjaywedspriya.com/app/rsvp.html" />
+  <meta property="og:type" content="website" />
+  <meta property="og:site_name" content="Priya & Sanjay 2026" />
+  <meta property="og:title" content="RSVP · Priya &amp; Sanjay" />
+  <meta property="og:description" content="RSVP for Priya & Sanjay's wedding." />
+  <meta property="og:url" content="https://sanjaywedspriya.com/app/rsvp.html" />
+  <meta property="og:image" content="https://sanjaywedspriya.com/app/assets/og.jpg" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:title" content="RSVP · Priya &amp; Sanjay" />
+  <meta name="twitter:description" content="RSVP for Priya & Sanjay's wedding." />
+  <meta name="twitter:image" content="https://sanjaywedspriya.com/app/assets/og.jpg" />
+  <meta name="theme-color" content="#7A1F23" />
+  <title>RSVP · Priya &amp; Sanjay</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,400;0,500;0,600;1,400&family=Marcellus&family=Jost:wght@300;400;500&family=Noto+Serif+Devanagari:wght@400;600&family=Noto+Serif+Kannada:wght@400;600&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="css/styles.css" />
+  <link rel="stylesheet" href="css/rsvp.css" />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🪔</text></svg>" />
+</head>
+<body>
+  <div id="site-header"></div>
+  <main class="page">
+    <section class="subhero">
+      <p class="subhero__kicker" data-i18n="sub.rsvp.kicker">We can't wait to celebrate with you</p>
+      <h1 data-i18n="title.rsvp">RSVP</h1>
+      <p data-i18n-html="sub.rsvp.intro">Kindly respond by <strong>August 31, 2026</strong>. One submission per household is perfect.</p>
+    </section>
+
+    <section class="section">
+      <div class="rsvp-find" id="rsvpFind">
+        <button type="button" class="rsvp-find__toggle" id="findToggle" data-i18n="rs.find.toggle">Already responded? Update your RSVP →</button>
+        <div class="rsvp-find__panel" id="findPanel" hidden>
+          <label class="field"><span data-i18n="rs.find.label">The email you RSVP'd with</span>
+            <input type="email" id="findEmail" autocomplete="email" />
+          </label>
+          <button type="button" class="btn btn--outline btn--sm" id="findBtn" data-i18n="rs.find.btn">Find my RSVP</button>
+          <p class="rsvp__status" id="findStatus" role="status" aria-live="polite"></p>
+        </div>
+      </div>
+
+      <form class="rsvp" id="rsvpForm" novalidate>
+        <div class="hp" aria-hidden="true"><label>Website<input type="text" name="website" tabindex="-1" autocomplete="off" /></label></div>
+        <div class="rsvp__row">
+          <label class="field"><span data-i18n-html="rs.name">Full name <em>*</em></span><input type="text" name="name" required autocomplete="name" maxlength="120" /></label>
+          <label class="field"><span data-i18n-html="rs.email">Email <em>*</em></span><input type="email" name="email" required autocomplete="email" maxlength="254" /></label>
+        </div>
+
+        <label class="field"><span data-i18n="rs.phone">Phone (optional)</span>
+          <input type="tel" name="phone" autocomplete="tel" inputmode="tel" maxlength="40" />
+          <small class="field-hint" data-i18n="rs.phone.consent">By sharing your number you agree to receive wedding-related texts from us. Reply STOP anytime to opt out.</small>
+        </label>
+
+        <label class="field"><span data-i18n-html="rs.attend">Will you attend? <em>*</em></span>
+          <select name="attending" required>
+            <option value="" data-i18n="rs.choose">Please choose…</option>
+            <option value="yes" data-i18n="rs.yes">Joyfully accepts</option>
+            <option value="no" data-i18n="rs.no">Regretfully declines</option>
+          </select>
+        </label>
+
+        <label class="field">
+          <span><span data-i18n="rs.address">Postal address</span> <span class="label-note" id="addrOpt" hidden data-i18n="rs.address.opt">(optional)</span></span>
+          <textarea name="mailing_address" rows="3" autocomplete="street-address" maxlength="500" data-i18n-ph="rs.address.ph" placeholder="Street, city, state / country, postcode"></textarea>
+          <small class="field-hint" id="addrHintYes" data-i18n="rs.address.help.yes">So we can send you a thank-you and anything else that should arrive by post.</small>
+          <small class="field-hint" id="addrHintNo" hidden data-i18n="rs.address.help.no">Only if you would like a card from us — leave it blank if you would rather not.</small>
+        </label>
+
+        <div class="field" data-when="yes">
+          <label for="rsvpGuests"><span data-i18n="rs.guests">Number in your party</span></label>
+          <select id="rsvpGuests" name="guests">
+            <option value="1" selected>1</option><option value="2">2</option><option value="3">3</option>
+            <option value="4">4</option><option value="5">5</option><option value="6">6</option>
+            <option value="7">7</option><option value="8">8</option><option value="9">9</option>
+            <option value="10">10</option>
+          </select>
+          <div class="field-hint">
+            <button type="button" class="linklike" id="partyIssueOpen" data-i18n="rs.missing.link">Is someone missing from your invitation?</button>
+          </div>
+          <div id="partyIssueBox" hidden>
+            <label for="partyIssueText"><span data-i18n="rs.missing.label">Who should be included?</span></label>
+            <textarea id="partyIssueText" rows="2" maxlength="1000" data-i18n-ph="rs.missing.ph" placeholder="e.g. my fiancée is not listed"></textarea>
+            <small class="field-hint" data-i18n="rs.missing.help">Send your reply anyway — we will correct the numbers and confirm with you.</small>
+          </div>
+        </div>
+
+        <label class="field" data-when="yes">
+          <span><span data-i18n="rs.children">How many are children under 12?</span> <span class="label-note" data-i18n="rs.children.note">(included in your party number)</span></span>
+          <select name="children_under_12">
+            <option value="0" selected>0</option><option value="1">1</option><option value="2">2</option>
+            <option value="3">3</option><option value="4">4</option><option value="5">5</option>
+            <option value="6">6</option><option value="7">7</option><option value="8">8</option>
+            <option value="9">9</option><option value="10">10</option>
+          </select>
+          <small class="field-hint" data-i18n="rs.children.help">Little ones are warmly welcome — knowing how many are joining helps us plan their seats and meals.</small>
+        </label>
+
+        <label class="field" data-when="yes">
+          <span data-i18n="rs.attendees">Who is coming? Please list everyone by name</span>
+          <textarea name="attendee_names" rows="3" maxlength="600" data-i18n-ph="rs.attendees.ph" placeholder="e.g. Andrew Fried, Sarah Fried, Emma Fried"></textarea>
+          <small class="field-hint" data-i18n="rs.attendees.help">If only some of your household can make it, just name those who can. This is how we seat everyone — without names we only have a number.</small>
+        </label>
+
+        <fieldset class="field field--group" data-when="yes">
+          <legend data-i18n="rs.events">Which events will you join?</legend>
+          <div class="checks">
+            <label><input type="checkbox" name="events" value="Haldi" /> <span data-i18n="ev.haldi">Haldi</span></label>
+            <label><input type="checkbox" name="events" value="Sangeet" /> <span data-i18n="ev.sangeet">Sangeet</span></label>
+            <label><input type="checkbox" name="events" value="Wedding Ceremony" /> <span data-i18n="ev.ceremony">Wedding Ceremony</span></label>
+            <label><input type="checkbox" name="events" value="Reception" /> <span data-i18n="ev.reception">Reception</span></label>
+          </div>
+        </fieldset>
+
+        <div class="dining-note" data-when="yes" role="note">
+          <h3 data-i18n="rs.dining.t">Dining</h3>
+          <p data-i18n="rs.dining.p">Our wedding meals will be served buffet-style, with many vegetarian options available. Guests with nut allergies should notify a banquet server before approaching the buffet so the team can provide guidance regarding the available dishes.</p>
+        </div>
+
+        <label class="field" data-when="yes"><span data-i18n="rs.song">A song to get you on the dance floor</span>
+          <input type="text" name="song" maxlength="160" data-i18n-ph="rs.song.ph" placeholder="Optional — a song we should play" />
+        </label>
+
+        <label class="field"><span data-i18n="rs.note">A note for the couple</span>
+          <textarea name="note" rows="3" maxlength="1200" data-i18n-ph="rs.note.ph" placeholder="Anything you'd like us to know — a message, dietary needs…"></textarea>
+        </label>
+
+        <button type="submit" class="btn btn--solid rsvp__submit" data-i18n="rs.send">Send RSVP</button>
+        <p class="rsvp__status" id="rsvpStatus" role="status" aria-live="polite"></p>
+      </form>
+
+      <div class="registry reveal">
+        <h3 data-i18n="rs.gifts.t">Gifts &amp; blessings</h3>
+        <p data-i18n="rs.gifts.p">Your presence is the greatest gift of all. We gently request no boxed or wrapped gifts — for those who wish to give, a gift may be sent by Zelle.</p>
+        <div class="registry__links">
+          <a class="btn btn--outline btn--sm" href="registry.html" data-i18n="rs.gifts.btn">Gifts &amp; Blessings</a>
+        </div>
+      </div>
+    </section>
+  </main>
+  <div id="site-footer"></div>
+  <script src="js/site.js"></script>
+  <script src="js/supa.js"></script>
+  <script src="js/rsvp.js"></script>
+</body>
+</html>
