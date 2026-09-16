@@ -1,0 +1,13 @@
+{
+  // The web typecheck as CI runs it. Identical to tsconfig.json except that
+  // the test suite is excluded: tsconfig.json's typeRoots points only at
+  // js/types, so a bare `tsc` cannot see @types/jest and reports every
+  // `describe`/`it`/`expect` as an unknown name. Widening typeRoots to
+  // node_modules/@types is not the fix — it re-admits the duplicated
+  // @types/bn.js hoist that already breaks `craco build` on a cold checkout.
+  // The tests are exercised by `yarn test` in the same workflow; this file
+  // exists so the application code gets a real `tsc --strict` pass, which
+  // react-scripts' babel-based jest never performs.
+  "extends": "./tsconfig.json",
+  "exclude": ["src/**/__tests__/**", "src/setupTests.ts"]
+}

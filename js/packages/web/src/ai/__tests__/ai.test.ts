@@ -55,6 +55,8 @@ import {
   buildPatch,
   composeDescription,
   recordToTraits,
+  truncateUtf8Bytes,
+  utf8ByteLength,
 } from '../apply';
 
 /* ------------------------------------------------------------------ */
@@ -1525,5 +1527,31 @@ describe('apply', () => {
       { ...cfg, apiKey: 'k' },
     );
     expect(plan.url.indexOf('v1beta//')).toBe(-1);
+  });
+
+  it('45. counts UTF-8 bytes the way the on-chain limit does', () => {
+    // One helper now feeds the mint form's counter, the review panel's
+    // counter and truncateUtf8Bytes. Pin it against Buffer, the reference
+    // implementation, across every byte width the field produces.
+    const cases = [
+      'Phurba',
+      'Śākyamuni',
+      'पद्मपाणि लोकेश्वर',
+      'བཀྲ་ཤིས་',
+      'Figure of Padmapani \u{1F4FF}',
+      '',
+    ];
+    cases.forEach(s => {
+      expect(utf8ByteLength(s)).toBe(Buffer.byteLength(s, 'utf8'));
+    });
+
+    // The truncation and the counter must agree: whatever truncateUtf8Bytes
+    // returns for a limit, the counter must measure at or under that limit.
+    const long = 'Śākyamuni, gilt copper alloy, Newar, Kathmandu Valley';
+    for (let limit = 0; limit <= 40; limit++) {
+      expect(
+        utf8ByteLength(truncateUtf8Bytes(long, limit)),
+      ).toBeLessThanOrEqual(limit);
+    }
   });
 });

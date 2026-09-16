@@ -16,6 +16,7 @@ import {
   TRAIT_VOCABULARY,
   composeDescription,
   recordToTraits,
+  utf8ByteLength,
 } from '../../ai/apply';
 import { ELISION_PATTERN } from '../../ai/validate';
 
@@ -38,20 +39,6 @@ const { TextArea } = Input;
  * a 30-character title can still be over. buildPatch truncates to the same
  * limit; this counter is what warns before it silently shortens. */
 const TITLE_MAX_BYTES = MAX_NAME_BYTES;
-
-const utf8Length = (s: string): number => {
-  let bytes = 0;
-  for (let i = 0; i < s.length; i++) {
-    const code = s.codePointAt(i) as number;
-    if (code > 0xffff) {
-      i++;
-      bytes += 4;
-    } else {
-      bytes += code < 0x80 ? 1 : code < 0x800 ? 2 : 3;
-    }
-  }
-  return bytes;
-};
 
 const OVERRIDE_LABEL = 'I have checked this myself';
 
@@ -322,7 +309,7 @@ export const ReviewPanel = (props: {
   const descriptionLocked = selection.includeInscription;
   const composed = composeDescription(record, selection.includeInscription);
 
-  const titleLength = utf8Length(record.title);
+  const titleLength = utf8ByteLength(record.title);
   const titleOver = titleLength > TITLE_MAX_BYTES;
 
   return (
