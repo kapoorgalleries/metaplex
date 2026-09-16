@@ -37,14 +37,20 @@ jobs:
       # sets npmClient: yarn. js/package.json declares
       # "packageManager": "yarn@1.22.22", so with corepack enabled the `yarn`
       # on PATH resolves to yarn 1 — the same pin js/cf-build.sh relies on.
-      # The fallback covers a runner image without a working corepack.
+      # The fallback covers a runner image without a working corepack. It
+      # installs into a temp prefix and prepends that to PATH, as
+      # cf-build.sh does, rather than `npm install -g`: a global install
+      # collides with a corepack shim already sitting in Node's bin dir.
       - name: Use yarn 1
         env:
           COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
         run: |
           corepack enable || true
           if [ "$(yarn --version 2>/dev/null | cut -d. -f1)" != "1" ]; then
-            npm install -g yarn@1.22.22
+            YARN_HOME="$(mktemp -d)"
+            npm install --no-save --no-audit --no-fund --prefix "$YARN_HOME" yarn@1.22.22
+            echo "$YARN_HOME/node_modules/.bin" >> "$GITHUB_PATH"
+            export PATH="$YARN_HOME/node_modules/.bin:$PATH"
           fi
           echo "node $(node -v) / yarn $(yarn --version)"
 
