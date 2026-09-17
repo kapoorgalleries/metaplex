@@ -14,7 +14,17 @@
  *    `export type { ... }`.
  */
 
-export type ProviderId = 'gemini' | 'openai';
+/**
+ * Five providers, one interface. Four of them speak the OpenAI
+ * chat/completions dialect and are built by one factory in providers.ts;
+ * Gemini has its own request and response shape.
+ *
+ * 'azure' is Microsoft's hosting of the OpenAI models (Azure OpenAI, sold
+ * inside Microsoft Foundry). 'github' is GitHub Models, which fronts several
+ * publishers' models — including Microsoft's own Phi family — behind one
+ * GitHub token.
+ */
+export type ProviderId = 'gemini' | 'openai' | 'deepseek' | 'github' | 'azure';
 
 export type ConfidenceLevel = 'high' | 'medium' | 'low' | 'unable';
 
@@ -223,6 +233,18 @@ export interface AiProvider {
   modelSuggestions: string[];
   /** False for Gemini: it cannot fetch a remote image URL itself. */
   supportsRemoteImageUrl: boolean;
+  /** What the provider calls the model field. Azure addresses a *deployment*
+   *  you named yourself, not a published model id, and mislabelling it sends
+   *  people hunting for a model list that will not help them. */
+  modelLabel: string;
+  /** What the provider calls the secret. GitHub Models takes a GitHub token,
+   *  not an API key, and the distinction decides where you go to mint one. */
+  keyLabel: string;
+  /** The request shape a self-hosted proxy for THIS provider must accept,
+   *  stated per provider because the five paths genuinely differ. */
+  baseUrlHelp: string;
+  /** A provider-specific caveat shown under the form. '' when there is none. */
+  note: string;
   /** Pure. */
   buildRequest(req: CatalogueRequest, cfg: ProviderSettings): HttpPlan;
   /** Pure. Same shape as buildRequest but without the structured-output
@@ -235,6 +257,15 @@ export interface AiProvider {
    *  the provider's 400 message, return an adapted body to retry once, or
    *  null to give up. */
   retryBody?(body: unknown, message: string): unknown | null;
+  /**
+   * Pure, optional. True when `baseUrl` still addresses the provider itself
+   * rather than a proxy the dealer runs. The default test is equality with
+   * defaultBaseUrl, which is wrong for Azure: every tenant has its own
+   * hostname, so its real endpoint never equals the default. Reading that as
+   * proxy mode would suppress the stored-key warning and accept a blank key
+   * on a request that goes straight to Microsoft.
+   */
+  isOwnEndpoint?(baseUrl: string): boolean;
 }
 
 /* ------------------------------------------------------------------ */
@@ -251,7 +282,10 @@ export interface ProviderSettings {
 
 export interface AiSettings {
   activeProvider: ProviderId;
-  providers: { gemini: ProviderSettings; openai: ProviderSettings };
+  /** One entry per ProviderId, always fully populated — settings.ts rebuilds
+   *  the record from PROVIDER_IDS on every load, so adding a provider can
+   *  never leave a stored blob with a missing key. */
+  providers: Record<ProviderId, ProviderSettings>;
   imageMaxEdgePx: number;
   maxOutputTokens: number;
   requestTimeoutMs: number;

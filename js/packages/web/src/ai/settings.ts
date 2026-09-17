@@ -11,7 +11,12 @@
  */
 
 import { AiProvider, AiSettings, ProviderId, ProviderSettings } from './types';
-import { PROVIDERS, PROVIDER_IDS, trimTrailingSlash } from './providers';
+import {
+  BASE_URL_PLACEHOLDER,
+  PROVIDERS,
+  PROVIDER_IDS,
+  trimTrailingSlash,
+} from './providers';
 
 export const AI_SETTINGS_KEY = 'kapoor.ai.settings.v1';
 
@@ -20,25 +25,35 @@ export type SettingsStore = Pick<Storage, 'getItem' | 'setItem'>;
 
 const REDACTED = '«redacted»';
 
-/** Bare key shapes, for the case where a provider echoes a submitted
- *  fragment back inside a 400 body that we never configured ourselves. */
-const KEY_SHAPE = /(sk-|AIza)[A-Za-z0-9_-]{10,}/g;
+/**
+ * Bare key shapes, for the case where a provider echoes a submitted fragment
+ * back inside a 400 body that we never configured ourselves. `sk-` covers
+ * OpenAI and DeepSeek, `AIza` Gemini, and the gh* set GitHub's token
+ * families. Azure keys are undelimited hex or base64 with no distinguishing
+ * prefix, so there is nothing safe to match on: those are covered only by the
+ * exact-value pass below, which is why that pass exists.
+ */
+const KEY_SHAPE = /(sk-|AIza|gh[pousr]_|github_pat_)[A-Za-z0-9_-]{10,}/g;
+
+/** Every provider starts unconfigured, at its own documented endpoint. Built
+ *  from PROVIDER_IDS rather than written out, so adding a provider to the
+ *  table is the only edit needed. */
+function defaultProviders(): Record<ProviderId, ProviderSettings> {
+  const out = {} as Record<ProviderId, ProviderSettings>;
+  PROVIDER_IDS.forEach(id => {
+    out[id] = {
+      apiKey: '',
+      model: PROVIDERS[id].defaultModel,
+      baseUrl: PROVIDERS[id].defaultBaseUrl,
+    };
+  });
+  return out;
+}
 
 export function defaultSettings(): AiSettings {
   return {
     activeProvider: 'gemini',
-    providers: {
-      gemini: {
-        apiKey: '',
-        model: PROVIDERS.gemini.defaultModel,
-        baseUrl: PROVIDERS.gemini.defaultBaseUrl,
-      },
-      openai: {
-        apiKey: '',
-        model: PROVIDERS.openai.defaultModel,
-        baseUrl: PROVIDERS.openai.defaultBaseUrl,
-      },
-    },
+    providers: defaultProviders(),
     imageMaxEdgePx: 1600,
     maxOutputTokens: 8192,
     requestTimeoutMs: 120000,
@@ -116,13 +131,18 @@ export function loadSettings(store?: SettingsStore): AiSettings {
   }
 
   const top = asRecord(parsed);
-  const providers = asRecord(top.providers);
+  const stored = asRecord(top.providers);
+  /* Rebuilt key by key from PROVIDER_IDS, never spread from `stored`: a blob
+   * written before a provider existed simply has no entry for it, and a blob
+   * written after one is removed must not resurrect it. */
+  const providers = {} as Record<ProviderId, ProviderSettings>;
+  PROVIDER_IDS.forEach(id => {
+    providers[id] = mergeProvider(stored[id], base.providers[id]);
+  });
+
   return {
     activeProvider: asProviderId(top.activeProvider, base.activeProvider),
-    providers: {
-      gemini: mergeProvider(providers.gemini, base.providers.gemini),
-      openai: mergeProvider(providers.openai, base.providers.openai),
-    },
+    providers: providers,
     imageMaxEdgePx: asPositive(top.imageMaxEdgePx, base.imageMaxEdgePx),
     maxOutputTokens: asPositive(top.maxOutputTokens, base.maxOutputTokens),
     requestTimeoutMs: asPositive(top.requestTimeoutMs, base.requestTimeoutMs),
@@ -136,19 +156,16 @@ export function saveSettings(next: AiSettings, store?: SettingsStore): void {
     return;
   }
 
-  const normalised: AiSettings = {
-    ...next,
-    providers: {
-      gemini: {
-        ...next.providers.gemini,
-        baseUrl: trimTrailingSlash(next.providers.gemini.baseUrl),
-      },
-      openai: {
-        ...next.providers.openai,
-        baseUrl: trimTrailingSlash(next.providers.openai.baseUrl),
-      },
-    },
-  };
+  const providers = {} as Record<ProviderId, ProviderSettings>;
+  PROVIDER_IDS.forEach(id => {
+    const cfg = next.providers[id];
+    providers[id] = {
+      apiKey: cfg.apiKey,
+      model: cfg.model,
+      baseUrl: trimTrailingSlash(cfg.baseUrl),
+    };
+  });
+  const normalised: AiSettings = { ...next, providers: providers };
 
   try {
     target.setItem(AI_SETTINGS_KEY, JSON.stringify(normalised));
@@ -163,10 +180,16 @@ export function isProxyMode(
   cfg: ProviderSettings,
   provider: AiProvider,
 ): boolean {
-  /* Compared in canonical form: a stray trailing slash on the default URL is
-   * still the default endpoint. Reading it as proxy mode would suppress the
-   * stored-key warning and accept a blank key, both on a request that goes
-   * straight to the provider. */
+  /* A provider that knows its own hostnames answers for itself. Azure does,
+   * because its real endpoint is per-tenant and never equals the default —
+   * without this, every genuine Azure configuration would read as proxy mode,
+   * suppressing the stored-key warning and accepting a blank key on requests
+   * going straight to Microsoft. */
+  if (provider.isOwnEndpoint) {
+    return !provider.isOwnEndpoint(cfg.baseUrl);
+  }
+  /* Otherwise compared in canonical form: a stray trailing slash on the
+   * default URL is still the default endpoint. */
   return (
     trimTrailingSlash(cfg.baseUrl) !==
     trimTrailingSlash(provider.defaultBaseUrl)
@@ -179,12 +202,22 @@ export function configProblem(
   provider: AiProvider,
 ): string {
   if (cfg.model.trim() === '') {
-    return 'Enter a model name.';
+    return 'Enter a ' + provider.modelLabel.toLowerCase() + '.';
   }
   try {
     new URL(cfg.baseUrl);
   } catch (e) {
     return 'Base URL is not a valid URL.';
+  }
+  /* Azure ships with a placeholder hostname because there is no shared one.
+   * Left in place it produces a DNS failure reported as a network error,
+   * which reads as "the feature is broken" rather than "finish the form". */
+  if (cfg.baseUrl.indexOf(BASE_URL_PLACEHOLDER) !== -1) {
+    return (
+      'Replace ' +
+      BASE_URL_PLACEHOLDER +
+      ' in the Base URL with your own resource name.'
+    );
   }
   // A blank key against a CUSTOM Base URL is proxy mode: valid, and the only
   // configuration in which no secret exists in the browser at all.

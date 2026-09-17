@@ -22,7 +22,7 @@ const CHUNK_SIZE = 0x8000;
 
 const READ_FAILED =
   'Could not read the image from that URL (the host may not allow ' +
-  'cross-origin reads). Upload the file instead, or switch to OpenAI.';
+  'cross-origin reads). Upload the file instead.';
 
 export function isDataUrl(s: string): boolean {
   return DATA_URL_RE.test(s);

@@ -28,7 +28,7 @@ const PROXY_NOTE =
   'Requests go to your proxy. Leave the key blank if the proxy supplies it — then no key is stored in this browser at all.';
 
 const BASE_URL_HELP =
-  'Point this at a proxy you control to keep the key off this machine. Gemini proxy must accept POST {base}/models/{model}:generateContent; OpenAI proxy must accept POST {base}/chat/completions.';
+  'Point this at a proxy you control to keep the key off this machine. ';
 
 const MODEL_HELP =
   'Free text: any model id the provider accepts. The suggestions are a convenience only — provider catalogues change.';
@@ -68,33 +68,31 @@ export const SettingsPanel = (props: {
 
   // Nothing to type a key into when a proxy holds it and none is stored.
   const showKeyInput = !(proxyMode && cfg.apiKey === '');
-  const anyKeyStored =
-    value.providers.gemini.apiKey !== '' ||
-    value.providers.openai.apiKey !== '';
+  const anyKeyStored = PROVIDER_IDS.some(
+    id => value.providers[id].apiKey !== '',
+  );
 
+  /** Rebuilds the whole providers record every time, so no edit can leave a
+   *  stale object shared with the caller's previous value. */
   const emit = (patch: {
     activeProvider?: ProviderId;
-    gemini?: ProviderSettings;
-    openai?: ProviderSettings;
+    providers?: Record<ProviderId, ProviderSettings>;
     imageMaxEdgePx?: number;
     maxOutputTokens?: number;
     requestTimeoutMs?: number;
   }) => {
+    const source = patch.providers || value.providers;
+    const providers = {} as Record<ProviderId, ProviderSettings>;
+    PROVIDER_IDS.forEach(id => {
+      providers[id] = copyProvider(source[id]);
+    });
+
     props.onChange({
       activeProvider:
         patch.activeProvider === undefined
           ? value.activeProvider
           : patch.activeProvider,
-      providers: {
-        gemini:
-          patch.gemini === undefined
-            ? copyProvider(value.providers.gemini)
-            : patch.gemini,
-        openai:
-          patch.openai === undefined
-            ? copyProvider(value.providers.openai)
-            : patch.openai,
-      },
+      providers: providers,
       imageMaxEdgePx:
         patch.imageMaxEdgePx === undefined
           ? value.imageMaxEdgePx
@@ -110,6 +108,15 @@ export const SettingsPanel = (props: {
     });
   };
 
+  /** Replaces one provider's entry, leaving the other four untouched. */
+  const withProvider = (id: ProviderId, next: ProviderSettings) => {
+    const providers = {} as Record<ProviderId, ProviderSettings>;
+    PROVIDER_IDS.forEach(other => {
+      providers[other] = other === id ? next : value.providers[other];
+    });
+    return providers;
+  };
+
   const editActive = (patch: {
     apiKey?: string;
     model?: string;
@@ -120,22 +127,21 @@ export const SettingsPanel = (props: {
       model: patch.model === undefined ? cfg.model : patch.model,
       baseUrl: patch.baseUrl === undefined ? cfg.baseUrl : patch.baseUrl,
     };
-    emit(activeId === 'gemini' ? { gemini: next } : { openai: next });
+    emit({ providers: withProvider(activeId, next) });
   };
 
+  /** Clears every provider's key, not just the active one: the warning this
+   *  button answers is about what is stored in the browser, all of it. */
   const clearKeys = () => {
-    emit({
-      gemini: {
+    const providers = {} as Record<ProviderId, ProviderSettings>;
+    PROVIDER_IDS.forEach(id => {
+      providers[id] = {
         apiKey: '',
-        model: value.providers.gemini.model,
-        baseUrl: value.providers.gemini.baseUrl,
-      },
-      openai: {
-        apiKey: '',
-        model: value.providers.openai.model,
-        baseUrl: value.providers.openai.baseUrl,
-      },
+        model: value.providers[id].model,
+        baseUrl: value.providers[id].baseUrl,
+      };
     });
+    emit({ providers: providers });
   };
 
   return (
@@ -166,8 +172,12 @@ export const SettingsPanel = (props: {
         </div>
       )}
 
+      {provider.note === '' ? null : (
+        <div className="ai-proxy-note">{provider.note}</div>
+      )}
+
       <label className="action-field">
-        <span className="field-title">Model</span>
+        <span className="field-title">{provider.modelLabel}</span>
         <Input
           className="input"
           list={datalistId}
@@ -191,20 +201,22 @@ export const SettingsPanel = (props: {
           value={cfg.baseUrl}
           onChange={info => editActive({ baseUrl: info.target.value })}
         />
-        <span className="field-info">{BASE_URL_HELP}</span>
+        <span className="field-info">
+          {BASE_URL_HELP + provider.baseUrlHelp}
+        </span>
       </label>
 
       {showKeyInput || anyKeyStored ? (
         <div className="action-field">
           {showKeyInput ? (
             <React.Fragment>
-              <span className="field-title">API key</span>
+              <span className="field-title">{provider.keyLabel}</span>
               <Input.Password
                 className="input"
                 placeholder={
                   proxyMode
                     ? 'Leave blank if the proxy supplies the key'
-                    : provider.label + ' API key'
+                    : provider.label + ' ' + provider.keyLabel.toLowerCase()
                 }
                 value={cfg.apiKey}
                 onChange={info => editActive({ apiKey: info.target.value })}
@@ -215,7 +227,8 @@ export const SettingsPanel = (props: {
                   target="_blank"
                   rel="noopener noreferrer"
                 >
-                  Where to get a {provider.label} key
+                  Where to get a {provider.label}{' '}
+                  {provider.keyLabel.toLowerCase()}
                 </a>
               </span>
             </React.Fragment>

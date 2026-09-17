@@ -32,7 +32,17 @@ import {
 } from '../schema';
 import { NO_PROVENANCE_SENTINEL } from '../prompt';
 import { auditRecord, parseCatalogueRecord } from '../validate';
-import { GEMINI, OPENAI } from '../providers';
+import {
+  AZURE,
+  BASE_URL_PLACEHOLDER,
+  DEEPSEEK,
+  GEMINI,
+  GITHUB,
+  OPENAI,
+  PROVIDERS,
+  PROVIDER_IDS,
+  joinUrl,
+} from '../providers';
 import {
   base64ByteLength,
   bytesToBase64,
@@ -1553,5 +1563,298 @@ describe('apply', () => {
         utf8ByteLength(truncateUtf8Bytes(long, limit)),
       ).toBeLessThanOrEqual(limit);
     }
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* The three providers added alongside Gemini and OpenAI               */
+/*                                                                     */
+/* DeepSeek, GitHub Models and Azure OpenAI are built by one factory,  */
+/* so these tests pin the things the factory is parameterised on — the */
+/* auth header, the response_format mode, the URL — rather than        */
+/* re-asserting the shared body for each one.                          */
+/* ------------------------------------------------------------------ */
+
+function cfgFor(provider: AiProvider, apiKey: string): ProviderSettings {
+  return {
+    apiKey,
+    model: provider.defaultModel,
+    baseUrl: provider.defaultBaseUrl,
+  };
+}
+
+/** The OpenAI-dialect providers, which is every one except Gemini. */
+const OPENAI_DIALECT: AiProvider[] = [OPENAI, DEEPSEEK, GITHUB, AZURE];
+
+describe('providers — the wider table', () => {
+  it('46. PROVIDER_IDS lists every provider in the table exactly once', () => {
+    const tableIds = Object.keys(PROVIDERS) as ProviderId[];
+    expect(PROVIDER_IDS.slice().sort()).toEqual(tableIds.slice().sort());
+    expect(PROVIDER_IDS.length).toBe(tableIds.length);
+
+    // Each entry answers to its own key: a copy-paste in the table would
+    // otherwise route one provider's requests through another's builder.
+    PROVIDER_IDS.forEach(id => {
+      expect(PROVIDERS[id].id).toBe(id);
+      expect(PROVIDERS[id].label).not.toBe('');
+      expect(PROVIDERS[id].modelLabel).not.toBe('');
+      expect(PROVIDERS[id].keyLabel).not.toBe('');
+      expect(PROVIDERS[id].baseUrlHelp).not.toBe('');
+    });
+  });
+
+  it('47. joinUrl re-attaches a query string after the appended path', () => {
+    expect(joinUrl('https://h/openai/v1', '/chat/completions')).toBe(
+      'https://h/openai/v1/chat/completions',
+    );
+    // The paste this exists for: Azure's documented endpoints carry one.
+    expect(
+      joinUrl('https://h/openai/v1?api-version=preview', '/chat/completions'),
+    ).toBe('https://h/openai/v1/chat/completions?api-version=preview');
+    // A trailing slash BEFORE the query must not survive either.
+    expect(
+      joinUrl('https://h/openai/v1/?api-version=preview', '/chat/completions'),
+    ).toBe('https://h/openai/v1/chat/completions?api-version=preview');
+    expect(joinUrl('https://h/v1//', '/chat/completions')).toBe(
+      'https://h/v1/chat/completions',
+    );
+  });
+
+  it('48. every OpenAI-dialect provider posts to {base}/chat/completions', () => {
+    OPENAI_DIALECT.forEach(provider => {
+      const plan = provider.buildRequest(
+        twoInlineImages(),
+        cfgFor(provider, 'k'),
+      );
+      expect(plan.method).toBe('POST');
+      expect(plan.url.indexOf('/chat/completions')).toBeGreaterThan(0);
+      expect(plan.headers['Content-Type']).toBe('application/json');
+
+      // The shared body: the model, the ceiling, and one labelled part per
+      // image ahead of the image itself.
+      const body = openaiBody(plan);
+      expect(body.model).toBe(provider.defaultModel);
+      expect(body.max_tokens).toBe(4096);
+      const parts = userParts(body);
+      expect(parts.filter(p => p.type === 'image_url').length).toBe(2);
+      expect(parts[1].text).toBe('Image 1 of 2 — front');
+      expect(parts[3].text).toBe('Image 2 of 2 — reverse');
+    });
+  });
+
+  it('49. Azure authenticates with api-key, never Authorization', () => {
+    const plan = AZURE.buildRequest(twoInlineImages(), cfgFor(AZURE, 'azkey'));
+    expect(plan.headers['api-key']).toBe('azkey');
+    expect(plan.headers.Authorization).toBeUndefined();
+
+    // The deployment name travels in the body, so one Base URL serves every
+    // deployment in the resource.
+    const cfg: ProviderSettings = {
+      apiKey: 'azkey',
+      model: 'kapoor-gpt4o',
+      baseUrl: 'https://kapoor.openai.azure.com/openai/v1?api-version=preview',
+    };
+    const deployed = AZURE.buildRequest(twoInlineImages(), cfg);
+    expect(deployed.url).toBe(
+      'https://kapoor.openai.azure.com/openai/v1/chat/completions?api-version=preview',
+    );
+    expect(openaiBody(deployed).model).toBe('kapoor-gpt4o');
+
+    // Proxy mode still means no header at all.
+    expect(
+      AZURE.buildRequest(twoInlineImages(), cfgFor(AZURE, '')).headers[
+        'api-key'
+      ],
+    ).toBeUndefined();
+  });
+
+  it('50. GitHub Models sends a bearer token and a namespaced model', () => {
+    const plan = GITHUB.buildRequest(
+      twoInlineImages(),
+      cfgFor(GITHUB, 'ghp_exampletoken1234567890'),
+    );
+    expect(plan.headers.Authorization).toBe(
+      'Bearer ghp_exampletoken1234567890',
+    );
+    expect(plan.headers['api-key']).toBeUndefined();
+    expect(plan.url).toBe(
+      'https://models.github.ai/inference/chat/completions',
+    );
+    // A bare 'gpt-4o' 404s on this endpoint; the default must carry the
+    // publisher prefix, and so must every suggestion.
+    expect(GITHUB.defaultModel.indexOf('/')).toBeGreaterThan(0);
+    GITHUB.modelSuggestions.forEach(m => {
+      expect(m.indexOf('/')).toBeGreaterThan(0);
+    });
+  });
+
+  it('51. DeepSeek asks for JSON mode and degrades to no directive at all', () => {
+    const cfg = cfgFor(DEEPSEEK, 'sk-deepseekexamplekey1234');
+    const primary = openaiBody(DEEPSEEK.buildRequest(twoInlineImages(), cfg));
+    expect(primary.response_format.type).toBe('json_object');
+    expect(primary.response_format.json_schema).toBeUndefined();
+
+    // Without a strict schema the model is told the field names instead, or
+    // it returns valid JSON of a shape parseCatalogueRecord rejects.
+    expect(systemText(primary)).toContain(
+      JSON.stringify(CATALOGUE_JSON_SCHEMA),
+    );
+
+    const fallback = JSON.parse(
+      DEEPSEEK.buildFallbackRequest(twoInlineImages(), cfg).body,
+    ) as RawNode;
+    expect(fallback.response_format).toBeUndefined();
+    const messages = fallback.messages as { content: string }[];
+    expect(messages[0].content).toContain(
+      JSON.stringify(CATALOGUE_JSON_SCHEMA),
+    );
+  });
+
+  it('52. every OpenAI-dialect provider shares the one parameter-drift retry', () => {
+    OPENAI_DIALECT.forEach(provider => {
+      const retry = provider.retryBody;
+      expect(retry).toBeDefined();
+      if (!retry) {
+        return;
+      }
+      const adapted = retry(
+        { model: 'm', temperature: 0.2, max_tokens: 4096 },
+        "Unsupported parameter: 'max_tokens'",
+      ) as RawNode | null;
+      expect(adapted).not.toBeNull();
+      if (adapted) {
+        expect(adapted.max_completion_tokens).toBe(4096);
+        expect(adapted.max_tokens).toBeUndefined();
+        expect(adapted.temperature).toBeUndefined();
+      }
+      // Never twice, and never for an unrelated 400.
+      expect(
+        retry({ model: 'm', max_completion_tokens: 4096 }, 'Unsupported value'),
+      ).toBeNull();
+      expect(retry({ model: 'm', max_tokens: 4096 }, 'content too large')).toBe(
+        null,
+      );
+    });
+  });
+
+  it('53. Azure reads its own per-tenant hosts as the provider, not a proxy', () => {
+    const own = (host: string) => ({
+      apiKey: 'k',
+      model: 'gpt-4o',
+      baseUrl: 'https://' + host + '/openai/v1',
+    });
+    expect(isProxyMode(own('kapoor.openai.azure.com'), AZURE)).toBe(false);
+    expect(isProxyMode(own('kapoor.services.ai.azure.com'), AZURE)).toBe(false);
+    // A lookalike suffix is not Microsoft.
+    expect(isProxyMode(own('notopenai.azure.com.example.net'), AZURE)).toBe(
+      true,
+    );
+    expect(isProxyMode(own('gateway.kapoors.com'), AZURE)).toBe(true);
+
+    // And because a real Azure endpoint is NOT proxy mode, a blank key there
+    // is still refused rather than read as "the proxy holds it".
+    expect(
+      configProblem(
+        {
+          apiKey: '',
+          model: 'gpt-4o',
+          baseUrl: own('a.openai.azure.com').baseUrl,
+        },
+        AZURE,
+      ),
+    ).not.toBe('');
+  });
+
+  it('54. refuses the Azure Base URL placeholder before it becomes a DNS error', () => {
+    const problem = configProblem(cfgFor(AZURE, 'k'), AZURE);
+    expect(AZURE.defaultBaseUrl).toContain(BASE_URL_PLACEHOLDER);
+    expect(problem).toContain(BASE_URL_PLACEHOLDER);
+    // A finished configuration passes.
+    expect(
+      configProblem(
+        {
+          apiKey: 'k',
+          model: 'gpt-4o',
+          baseUrl: 'https://kapoor.openai.azure.com/openai/v1',
+        },
+        AZURE,
+      ),
+    ).toBe('');
+  });
+
+  it('55. settings round-trip and redact every provider, not just two', () => {
+    const store = fakeStore(null);
+    const next = defaultSettings();
+    PROVIDER_IDS.forEach((id, i) => {
+      next.providers[id] = {
+        apiKey: 'key-for-' + id,
+        model: 'model-' + i,
+        baseUrl: 'https://proxy.kapoors.com/' + id + '/',
+      };
+    });
+    next.activeProvider = 'deepseek';
+    saveSettings(next, store);
+
+    const back = loadSettings(store);
+    expect(back.activeProvider).toBe('deepseek');
+    PROVIDER_IDS.forEach((id, i) => {
+      expect(back.providers[id].apiKey).toBe('key-for-' + id);
+      expect(back.providers[id].model).toBe('model-' + i);
+      // Trailing slash normalised on save, for every provider.
+      expect(back.providers[id].baseUrl).toBe(
+        'https://proxy.kapoors.com/' + id,
+      );
+    });
+
+    // Every configured key is masked, whichever provider holds it.
+    const echoed = PROVIDER_IDS.map(id => 'key-for-' + id).join(' and ');
+    const masked = redactSecrets(echoed, back);
+    PROVIDER_IDS.forEach(id => {
+      expect(masked).not.toContain('key-for-' + id);
+    });
+
+    // And a GitHub token shape is masked even when it was never configured.
+    expect(
+      redactSecrets('token ghp_A1b2C3d4E5f6G7h8 leaked', defaultSettings()),
+    ).not.toContain('ghp_A1b2C3d4E5f6G7h8');
+    expect(
+      redactSecrets(
+        'token github_pat_11ABCDEFG0abcdefghij leaked',
+        defaultSettings(),
+      ),
+    ).not.toContain('github_pat_11ABCDEFG0abcdefghij');
+  });
+
+  it('56. a stored blob written before these providers existed still loads', () => {
+    // Exactly what v1 of this feature wrote: two providers, nothing else.
+    const store = fakeStore(
+      JSON.stringify({
+        activeProvider: 'openai',
+        providers: {
+          gemini: {
+            apiKey: 'g',
+            model: 'gemini-2.5-flash',
+            baseUrl: 'https://g',
+          },
+          openai: { apiKey: 'o', model: 'gpt-4o', baseUrl: 'https://o' },
+        },
+        imageMaxEdgePx: 1600,
+        maxOutputTokens: 8192,
+        requestTimeoutMs: 120000,
+      }),
+    );
+
+    const loaded = loadSettings(store);
+    expect(loaded.providers.gemini.apiKey).toBe('g');
+    expect(loaded.providers.openai.apiKey).toBe('o');
+    // The three that were absent come back at their defaults, fully formed,
+    // rather than undefined — which is what would crash the settings form.
+    ([DEEPSEEK, GITHUB, AZURE] as AiProvider[]).forEach(provider => {
+      const cfg = loaded.providers[provider.id];
+      expect(cfg).toBeDefined();
+      expect(cfg.apiKey).toBe('');
+      expect(cfg.model).toBe(provider.defaultModel);
+      expect(cfg.baseUrl).toBe(provider.defaultBaseUrl);
+    });
   });
 });
