@@ -264,6 +264,10 @@ export interface AiProvider {
   /** True when the endpoint accepts only JPEG data URLs, so every image must
    *  be re-encoded even when it already fits. */
   requiresJpeg?: boolean;
+  /** The path an OpenAI-dialect provider is posted to, appended to the Base
+   *  URL. '/chat/completions' everywhere except the gallery's gateway, whose
+   *  cataloguing route lives at '/catalogue/completions'. */
+  completionsPath?: string;
   /** A ceiling on reply length that the endpoint itself imposes and that no
    *  request field can raise. The gateway ignores max_tokens and caps every
    *  reply at 4096, so the truncation advice must not send the dealer to a

@@ -1658,7 +1658,17 @@ describe('providers — the wider table', () => {
         cfgFor(provider, 'k'),
       );
       expect(plan.method).toBe('POST');
-      expect(plan.url.indexOf('/chat/completions')).toBeGreaterThan(0);
+      // /chat/completions for every direct provider; the gateway's own
+      // cataloguing route for the gateway.
+      const path =
+        provider.id === 'trimurti'
+          ? '/catalogue/completions'
+          : '/chat/completions';
+      expect(provider.completionsPath).toBe(path);
+      expect(plan.url.indexOf(path)).toBeGreaterThan(0);
+      expect(plan.url.indexOf('/chat/completions')).toBe(
+        provider.id === 'trimurti' ? -1 : plan.url.indexOf(path),
+      );
       expect(plan.headers['Content-Type']).toBe('application/json');
 
       // The shared body: the model, the ceiling, and one labelled part per
@@ -1958,15 +1968,14 @@ describe('providers — corrections', () => {
   });
 
   it('58. structuredOutput is declared per provider (test 72 covers what it seeds)', () => {
-    // DeepSeek asks for JSON mode; the gateway drops response_format
-    // entirely. Neither is schema-constrained by the endpoint.
+    // DeepSeek asks for JSON mode and is never schema-constrained. The
+    // gateway's cataloguing route enforces the schema on GPT and the Claude
+    // 5 family and refuses it for free elsewhere, so it is declared true
+    // and the per-run fallback decides the rest.
     expect(DEEPSEEK.structuredOutput).toBe(false);
-    expect(TRIMURTI.structuredOutput).toBe(false);
-    PROVIDER_IDS.filter(id => id !== 'deepseek' && id !== 'trimurti').forEach(
-      id => {
-        expect(PROVIDERS[id].structuredOutput).toBe(true);
-      },
-    );
+    PROVIDER_IDS.filter(id => id !== 'deepseek').forEach(id => {
+      expect(PROVIDERS[id].structuredOutput).toBe(true);
+    });
   });
 
   it('59. a prompt filtered as a 400 reads as blocked, not as a bad request', () => {
@@ -2065,7 +2074,7 @@ describe('providers — trimurti gateway', () => {
     const cfg = cfgFor(TRIMURTI, 'a-passphrase-of-at-least-32-characters!!');
     const plan = TRIMURTI.buildRequest(twoInlineImages(), cfg);
     expect(plan.url).toBe(
-      'https://lbiabcdeojolvxezytkw.supabase.co/functions/v1/trimurti-gateway/chat/completions',
+      'https://lbiabcdeojolvxezytkw.supabase.co/functions/v1/trimurti-gateway/catalogue/completions',
     );
     expect(plan.headers.Authorization).toBe(
       'Bearer a-passphrase-of-at-least-32-characters!!',
@@ -2075,14 +2084,22 @@ describe('providers — trimurti gateway', () => {
     const body = JSON.parse(plan.body) as RawNode;
     expect(body.model).toBe('google/gemini-3.5-flash-lite');
     expect(body.stream).toBe(false);
-    // The gateway drops response_format, so none is sent and the schema
-    // travels in the system prompt instead.
-    expect(body.response_format).toBeUndefined();
+    // The cataloguing route takes a strict schema, so it is sent first and
+    // the system prompt does not repeat it; the gateway's free 400 for the
+    // slots that cannot enforce it triggers the schema-in-prompt retry.
+    expect((body.response_format as RawNode).type).toBe('json_schema');
     const messages = body.messages as { role: string; content: unknown }[];
     expect(messages[0].role).toBe('system');
-    expect(String(messages[0].content)).toContain(
+    expect(String(messages[0].content)).not.toContain(
       JSON.stringify(CATALOGUE_JSON_SCHEMA),
     );
+    const retry = JSON.parse(
+      TRIMURTI.buildFallbackRequest(twoInlineImages(), cfg).body,
+    ) as RawNode;
+    expect(retry.response_format).toBeUndefined();
+    expect(
+      String((retry.messages as { content: unknown }[])[0].content),
+    ).toContain(JSON.stringify(CATALOGUE_JSON_SCHEMA));
     // Every suggested model carries a publisher prefix; a bare id 400s.
     TRIMURTI.modelSuggestions.forEach(m => {
       expect(m.indexOf('/')).toBeGreaterThan(0);
@@ -2128,7 +2145,7 @@ describe('providers — trimurti gateway', () => {
       expect(refused.kind).toBe('image');
       expect(refused.message).toContain(model);
     });
-    // The gateway's image-reading slots take them.
+    // The gateway's image-reading slots take them, on the cataloguing route.
     [
       'google/gemini-3.5-flash-lite',
       'openai/gpt-5.6-terra',
@@ -2136,7 +2153,7 @@ describe('providers — trimurti gateway', () => {
     ].forEach(model => {
       expect(
         TRIMURTI.buildRequest(twoInlineImages(), { ...cfg, model: model }).url,
-      ).toContain('/chat/completions');
+      ).toContain('/catalogue/completions');
     });
   });
 
@@ -2396,7 +2413,7 @@ describe('providers — trimurti gateway', () => {
     );
     expect(TRIMURTI.modelSuggestions).not.toContain('deepseek/deepseek-flash');
     expect(DEEPSEEK.modelSuggestions).not.toContain('deepseek-flash');
-    expect(TRIMURTI.outputTokenCap).toBe(4096);
+    expect(TRIMURTI.outputTokenCap).toBe(8192);
     PROVIDER_IDS.filter(id => id !== 'trimurti').forEach(id => {
       expect(PROVIDERS[id].outputTokenCap).toBeUndefined();
     });
@@ -2410,7 +2427,7 @@ describe('providers — trimurti gateway', () => {
       TRIMURTI.extractText(200, cutOff, cfgFor(TRIMURTI, 'k')),
     );
     expect(viaGateway.kind).toBe('truncated');
-    expect(viaGateway.message).toContain('4096');
+    expect(viaGateway.message).toContain('8192');
     expect(viaGateway.message).toContain('ignores "Max output tokens"');
     expect(viaGateway.message).not.toContain('Raise');
 
@@ -2511,12 +2528,18 @@ describe('providers — trimurti gateway', () => {
     ).toBe(true);
   });
 
-  it('72. a provider the endpoint never schema-constrains seeds the review caveat', async () => {
-    // Through the gateway there is no response_format to reject and so no
-    // fallback retry; the record must still arrive flagged as
-    // "not schema-constrained", because it never was.
+  it('72. the gateway route decides per slot whether the schema was enforced', async () => {
+    // Gemini through the gateway: the route answers a free 400 naming
+    // response_format, the driver retries once with the schema in the
+    // prompt, and the record arrives flagged "not schema-constrained".
     const record = recordFixture();
     const stub = stubFetch([
+      {
+        status: 400,
+        body: providerError(
+          'response_format is not enforced for model "google/gemini-3.5-flash-lite" on this gateway; omit it and describe the schema in the prompt.',
+        ),
+      },
       { status: 200, body: openaiOk(JSON.stringify(record)) },
     ]);
     const settings = settingsFixture(
@@ -2528,10 +2551,41 @@ describe('providers — trimurti gateway', () => {
     });
     expect(result.usedFallback).toBe(true);
     expect(result.record).toEqual(record);
-    expect(stub.calls).toHaveLength(1);
-    const body = JSON.parse(stub.calls[0].init.body as string) as RawNode;
-    expect(body.response_format).toBeUndefined();
-    expect(body.stream).toBe(false);
+    expect(stub.calls).toHaveLength(2);
+    const first = JSON.parse(stub.calls[0].init.body as string) as RawNode;
+    const second = JSON.parse(stub.calls[1].init.body as string) as RawNode;
+    expect(first.response_format).toBeDefined();
+    expect(second.response_format).toBeUndefined();
+    expect(second.stream).toBe(false);
+    expect(stub.calls[1].url).toContain('/catalogue/completions');
+
+    // GPT through the gateway: the schema is enforced upstream, one call,
+    // and the record is not flagged.
+    const enforced = stubFetch([
+      { status: 200, body: openaiOk(JSON.stringify(record)) },
+    ]);
+    settings.providers.trimurti.model = 'openai/gpt-5.6-terra';
+    const viaGpt = await runCatalogue('trimurti', settings, dataUrlRequest(), {
+      fetchImpl: enforced.impl,
+    });
+    expect(viaGpt.usedFallback).toBe(false);
+    expect(enforced.calls).toHaveLength(1);
+
+    // A gateway that predates the route answers 404, reported as such —
+    // never the chat route's limits in disguise.
+    const older = stubFetch([
+      {
+        status: 404,
+        body: providerError('No such endpoint: POST /catalogue/completions'),
+      },
+    ]);
+    const missing = await rejectedAiError(
+      runCatalogue('trimurti', settings, dataUrlRequest(), {
+        fetchImpl: older.impl,
+      }),
+    );
+    expect(missing.kind).toBe('not_found');
+    expect(older.calls).toHaveLength(1);
 
     // A direct, schema-constrained provider that never fell back stays false.
     const direct = stubFetch([
