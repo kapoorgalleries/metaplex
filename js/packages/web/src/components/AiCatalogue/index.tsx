@@ -17,7 +17,7 @@ import {
 import { PROVIDERS } from '../../ai/providers';
 import { configProblem, loadSettings, saveSettings } from '../../ai/settings';
 import { resolveImage } from '../../ai/image';
-import { runCatalogue } from '../../ai/client';
+import { probeGateway, runCatalogue } from '../../ai/client';
 import { MetadataPatch, buildPatch, recordToTraits } from '../../ai/apply';
 import { SettingsPanel } from './SettingsPanel';
 import { ReviewPanel } from './ReviewPanel';
@@ -65,6 +65,8 @@ export const AiCatalogueAssist = (props: {
   const [dealerNotes, setDealerNotes] = useState<string>('');
   const [details, setDetails] = useState<DetailImage[]>([]);
   const [expanded, setExpanded] = useState<boolean>(false);
+  const [probing, setProbing] = useState<boolean>(false);
+  const [probeResult, setProbeResult] = useState<string>('');
 
   const controllerRef = useRef<AbortController | null>(null);
   const runIdRef = useRef<number>(0);
@@ -76,6 +78,23 @@ export const AiCatalogueAssist = (props: {
   const hasImage = !!props.image || props.primaryFile !== undefined;
 
   const close = useCallback(() => setView('closed'), []);
+
+  /* The gateway's free GET /key — the same "Test connection" its own page
+   * offers. Reports which provider keys the gateway holds without spending
+   * anything, so a missing secret is found here rather than as a 503 inside
+   * a run. Only the gateway provider has such an endpoint. */
+  const probe = async () => {
+    setProbing(true);
+    setProbeResult('');
+    try {
+      const info = await probeGateway(settings);
+      setProbeResult('Connected — ' + info.label);
+    } catch (e) {
+      setProbeResult('Not connected — ' + errorMessage(e));
+    } finally {
+      setProbing(false);
+    }
+  };
 
   const cancel = useCallback(() => {
     if (controllerRef.current) {
@@ -407,7 +426,13 @@ export const AiCatalogueAssist = (props: {
                  * the modal leaves the key sitting in localStorage. */
                 setSettings(next);
                 saveSettings(next);
+                setProbeResult('');
               }}
+              onProbe={
+                settings.activeProvider === 'trimurti' ? probe : undefined
+              }
+              probing={probing}
+              probeResult={probeResult}
             />
             <Row justify="end" style={{ marginTop: 24 }}>
               <Button
