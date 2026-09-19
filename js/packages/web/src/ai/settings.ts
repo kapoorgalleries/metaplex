@@ -174,6 +174,18 @@ export function saveSettings(next: AiSettings, store?: SettingsStore): void {
   }
 }
 
+/** origin + pathname, trailing slash removed. Falls back to the trimmed raw
+ *  string when the URL does not parse, so an unparseable value still compares
+ *  equal to itself and configProblem stays the one place that reports it. */
+function canonicalEndpoint(url: string): string {
+  try {
+    const u = new URL(url);
+    return trimTrailingSlash(u.origin + u.pathname);
+  } catch (e) {
+    return trimTrailingSlash(url);
+  }
+}
+
 /** A non-default Base URL means the request is routed somewhere the dealer
  *  controls, which is the only place a key may legitimately be absent. */
 export function isProxyMode(
@@ -188,11 +200,14 @@ export function isProxyMode(
   if (provider.isOwnEndpoint) {
     return !provider.isOwnEndpoint(cfg.baseUrl);
   }
-  /* Otherwise compared in canonical form: a stray trailing slash on the
-   * default URL is still the default endpoint. */
+  /* Otherwise compared by where the request actually LANDS — origin plus
+   * path — not by whether the string is character-identical to the default.
+   * A raw-string compare made `https://api.openai.com/v1?x=1` read as a
+   * proxy, which accepts a blank key on a request going straight to the
+   * provider. A trailing slash is still the default endpoint. */
   return (
-    trimTrailingSlash(cfg.baseUrl) !==
-    trimTrailingSlash(provider.defaultBaseUrl)
+    canonicalEndpoint(cfg.baseUrl) !==
+    canonicalEndpoint(provider.defaultBaseUrl)
   );
 }
 
@@ -211,8 +226,13 @@ export function configProblem(
   }
   /* Azure ships with a placeholder hostname because there is no shared one.
    * Left in place it produces a DNS failure reported as a network error,
-   * which reads as "the feature is broken" rather than "finish the form". */
-  if (cfg.baseUrl.indexOf(BASE_URL_PLACEHOLDER) !== -1) {
+   * which reads as "the feature is broken" rather than "finish the form".
+   * Scoped to the provider whose default carries it: the token is otherwise
+   * a legal path segment, and a proxy of the dealer's own may contain it. */
+  if (
+    provider.defaultBaseUrl.indexOf(BASE_URL_PLACEHOLDER) !== -1 &&
+    cfg.baseUrl.indexOf(BASE_URL_PLACEHOLDER) !== -1
+  ) {
     return (
       'Replace ' +
       BASE_URL_PLACEHOLDER +

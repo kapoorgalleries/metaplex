@@ -1586,6 +1586,21 @@ function cfgFor(provider: AiProvider, apiKey: string): ProviderSettings {
 /** The OpenAI-dialect providers, which is every one except Gemini. */
 const OPENAI_DIALECT: AiProvider[] = [OPENAI, DEEPSEEK, GITHUB, AZURE];
 
+/** Those of them that can actually see a photograph. DeepSeek cannot. */
+const VISION_DIALECT: AiProvider[] = OPENAI_DIALECT.filter(
+  p => p.supportsImages,
+);
+
+/** What a text-only provider is limited to: the dealer's own notes. */
+function notesOnlyRequest(): CatalogueRequest {
+  return {
+    images: [],
+    dealerNotes: 'Gilt copper alloy, Newar, acquired 1998.',
+    maxOutputTokens: 4096,
+    temperature: 0.2,
+  };
+}
+
 describe('providers — the wider table', () => {
   it('46. PROVIDER_IDS lists every provider in the table exactly once', () => {
     const tableIds = Object.keys(PROVIDERS) as ProviderId[];
@@ -1620,8 +1635,8 @@ describe('providers — the wider table', () => {
     );
   });
 
-  it('48. every OpenAI-dialect provider posts to {base}/chat/completions', () => {
-    OPENAI_DIALECT.forEach(provider => {
+  it('48. every image-reading provider posts to {base}/chat/completions', () => {
+    VISION_DIALECT.forEach(provider => {
       const plan = provider.buildRequest(
         twoInlineImages(),
         cfgFor(provider, 'k'),
@@ -1690,7 +1705,7 @@ describe('providers — the wider table', () => {
 
   it('51. DeepSeek asks for JSON mode and degrades to no directive at all', () => {
     const cfg = cfgFor(DEEPSEEK, 'sk-deepseekexamplekey1234');
-    const primary = openaiBody(DEEPSEEK.buildRequest(twoInlineImages(), cfg));
+    const primary = openaiBody(DEEPSEEK.buildRequest(notesOnlyRequest(), cfg));
     expect(primary.response_format.type).toBe('json_object');
     expect(primary.response_format.json_schema).toBeUndefined();
 
@@ -1701,7 +1716,7 @@ describe('providers — the wider table', () => {
     );
 
     const fallback = JSON.parse(
-      DEEPSEEK.buildFallbackRequest(twoInlineImages(), cfg).body,
+      DEEPSEEK.buildFallbackRequest(notesOnlyRequest(), cfg).body,
     ) as RawNode;
     expect(fallback.response_format).toBeUndefined();
     const messages = fallback.messages as { content: string }[];
@@ -1721,12 +1736,16 @@ describe('providers — the wider table', () => {
         { model: 'm', temperature: 0.2, max_tokens: 4096 },
         "Unsupported parameter: 'max_tokens'",
       ) as RawNode | null;
-      expect(adapted).not.toBeNull();
-      if (adapted) {
-        expect(adapted.max_completion_tokens).toBe(4096);
-        expect(adapted.max_tokens).toBeUndefined();
-        expect(adapted.temperature).toBeUndefined();
+      /* Asserted through a non-null local rather than inside `if (adapted)`:
+       * a truthiness guard here silently skips all three assertions on the
+       * exact regression they exist to catch. */
+      if (adapted === null) {
+        throw new Error(provider.id + ': retryBody refused a drift message');
       }
+      const next: RawNode = adapted;
+      expect(next.max_completion_tokens).toBe(4096);
+      expect(next.max_tokens).toBeUndefined();
+      expect(next.temperature).toBeUndefined();
       // Never twice, and never for an unrelated 400.
       expect(
         retry({ model: 'm', max_completion_tokens: 4096 }, 'Unsupported value'),
@@ -1745,6 +1764,16 @@ describe('providers — the wider table', () => {
     });
     expect(isProxyMode(own('kapoor.openai.azure.com'), AZURE)).toBe(false);
     expect(isProxyMode(own('kapoor.services.ai.azure.com'), AZURE)).toBe(false);
+    expect(isProxyMode(own('kapoor.cognitiveservices.azure.com'), AZURE)).toBe(
+      false,
+    );
+    expect(isProxyMode(own('kapoor.openai.azure.us'), AZURE)).toBe(false);
+    expect(isProxyMode(own('kapoor.openai.azure.cn'), AZURE)).toBe(false);
+    // A fully-qualified trailing dot is the same host.
+    expect(isProxyMode(own('kapoor.openai.azure.com.'), AZURE)).toBe(false);
+    expect(
+      isProxyMode(own('notcognitiveservices.azure.com.example.net'), AZURE),
+    ).toBe(true);
     // A lookalike suffix is not Microsoft.
     expect(isProxyMode(own('notopenai.azure.com.example.net'), AZURE)).toBe(
       true,
@@ -1856,5 +1885,129 @@ describe('providers — the wider table', () => {
       expect(cfg.model).toBe(provider.defaultModel);
       expect(cfg.baseUrl).toBe(provider.defaultBaseUrl);
     });
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* Corrections found by coordinating with the gallery's own            */
+/* trimurti-gateway (kapoorgalleries/sb1-vuxiwzek), which calls these  */
+/* same APIs in production, and by the adversarial review of 3f2e9f4.  */
+/* ------------------------------------------------------------------ */
+
+describe('providers — corrections', () => {
+  it('57. DeepSeek refuses photographs instead of posting ones it cannot see', () => {
+    expect(DEEPSEEK.supportsImages).toBe(false);
+
+    // The gateway flattens every image part to a placeholder string before
+    // forwarding to DeepSeek, so a request that "worked" would describe an
+    // artwork the model never saw. Both builders must refuse.
+    const cfg = cfgFor(DEEPSEEK, 'sk-x');
+    const primary = thrownAiError(() =>
+      DEEPSEEK.buildRequest(twoInlineImages(), cfg),
+    );
+    expect(primary.kind).toBe('image');
+    expect(primary.message).toContain('text-only');
+    expect(
+      thrownAiError(() => DEEPSEEK.buildFallbackRequest(twoInlineImages(), cfg))
+        .kind,
+    ).toBe('image');
+
+    // Text-only work still goes through.
+    expect(DEEPSEEK.buildRequest(notesOnlyRequest(), cfg).url).toContain(
+      '/chat/completions',
+    );
+
+    // Every other provider in the table reads photographs.
+    PROVIDER_IDS.filter(id => id !== 'deepseek').forEach(id => {
+      expect(PROVIDERS[id].supportsImages).toBe(true);
+    });
+  });
+
+  it('58. structuredOutput is declared, and seeds the review panel caveat', () => {
+    // Only DeepSeek is never schema-constrained by the endpoint.
+    expect(DEEPSEEK.structuredOutput).toBe(false);
+    PROVIDER_IDS.filter(id => id !== 'deepseek').forEach(id => {
+      expect(PROVIDERS[id].structuredOutput).toBe(true);
+    });
+  });
+
+  it('59. a prompt filtered as a 400 reads as blocked, not as a bad request', () => {
+    // Azure and GitHub report a filtered prompt this way; OpenAI reports the
+    // same outcome as finish_reason on a 200. Wrathful and yab-yum
+    // iconography is ordinary stock here, so the two must read alike.
+    const byCode = thrownAiError(() =>
+      AZURE.extractText(
+        400,
+        { error: { code: 'content_filter', message: 'blocked' } },
+        cfgFor(AZURE, 'k'),
+      ),
+    );
+    expect(byCode.kind).toBe('blocked');
+
+    const byMessage = thrownAiError(() =>
+      GITHUB.extractText(
+        400,
+        {
+          error: {
+            message:
+              'The response was filtered due to the prompt triggering our content management policy.',
+          },
+        },
+        cfgFor(GITHUB, 'k'),
+      ),
+    );
+    expect(byMessage.kind).toBe('blocked');
+
+    // An ordinary 400 is still a bad request — otherwise client.ts could
+    // never reach the structured-output fallback.
+    expect(
+      thrownAiError(() =>
+        AZURE.extractText(
+          400,
+          { error: { message: "Unknown parameter: 'response_format'." } },
+          cfgFor(AZURE, 'k'),
+        ),
+      ).kind,
+    ).toBe('bad_request');
+  });
+
+  it('60. a query string on a default Base URL is not proxy mode', () => {
+    // Compared by where the request lands, not by string identity: the raw
+    // compare accepted a blank key on a request going straight to OpenAI.
+    PROVIDER_IDS.filter(id => id !== 'azure').forEach(id => {
+      const provider = PROVIDERS[id];
+      const withQuery: ProviderSettings = {
+        apiKey: '',
+        model: provider.defaultModel,
+        baseUrl: provider.defaultBaseUrl + '?x=1',
+      };
+      expect(isProxyMode(withQuery, provider)).toBe(false);
+      expect(configProblem(withQuery, provider)).not.toBe('');
+
+      // A genuinely different host is still proxy mode.
+      expect(
+        isProxyMode(
+          { apiKey: '', model: 'm', baseUrl: 'https://gateway.kapoors.com/v1' },
+          provider,
+        ),
+      ).toBe(true);
+    });
+  });
+
+  it('61. the Base URL placeholder is only checked for the provider that has one', () => {
+    // 'YOUR-RESOURCE' is a legal path segment; only Azure's default carries it.
+    expect(
+      configProblem(
+        {
+          apiKey: 'k',
+          model: 'gpt-5.6-terra',
+          baseUrl: 'https://proxy.kapoors.com/YOUR-RESOURCE/v1',
+        },
+        OPENAI,
+      ),
+    ).toBe('');
+    expect(configProblem(cfgFor(AZURE, 'k'), AZURE)).toContain(
+      BASE_URL_PLACEHOLDER,
+    );
   });
 });

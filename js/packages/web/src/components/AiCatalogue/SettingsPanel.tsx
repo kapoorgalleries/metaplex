@@ -25,7 +25,7 @@ const KEY_WARNING: string[] = [
 ];
 
 const PROXY_NOTE =
-  'Requests go to your proxy. Leave the key blank if the proxy supplies it — then no key is stored in this browser at all.';
+  'Requests for this provider go to your proxy. Leave the key blank if the proxy supplies it — then no key is stored for this provider.';
 
 const BASE_URL_HELP =
   'Point this at a proxy you control to keep the key off this machine. ';
@@ -160,9 +160,13 @@ export const SettingsPanel = (props: {
         </Radio.Group>
       </label>
 
-      {proxyMode ? (
-        <div className="ai-proxy-note">{PROXY_NOTE}</div>
-      ) : (
+      {proxyMode ? <div className="ai-proxy-note">{PROXY_NOTE}</div> : null}
+
+      {/* Shown whenever ANY provider holds a key, not just the active one.
+          Gated on the active provider alone, the panel told a dealer sitting
+          on a proxy-mode provider that "no key is stored in this browser at
+          all" while four other providers' keys sat in local storage. */}
+      {!proxyMode || anyKeyStored ? (
         <div className="ai-key-warning">
           {KEY_WARNING.map((paragraph, i) => (
             <p key={i} style={{ marginBottom: 0 }}>
@@ -170,7 +174,7 @@ export const SettingsPanel = (props: {
             </p>
           ))}
         </div>
-      )}
+      ) : null}
 
       {provider.note === '' ? null : (
         <div className="ai-proxy-note">{provider.note}</div>

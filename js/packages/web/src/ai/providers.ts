@@ -144,6 +144,31 @@ export function mapStatus(
   return aiError('server', 'Unexpected status ' + status + '.', opts);
 }
 
+/** Azure and GitHub Models report a filtered prompt as a 400 carrying this
+ *  code, where OpenAI reports it as finish_reason 'content_filter' on a 200.
+ *  Same outcome, two arrival shapes; this is what lets both read alike.
+ *  Tantric and wrathful iconography is ordinary stock here, so the
+ *  distinction between "blocked" and "malformed request" is not academic. */
+function isContentFilter(body: unknown): boolean {
+  const wrapper = body as
+    | { error?: { code?: unknown; message?: unknown } }
+    | null
+    | undefined;
+  const err = wrapper ? wrapper.error : undefined;
+  if (!err) {
+    return false;
+  }
+  if (typeof err.code === 'string' && /content[_ ]?filter/i.test(err.code)) {
+    return true;
+  }
+  return (
+    typeof err.message === 'string' &&
+    /content management policy|content[_ ]?filter|responsible ai/i.test(
+      err.message,
+    )
+  );
+}
+
 /** Every provider here reports failures as `{ error: { message } }`. */
 function providerErrorMessage(body: unknown): string {
   const wrapper = body as { error?: { message?: unknown } } | null | undefined;
@@ -275,6 +300,8 @@ export const GEMINI: AiProvider = {
     'gemini-2.5-pro',
   ],
   supportsRemoteImageUrl: false,
+  supportsImages: true,
+  structuredOutput: true,
   modelLabel: 'Model',
   keyLabel: 'API key',
   baseUrlHelp:
@@ -516,6 +543,8 @@ interface OpenAiCompatible {
   defaultBaseUrl: string;
   modelSuggestions: string[];
   supportsRemoteImageUrl: boolean;
+  /** Omit for a provider that reads photographs; false for a text-only one. */
+  supportsImages?: boolean;
   modelLabel: string;
   keyLabel: string;
   baseUrlHelp: string;
@@ -529,6 +558,22 @@ interface OpenAiCompatible {
 
 function openAiCompatible(spec: OpenAiCompatible): AiProvider {
   const shortLabel = PROVIDER_LABELS[spec.id];
+  const supportsImages = spec.supportsImages !== false;
+
+  /** A text-only family must refuse the photographs rather than post them:
+   *  the gallery's own trimurti-gateway flattens them to
+   *  "[photo attached — not visible to this model]", so the model would
+   *  describe an artwork it never saw. */
+  function requireImageSupport(req: CatalogueRequest): void {
+    if (!supportsImages && req.images.length > 0) {
+      throw aiError(
+        'image',
+        shortLabel +
+          ' cannot read photographs — it is a text-only model family, so an image sent to it is dropped before the model sees it. Switch provider to catalogue from a photograph.',
+        { providerId: spec.id },
+      );
+    }
+  }
 
   const provider: AiProvider = {
     id: spec.id,
@@ -538,12 +583,15 @@ function openAiCompatible(spec: OpenAiCompatible): AiProvider {
     defaultBaseUrl: spec.defaultBaseUrl,
     modelSuggestions: spec.modelSuggestions,
     supportsRemoteImageUrl: spec.supportsRemoteImageUrl,
+    supportsImages: supportsImages,
+    structuredOutput: spec.primaryMode === 'schema',
     modelLabel: spec.modelLabel,
     keyLabel: spec.keyLabel,
     baseUrlHelp: spec.baseUrlHelp,
     note: spec.note,
 
     buildRequest(req: CatalogueRequest, cfg: ProviderSettings): HttpPlan {
+      requireImageSupport(req);
       return openaiPlan(req, cfg, spec.auth, spec.primaryMode);
     },
 
@@ -551,11 +599,20 @@ function openAiCompatible(spec: OpenAiCompatible): AiProvider {
       req: CatalogueRequest,
       cfg: ProviderSettings,
     ): HttpPlan {
+      requireImageSupport(req);
       return openaiPlan(req, cfg, spec.auth, spec.fallbackMode);
     },
 
     extractText(status: number, body: unknown, cfg: ProviderSettings): string {
       if (status !== 200) {
+        if (status === 400 && isContentFilter(body)) {
+          throw aiError(
+            'blocked',
+            shortLabel +
+              ' blocked this image on its content filter. Try another provider, or a different photograph.',
+            { providerId: spec.id, status: status },
+          );
+        }
         throw mapStatus(status, providerErrorMessage(body), spec.id, cfg.model);
       }
 
@@ -612,12 +669,14 @@ export const OPENAI: AiProvider = openAiCompatible({
   id: 'openai',
   label: 'OpenAI (ChatGPT)',
   keyUrl: 'https://platform.openai.com/api-keys',
-  // Not a gpt-5-family id on purpose: those reject a non-default temperature
-  // and reject max_tokens, so such a default would 400 on the first call.
-  // openaiRetryBody is what lets one be typed into the settings field.
-  defaultModel: 'gpt-4o',
+  // Ids taken from the model allowlist the gallery's own trimurti-gateway
+  // runs against this API (sb1-vuxiwzek, supabase/functions/trimurti-gateway),
+  // where gpt-4o and gpt-5 are recorded as legacy ALIASES of these. The
+  // reasoning family rejects a non-default temperature and renames
+  // max_tokens; openaiRetryBody is what absorbs that on the first 400.
+  defaultModel: 'gpt-5.6-terra',
   defaultBaseUrl: 'https://api.openai.com/v1',
-  modelSuggestions: ['gpt-4o', 'gpt-4o-mini', 'gpt-4.1', 'gpt-5'],
+  modelSuggestions: ['gpt-5.6-terra', 'gpt-5.6-sol', 'gpt-5.6-luna', 'gpt-4o'],
   supportsRemoteImageUrl: true,
   modelLabel: 'Model',
   keyLabel: 'API key',
@@ -637,13 +696,20 @@ export const DEEPSEEK: AiProvider = openAiCompatible({
   id: 'deepseek',
   label: 'DeepSeek',
   keyUrl: 'https://platform.deepseek.com/api_keys',
-  // deepseek-chat and deepseek-reasoner were retired as aliases on
-  // 2026-07-24; deepseek-flash is the current general model and the only
-  // suggestion here that reads photographs.
-  defaultModel: 'deepseek-flash',
-  defaultBaseUrl: 'https://api.deepseek.com/v1',
-  modelSuggestions: ['deepseek-flash', 'deepseek-v4-flash', 'deepseek-v4-pro'],
-  supportsRemoteImageUrl: true,
+  // Ids and endpoint taken from the gallery's own trimurti-gateway, which
+  // calls this API in production: it posts to api.deepseek.com/chat/completions
+  // and records deepseek-chat/deepseek-reasoner as legacy aliases of the v4
+  // pair below.
+  defaultModel: 'deepseek-v4-flash',
+  defaultBaseUrl: 'https://api.deepseek.com',
+  modelSuggestions: ['deepseek-v4-flash', 'deepseek-v4-pro'],
+  supportsRemoteImageUrl: false,
+  // The whole input to this feature is a photograph, and DeepSeek cannot see
+  // one. trimurti-gateway flattens every image part to the literal string
+  // "[photo attached — not visible to this model]" before forwarding, so a
+  // request that looked like it worked would describe an artwork the model
+  // never saw. buildRequest therefore refuses images outright.
+  supportsImages: false,
   modelLabel: 'Model',
   keyLabel: 'API key',
   baseUrlHelp:
@@ -654,7 +720,7 @@ export const DEEPSEEK: AiProvider = openAiCompatible({
   // providers fall back to, and parseCatalogueRecord rejects a wrong shape
   // either way — but a mis-shaped reply costs a call rather than being
   // refused by the endpoint up front.
-  note: 'DeepSeek is asked for JSON mode rather than a strict schema, so a reply of the wrong shape is caught here rather than refused by the endpoint. Reasoner-family models do not read images — keep this on deepseek-flash for photographs.',
+  note: 'DeepSeek is text-only: it cannot read photographs, so it cannot catalogue from an image. It is kept here for text-only work from your own notes. It is also asked for JSON mode rather than a strict schema, so a reply of the wrong shape is caught here rather than refused by the endpoint.',
   auth: 'bearer',
   primaryMode: 'json',
   fallbackMode: 'none',
@@ -693,9 +759,14 @@ export const GITHUB: AiProvider = openAiCompatible({
 /* Azure OpenAI (Microsoft Foundry)                                    */
 /* ------------------------------------------------------------------ */
 
-/** Microsoft's two first-party hostnames for this API. Any other host means
- *  the dealer has pointed the Base URL at something of their own. */
-const AZURE_OWN_HOSTS = /(^|\.)(openai\.azure\.com|services\.ai\.azure\.com)$/i;
+/** Microsoft's first-party hostnames for this API, across the commercial and
+ *  sovereign clouds. Any other host means the dealer has pointed the Base URL
+ *  at something of their own. Getting this list short is not a cosmetic
+ *  problem: a first-party host missing from it reads as proxy mode, which
+ *  suppresses the stored-key warning and accepts a blank key on a request
+ *  that goes straight to Microsoft. */
+const AZURE_OWN_HOSTS =
+  /(^|\.)(openai\.azure\.(com|us|cn)|(services\.ai|cognitiveservices)\.azure\.(com|us|cn))$/i;
 
 export const AZURE: AiProvider = openAiCompatible({
   id: 'azure',
@@ -719,7 +790,8 @@ export const AZURE: AiProvider = openAiCompatible({
   fallbackMode: 'json',
   isOwnEndpoint(baseUrl: string): boolean {
     try {
-      return AZURE_OWN_HOSTS.test(new URL(baseUrl).hostname);
+      // A fully-qualified name ending in a root dot is the same host.
+      return AZURE_OWN_HOSTS.test(new URL(baseUrl).hostname.replace(/\.$/, ''));
     } catch (e) {
       // An unparseable URL is configProblem's business, not this test's.
       return true;

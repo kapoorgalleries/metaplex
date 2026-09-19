@@ -233,6 +233,14 @@ export interface AiProvider {
   modelSuggestions: string[];
   /** False for Gemini: it cannot fetch a remote image URL itself. */
   supportsRemoteImageUrl: boolean;
+  /** False for a text-only model family. This feature's whole input is a
+   *  photograph, so a provider that cannot see one must say so rather than
+   *  post images that are silently dropped or rejected. */
+  supportsImages: boolean;
+  /** True when buildRequest asks the endpoint to enforce the schema. False
+   *  means the shape is only requested in the prompt and checked here, which
+   *  the review panel must disclose. */
+  structuredOutput: boolean;
   /** What the provider calls the model field. Azure addresses a *deployment*
    *  you named yourself, not a published model id, and mislabelling it sends
    *  people hunting for a model list that will not help them. */

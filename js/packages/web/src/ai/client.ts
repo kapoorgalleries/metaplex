@@ -176,7 +176,11 @@ export function runCatalogue(
 
   async function run(): Promise<CatalogueResult> {
     let plan = provider.buildRequest(req, cfg);
-    let usedFallback = false;
+    /* Seeded from the provider, not from whether a retry happened: DeepSeek
+     * never asks the endpoint to enforce the schema, so without this the one
+     * provider that is NEVER schema-constrained is the only one whose record
+     * carries no "not schema-constrained" caveat in the review panel. */
+    let usedFallback = !provider.structuredOutput;
     let text: string;
 
     try {
