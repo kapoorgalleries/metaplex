@@ -252,7 +252,13 @@ export function configProblem(
   // A blank key against a CUSTOM Base URL is proxy mode: valid, and the only
   // configuration in which no secret exists in the browser at all.
   if (cfg.apiKey === '' && !isProxyMode(cfg, provider)) {
-    return 'Enter an API key, or point the Base URL at a proxy that holds the key.';
+    // Named as the form labels it: "Enter an API key" on a panel whose field
+    // says "Access key" sends the dealer looking for a field that is not there.
+    return (
+      'Enter the ' +
+      provider.keyLabel +
+      ', or point the Base URL at a proxy that holds it.'
+    );
   }
   return '';
 }

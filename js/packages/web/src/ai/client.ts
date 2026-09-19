@@ -309,29 +309,63 @@ export function probeGateway(
       signal.removeEventListener('abort', onAbort);
     }
   };
+  const stoppedBy = (): AiError | null => {
+    if (cancelled) {
+      return aiError('aborted', '', { providerId: 'trimurti' });
+    }
+    if (timedOut) {
+      return aiError(
+        'timeout',
+        'No response after ' + settings.requestTimeoutMs / 1000 + 's.',
+        { providerId: 'trimurti' },
+      );
+    }
+    return null;
+  };
 
-  return doFetch(joinUrl(cfg.baseUrl, '/key'), {
+  /* Refused before any request leaves: a Base URL that does not parse would
+   * make fetch resolve it against the page's own origin and send the access
+   * key there, and a signal already aborted has nothing to probe. The form
+   * disables the button on a configuration problem too; this is the layer
+   * that must hold whatever the form does. */
+  let url: string;
+  try {
+    new URL(cfg.baseUrl);
+    url = joinUrl(cfg.baseUrl, '/key');
+  } catch (e) {
+    release();
+    return Promise.reject(
+      aiError('bad_request', 'Base URL is not a valid URL.', {
+        providerId: 'trimurti',
+      }),
+    );
+  }
+  const early = stoppedBy();
+  if (early) {
+    release();
+    return Promise.reject(early);
+  }
+
+  return doFetch(url, {
     method: 'GET',
     headers: headers,
     signal: ctl.signal,
   })
     .catch(() => {
-      if (cancelled) {
-        throw aiError('aborted', '', { providerId: 'trimurti' });
-      }
-      if (timedOut) {
-        throw aiError(
-          'timeout',
-          'No response after ' + settings.requestTimeoutMs / 1000 + 's.',
-          { providerId: 'trimurti' },
-        );
-      }
-      throw networkError('trimurti', cfg.baseUrl);
+      throw stoppedBy() || networkError('trimurti', cfg.baseUrl);
     })
     .then(res =>
       res
         .json()
-        .catch(() => null)
+        .catch(() => {
+          /* A timeout or cancel that lands during the body read must not
+           * masquerade as "answered, but not like a gateway". */
+          const stop = stoppedBy();
+          if (stop) {
+            throw stop;
+          }
+          return null;
+        })
         .then((body: unknown) => {
           if (res.status !== 200) {
             const wrapper = body as { error?: { message?: unknown } } | null;

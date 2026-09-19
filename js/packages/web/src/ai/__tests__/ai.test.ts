@@ -1941,13 +1941,23 @@ describe('providers — corrections', () => {
     expect(DEEPSEEK.buildRequest(notesOnlyRequest(), pro).url).toContain(
       '/chat/completions',
     );
+    // The reasoner half of the family is refused too — a regexp narrowed to
+    // Pro alone would let a photograph through to a model that drops it.
+    expect(
+      thrownAiError(() =>
+        DEEPSEEK.buildRequest(twoInlineImages(), {
+          ...flash,
+          model: 'deepseek-reasoner',
+        }),
+      ).kind,
+    ).toBe('image');
 
     PROVIDER_IDS.forEach(id => {
       expect(PROVIDERS[id].supportsImages).toBe(true);
     });
   });
 
-  it('58. structuredOutput is declared, and seeds the review panel caveat', () => {
+  it('58. structuredOutput is declared per provider (test 72 covers what it seeds)', () => {
     // DeepSeek asks for JSON mode; the gateway drops response_format
     // entirely. Neither is schema-constrained by the endpoint.
     expect(DEEPSEEK.structuredOutput).toBe(false);
@@ -2094,7 +2104,7 @@ describe('providers — trimurti gateway', () => {
     });
   });
 
-  it('64. carries the gateway image and model limits into the pipeline', () => {
+  it('64. declares the gateway image limits and refuses its text-only slots', () => {
     expect(TRIMURTI.supportsRemoteImageUrl).toBe(false);
     expect(TRIMURTI.requiresJpeg).toBe(true);
     expect(TRIMURTI.maxImageEdgePx).toBe(1280);
@@ -2316,6 +2326,54 @@ describe('providers — trimurti gateway', () => {
     );
     ctl.abort();
     expect((await pending).kind).toBe('aborted');
+
+    // A signal already aborted, and a Base URL that does not parse, never
+    // reach fetch at all — the second would resolve against the page's own
+    // origin and carry the access key there.
+    const spy = stubFetch([{ status: 200, body: {} }]);
+    const gone = new AbortController();
+    gone.abort();
+    expect(
+      (
+        await rejectedAiError(
+          probeGateway(settings, { fetchImpl: spy.impl, signal: gone.signal }),
+        )
+      ).kind,
+    ).toBe('aborted');
+    settings.providers.trimurti.baseUrl = 'trimurti-gateway';
+    const bad = await rejectedAiError(
+      probeGateway(settings, { fetchImpl: spy.impl }),
+    );
+    expect(bad.kind).toBe('bad_request');
+    expect(bad.message).toContain('not a valid URL');
+    expect(spy.calls).toHaveLength(0);
+    settings.providers.trimurti.baseUrl = TRIMURTI.defaultBaseUrl;
+
+    // A timeout that lands while the BODY is being read is still a timeout,
+    // not "answered, but not like a gateway".
+    const slowBody = ((_input: RequestInfo, init?: RequestInit) =>
+      Promise.resolve({
+        status: 200,
+        ok: true,
+        json: () =>
+          new Promise<unknown>((_resolve, reject) => {
+            const s = init ? init.signal : undefined;
+            if (s) {
+              s.addEventListener('abort', () => reject(new Error('aborted')));
+            }
+          }),
+      } as unknown as Response)) as typeof fetch;
+    expect(
+      (await rejectedAiError(probeGateway(settings, { fetchImpl: slowBody })))
+        .kind,
+    ).toBe('timeout');
+
+    // A blank key sends no Authorization header at all (proxy mode).
+    settings.requestTimeoutMs = 120000;
+    settings.providers.trimurti.apiKey = '';
+    seen.length = 0;
+    await probeGateway(settings, { fetchImpl });
+    expect(seen[0].auth).toBe('');
   });
 
   it('68. Gemini, DeepSeek and gateway defaults are the ids the DEPLOYED gateway runs', () => {
@@ -2330,8 +2388,14 @@ describe('providers — trimurti gateway', () => {
     expect(DEEPSEEK.defaultBaseUrl).toBe('https://api.deepseek.com');
 
     expect(TRIMURTI.defaultModel).toBe('google/gemini-3.5-flash-lite');
-    expect(TRIMURTI.modelSuggestions).toContain('deepseek/deepseek-v4-flash');
+    // The gateway's DeepSeek slots are text-only and every run here carries a
+    // photograph, so the suggestions offer no dead end — and no id that
+    // exists only on the unmerged chain.
+    expect(TRIMURTI.modelSuggestions.some(m => /^deepseek\//.test(m))).toBe(
+      false,
+    );
     expect(TRIMURTI.modelSuggestions).not.toContain('deepseek/deepseek-flash');
+    expect(DEEPSEEK.modelSuggestions).not.toContain('deepseek-flash');
     expect(TRIMURTI.outputTokenCap).toBe(4096);
     PROVIDER_IDS.filter(id => id !== 'trimurti').forEach(id => {
       expect(PROVIDERS[id].outputTokenCap).toBeUndefined();

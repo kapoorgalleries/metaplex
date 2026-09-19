@@ -54,7 +54,7 @@ function positive(raw: number, fallback: number): number {
 }
 
 const SESSION_KEY_NOTE =
-  "This access key is held only while this form is open and is never written to this browser — the same policy as the gateway's own page. Enter it again after a reload, or after leaving this step of the mint form.";
+  "This access key is held in this page's memory alone and is never written to this browser — the same policy as the gateway's own page. It survives closing this panel, but not a reload or leaving this step of the mint form.";
 
 export const SettingsPanel = (props: {
   value: AiSettings;
@@ -268,10 +268,13 @@ export const SettingsPanel = (props: {
           not, and /key is how you find out without spending anything). */}
       {props.onProbe ? (
         <div className="action-field">
+          {/* Gated on the same configuration check as a run: a Base URL that
+              does not parse would resolve against this page's own origin and
+              carry the access key there. probeGateway refuses that too. */}
           <Button
             type="link"
             style={{ paddingLeft: 0 }}
-            disabled={props.probing}
+            disabled={props.probing || problem !== ''}
             onClick={props.onProbe}
           >
             {props.probing ? 'Testing…' : 'Test connection'}
@@ -297,7 +300,16 @@ export const SettingsPanel = (props: {
               emit({ imageMaxEdgePx: positive(val, value.imageMaxEdgePx) })
             }
           />
-          <span className="field-info">{IMAGE_HELP}</span>
+          <span className="field-info">
+            {IMAGE_HELP +
+              (provider.maxImageEdgePx === undefined
+                ? ''
+                : ' ' +
+                  provider.label +
+                  ' accepts at most ' +
+                  provider.maxImageEdgePx +
+                  ' px, so anything larger is reduced to that first.')}
+          </span>
         </label>
 
         <label className="action-field">
@@ -312,7 +324,16 @@ export const SettingsPanel = (props: {
               emit({ maxOutputTokens: positive(val, value.maxOutputTokens) })
             }
           />
-          <span className="field-info">{TOKENS_HELP}</span>
+          <span className="field-info">
+            {TOKENS_HELP +
+              (provider.outputTokenCap === undefined
+                ? ''
+                : ' ' +
+                  provider.label +
+                  ' ignores this and caps every reply at ' +
+                  provider.outputTokenCap +
+                  ' tokens.')}
+          </span>
         </label>
 
         <label className="action-field">

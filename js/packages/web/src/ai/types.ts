@@ -253,8 +253,9 @@ export interface AiProvider {
    *  the review panel must disclose. */
   structuredOutput: boolean;
   /** Models within an otherwise image-capable provider that cannot see a
-   *  photograph (DeepSeek's Pro/reasoner family; the gateway's local Llama
-   *  slots). Matched against the configured model id. */
+   *  photograph (DeepSeek's Pro/reasoner family; every DeepSeek slot on the
+   *  deployed gateway; the local Llama slots its unmerged successor adds).
+   *  Matched against the configured model id. */
   textOnlyModels?: RegExp;
   /** A hard cap the endpoint itself imposes on the longest image edge, in
    *  pixels. The image pipeline takes the smaller of this and the dealer's

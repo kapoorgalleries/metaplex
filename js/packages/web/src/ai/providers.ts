@@ -80,7 +80,7 @@ function truncatedError(providerId: ProviderId, cap?: number): AiError {
       : PROVIDER_LABELS[providerId] +
         ' caps every reply at ' +
         cap +
-        ' tokens and ignores "Max output tokens". Shorten the dealer notes, or use a direct provider for this piece.';
+        ' tokens and ignores "Max output tokens" — the cap is on the reply, so a shorter request does not help. Use a direct provider for this piece.';
   return aiError(
     'truncated',
     'The response was cut off before the translation finished, so nothing was applied. ' +
@@ -211,9 +211,8 @@ export function mapStatus(
     const detail = providerMessage ? ' ' + providerMessage : '';
     return aiError(
       'rate_limit',
-      'Rate limit or quota exceeded on your ' +
-        label +
-        ' account.' +
+      label +
+        ' refused this request as over its rate limit or usage budget (429).' +
         detail +
         ' Wait and retry, or switch provider.',
       opts,
@@ -853,7 +852,7 @@ export const DEEPSEEK: AiProvider = openAiCompatible({
   // has never been called from this code, so neither id is confirmed live.
   defaultModel: 'deepseek-v4-flash',
   defaultBaseUrl: 'https://api.deepseek.com',
-  modelSuggestions: ['deepseek-v4-flash', 'deepseek-v4-pro', 'deepseek-flash'],
+  modelSuggestions: ['deepseek-v4-flash', 'deepseek-v4-pro'],
   supportsRemoteImageUrl: false,
   // Both the deployed gateway and its unmerged successor agree that the
   // Pro / reasoner family cannot see a photograph, so it is refused here.
@@ -871,7 +870,7 @@ export const DEEPSEEK: AiProvider = openAiCompatible({
   // providers fall back to, and parseCatalogueRecord rejects a wrong shape
   // either way — but a mis-shaped reply costs a call rather than being
   // refused by the endpoint up front.
-  note: "DeepSeek V4 Pro and the reasoner family cannot read photographs and are refused one here. Whether a Flash model can is not confirmed by the gallery's own gateway, which sends DeepSeek text only; if it cannot, DeepSeek refuses the request and nothing is applied. DeepSeek is asked for JSON mode rather than a strict schema, so a reply of the wrong shape is caught here rather than refused by the endpoint.",
+  note: "DeepSeek V4 Pro and the reasoner family cannot read photographs and are refused one here. Whether a Flash model can is not confirmed by the gallery's own gateway, which sends DeepSeek text only — expect a request it cannot read to fail, and nothing is applied from a failed run. DeepSeek is asked for JSON mode rather than a strict schema, so a reply of the wrong shape is caught here rather than refused by the endpoint.",
   auth: 'bearer',
   primaryMode: 'json',
   fallbackMode: 'none',
@@ -1000,9 +999,10 @@ export const TRIMURTI: AiProvider = openAiCompatible({
   defaultModel: 'google/gemini-3.5-flash-lite',
   defaultBaseUrl:
     'https://lbiabcdeojolvxezytkw.supabase.co/functions/v1/trimurti-gateway',
-  // The deployed gateway's complete allowlist (ten ids), image-reading
-  // models first and the text-only DeepSeek slots last; its GET /models
-  // endpoint is the live source.
+  // The image-reading entries of the deployed gateway's allowlist; its GET
+  // /models endpoint is the live source. Its two DeepSeek slots are left
+  // out on purpose: the gateway sends them no photograph and every run here
+  // carries one, so offering them would offer a dead end.
   modelSuggestions: [
     'google/gemini-3.5-flash-lite',
     'openai/gpt-5.6-terra',
@@ -1012,8 +1012,6 @@ export const TRIMURTI: AiProvider = openAiCompatible({
     'anthropic/claude-opus-5',
     'anthropic/claude-sonnet-4-6',
     'anthropic/claude-haiku-4-5',
-    'deepseek/deepseek-v4-flash',
-    'deepseek/deepseek-v4-pro',
   ],
   supportsRemoteImageUrl: false,
   // The gateway flattens images to a placeholder for EVERY deepseek/* model
@@ -1028,7 +1026,7 @@ export const TRIMURTI: AiProvider = openAiCompatible({
   keyLabel: 'Access key',
   baseUrlHelp:
     'Your trimurti-gateway function URL. Anything placed in front of it must accept POST {base}/chat/completions and GET {base}/key and forward the Authorization header.',
-  note: "Routes through your own Trimurti gateway, so no provider key for this route is kept in this browser — only the gateway access key, and that is held only while this form is open (a reload or leaving this step clears it). Limits the gateway itself imposes, whatever the Advanced settings below say: photographs are capped at 1,280 px; OpenAI models receive them at low detail (Gemini and Claude receive the full image); every reply is capped at 4,096 tokens; DeepSeek models receive no photograph at all; a slow provider is abandoned after 90 seconds. This site must also be on the gateway's origin allowlist, or every request fails as if the network were down. Use a direct provider for inscription-heavy pieces until the gateway has a cataloguing path. The record shape is checked here, not enforced by the model.",
+  note: "Routes through your own Trimurti gateway, so no provider key for this route is kept in this browser — only the gateway access key, and that is held in this page's memory alone: never written to the browser, and gone after a reload or after leaving this step of the mint form. Limits the gateway itself imposes, whatever the Advanced settings below say: photographs are capped at 1,280 px; OpenAI models receive them at low detail (Gemini and Claude receive the full image); every reply is capped at 4,096 tokens; DeepSeek models receive no photograph at all; a slow provider is abandoned after 90 seconds. This site must also be on the gateway's origin allowlist, or every request fails as if the network were down. Use a direct provider for inscription-heavy pieces until the gateway has a cataloguing path. The record shape is checked here, not enforced by the model.",
   auth: 'bearer',
   // The gateway drops response_format, so the schema travels in the prompt.
   primaryMode: 'none',
