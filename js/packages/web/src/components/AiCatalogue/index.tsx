@@ -70,6 +70,8 @@ export const AiCatalogueAssist = (props: {
 
   const controllerRef = useRef<AbortController | null>(null);
   const runIdRef = useRef<number>(0);
+  const probeCtlRef = useRef<AbortController | null>(null);
+  const probeIdRef = useRef<number>(0);
 
   const provider = PROVIDERS[settings.activeProvider];
   const cfg = settings.providers[settings.activeProvider];
@@ -79,20 +81,56 @@ export const AiCatalogueAssist = (props: {
 
   const close = useCallback(() => setView('closed'), []);
 
+  const cancelProbe = () => {
+    if (probeCtlRef.current) {
+      probeCtlRef.current.abort();
+      probeCtlRef.current = null;
+    }
+  };
+
   /* The gateway's free GET /key — the same "Test connection" its own page
    * offers. Reports which provider keys the gateway holds without spending
    * anything, so a missing secret is found here rather than as a 503 inside
    * a run. Only the gateway provider has such an endpoint. */
   const probe = async () => {
+    /* Numbered like run(): a second click, or an edit to the key or Base
+     * URL while a probe is in flight, must not let the earlier answer land
+     * on the newer configuration and read as its result. */
+    cancelProbe();
+    const myProbe = probeIdRef.current + 1;
+    probeIdRef.current = myProbe;
+    const controller = new AbortController();
+    probeCtlRef.current = controller;
     setProbing(true);
     setProbeResult('');
     try {
-      const info = await probeGateway(settings);
-      setProbeResult('Connected — ' + info.label);
+      const info = await probeGateway(settings, { signal: controller.signal });
+      if (probeIdRef.current !== myProbe) {
+        return;
+      }
+      const model = settings.providers.trimurti.model;
+      setProbeResult(
+        'Connected — ' +
+          info.label +
+          (info.keyForModel === 'missing'
+            ? ' — but it holds no key for "' +
+              model +
+              '", so a run on that model would fail. Choose another gateway model, or add that secret on the gateway.'
+            : ''),
+      );
     } catch (e) {
+      if (probeIdRef.current !== myProbe) {
+        return;
+      }
+      if (isAiError(e) && e.kind === 'aborted') {
+        return;
+      }
       setProbeResult('Not connected — ' + errorMessage(e));
     } finally {
-      setProbing(false);
+      if (probeIdRef.current === myProbe) {
+        setProbing(false);
+        probeCtlRef.current = null;
+      }
     }
   };
 
@@ -426,6 +464,10 @@ export const AiCatalogueAssist = (props: {
                  * the modal leaves the key sitting in localStorage. */
                 setSettings(next);
                 saveSettings(next);
+                /* An in-flight probe was testing the OLD configuration. */
+                cancelProbe();
+                probeIdRef.current += 1;
+                setProbing(false);
                 setProbeResult('');
               }}
               onProbe={

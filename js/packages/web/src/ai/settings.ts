@@ -183,7 +183,14 @@ export function saveSettings(next: AiSettings, store?: SettingsStore): void {
 function canonicalEndpoint(url: string): string {
   try {
     const u = new URL(url);
-    return trimTrailingSlash(u.origin + u.pathname);
+    /* A fully-qualified name ending in a root dot resolves to the same host,
+     * so `api.openai.com.` is still the provider itself — the per-provider
+     * isOwnEndpoint tests already strip it, and this generic compare must
+     * not be the one path that reads it as a proxy and waves a blank key
+     * through to the real endpoint. */
+    const host = u.hostname.replace(/\.$/, '');
+    const port = u.port ? ':' + u.port : '';
+    return trimTrailingSlash(u.protocol + '//' + host + port + u.pathname);
   } catch (e) {
     return trimTrailingSlash(url);
   }

@@ -263,6 +263,11 @@ export interface AiProvider {
   /** True when the endpoint accepts only JPEG data URLs, so every image must
    *  be re-encoded even when it already fits. */
   requiresJpeg?: boolean;
+  /** A ceiling on reply length that the endpoint itself imposes and that no
+   *  request field can raise. The gateway ignores max_tokens and caps every
+   *  reply at 4096, so the truncation advice must not send the dealer to a
+   *  setting that does nothing there. */
+  outputTokenCap?: number;
   /** False for a secret that must never be written to localStorage. The
    *  gateway's own page keeps its access key session-only; this layer honours
    *  the same policy for that provider rather than weakening it. */
@@ -307,6 +312,12 @@ export interface AiProvider {
 export interface GatewayProbe {
   label: string;
   providers: Record<string, boolean>;
+  /** Whether the gateway holds a key for the provider that serves the
+   *  configured model. 'missing' is the 503 a run would end in; 'unknown'
+   *  means the model's prefix is not one the probe can map. A probe that
+   *  said "Connected" while the chosen model had no key behind it was
+   *  answering a question nobody asked. */
+  keyForModel: 'present' | 'missing' | 'unknown';
 }
 
 /* ------------------------------------------------------------------ */

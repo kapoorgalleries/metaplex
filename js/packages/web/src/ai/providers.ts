@@ -38,6 +38,19 @@ const PROVIDER_LABELS: Record<ProviderId, string> = {
   trimurti: 'Trimurti',
 };
 
+/** What each provider calls its secret, for error copy. Telling a dealer the
+ *  gateway "rejected the API key" sends them hunting for a key that does not
+ *  exist — its secret is a passphrase. Kept in step with each entry's
+ *  keyLabel below; test 46 asserts the two agree. */
+const SECRET_NAMES: Record<ProviderId, string> = {
+  gemini: 'API key',
+  openai: 'API key',
+  deepseek: 'API key',
+  github: 'GitHub token',
+  azure: 'API key',
+  trimurti: 'access key',
+};
+
 /** Azure has no single hostname: every resource gets its own. The default
  *  Base URL therefore carries a placeholder, and settings.ts refuses a
  *  configuration that still contains it. */
@@ -47,9 +60,27 @@ export const BASE_URL_PLACEHOLDER = 'YOUR-RESOURCE';
  * A truncated response carries a half-finished translation field. Surfacing it
  * as anything softer than a thrown error is exactly the silent partial
  * translation this feature exists to prevent, so every provider throws this.
+ *
+ * The advice depends on who set the ceiling. A direct provider honours the
+ * dealer's "Max output tokens", so raising it is the fix. The gallery's
+ * gateway ignores max_tokens and caps every reply itself, so the same advice
+ * there would send the dealer to a control that does nothing.
  */
-const TRUNCATED_MESSAGE =
-  'The response was cut off before the translation finished, so nothing was applied. Raise "Max output tokens" in AI settings and run again.';
+function truncatedError(providerId: ProviderId, cap?: number): AiError {
+  const advice =
+    cap === undefined
+      ? 'Raise "Max output tokens" in AI settings and run again.'
+      : PROVIDER_LABELS[providerId] +
+        ' caps every reply at ' +
+        cap +
+        ' tokens and ignores "Max output tokens". Shorten the dealer notes, or use a direct provider for this piece.';
+  return aiError(
+    'truncated',
+    'The response was cut off before the translation finished, so nothing was applied. ' +
+      advice,
+    { providerId: providerId },
+  );
+}
 
 /** JSON mode alone does not tell a model which fields to return. */
 const FALLBACK_SYSTEM_SUFFIX =
@@ -105,12 +136,22 @@ export function mapStatus(
     );
   }
   if (status === 401 || status === 403) {
+    /* The endpoint's own line is kept: the gateway says "Invalid access
+     * key." for a 401 and "Browser origin is not allowed." for a 403, and
+     * only the first is fixed in these settings — the second is fixed on
+     * the gateway's allowlist, which no amount of re-typing the key cures. */
+    const secret = SECRET_NAMES[providerId];
+    const detail = providerMessage ? ' ' + providerMessage : '';
     return aiError(
       'auth',
       label +
-        ' rejected the API key (' +
+        ' refused this request (' +
         status +
-        '). Check the key in AI settings, or the proxy base URL if you are using one.',
+        ').' +
+        detail +
+        ' Check the ' +
+        secret +
+        ' in AI settings, or the proxy base URL if you are using one.',
       opts,
     );
   }
@@ -124,20 +165,29 @@ export function mapStatus(
     );
   }
   if (status === 429) {
+    /* The gateway's 429 is its own usage budget rather than a provider
+     * quota, and its body says so ("...was not sent to the model
+     * provider"); that line is the difference between waiting and knowing
+     * the budget needs raising. */
+    const detail = providerMessage ? ' ' + providerMessage : '';
     return aiError(
       'rate_limit',
       'Rate limit or quota exceeded on your ' +
         label +
-        ' account. Wait and retry, or switch provider.',
+        ' account.' +
+        detail +
+        ' Wait and retry, or switch provider.',
       opts,
     );
   }
   if (status >= 500 && status <= 599) {
-    /* A 503 from the gallery's gateway names its cause ("The selected
-     * provider is not configured", "The usage guard is unavailable"); hiding
-     * that behind a generic line sends the dealer to the wrong fix. */
-    const detail =
-      status === 503 && providerMessage ? ' ' + providerMessage : '';
+    /* A 5xx from the gallery's gateway names its cause ("The selected
+     * provider is not configured", "The usage guard is unavailable",
+     * "TRIMURTI_ACCESS_KEY is not configured on the Supabase project");
+     * hiding that behind a generic line sends the dealer to the wrong fix.
+     * client.ts passes '' for a body that was not JSON, so an HTML error
+     * page never lands here. */
+    const detail = providerMessage ? ' ' + providerMessage : '';
     return aiError(
       'server',
       label +
@@ -360,7 +410,7 @@ export const GEMINI: AiProvider = {
     }
 
     if (cand.finishReason === 'MAX_TOKENS') {
-      throw aiError('truncated', TRUNCATED_MESSAGE, { providerId: 'gemini' });
+      throw truncatedError('gemini');
     }
     if (cand.finishReason === 'SAFETY' || cand.finishReason === 'RECITATION') {
       throw aiError(
@@ -567,6 +617,8 @@ interface OpenAiCompatible {
   textOnlyModels?: RegExp;
   maxImageEdgePx?: number;
   requiresJpeg?: boolean;
+  /** A reply ceiling the endpoint imposes itself and max_tokens cannot raise. */
+  outputTokenCap?: number;
   /** Omit to persist the key; false keeps it in memory for the session. */
   persistKey?: boolean;
   modelLabel: string;
@@ -588,8 +640,9 @@ function openAiCompatible(spec: OpenAiCompatible): AiProvider {
    *  the gallery's trimurti-gateway flattens them to "[photo attached — not
    *  visible to this model]" for such models, so a run that looked like it
    *  worked would describe an artwork the model never saw. The check is per
-   *  MODEL, not per provider: DeepSeek's V4.1 Flash reads images and its V4
-   *  Pro does not. */
+   *  MODEL, not per provider, because one entry can hold both kinds: every
+   *  deepseek/* slot on the gateway is flattened while its Gemini, Claude
+   *  and GPT slots see the photograph. */
   function requireImageSupport(
     req: CatalogueRequest,
     cfg: ProviderSettings,
@@ -679,7 +732,7 @@ function openAiCompatible(spec: OpenAiCompatible): AiProvider {
         );
       }
       if (choice.finish_reason === 'length') {
-        throw aiError('truncated', TRUNCATED_MESSAGE, { providerId: spec.id });
+        throw truncatedError(spec.id, spec.outputTokenCap);
       }
 
       const text = choice.message ? choice.message.content : undefined;
@@ -705,6 +758,9 @@ function openAiCompatible(spec: OpenAiCompatible): AiProvider {
   }
   if (spec.requiresJpeg) {
     provider.requiresJpeg = true;
+  }
+  if (spec.outputTokenCap !== undefined) {
+    provider.outputTokenCap = spec.outputTokenCap;
   }
   return provider;
 }
@@ -744,20 +800,25 @@ export const DEEPSEEK: AiProvider = openAiCompatible({
   id: 'deepseek',
   label: 'DeepSeek',
   keyUrl: 'https://platform.deepseek.com/api_keys',
-  // Ids and endpoint from the gallery's trimurti-gateway as it is actually
-  // deployed (the Codex chain: sb1-vuxiwzek #130/#132, not the stale copy on
-  // its main branch): it posts to api.deepseek.com/chat/completions, lists
-  // deepseek-flash as "DeepSeek V4.1 Flash", and records deepseek-v4-flash
-  // and deepseek-chat as ALIASES of it. The earlier commit here that set
-  // deepseek-v4-flash was taken from that stale main copy.
-  defaultModel: 'deepseek-flash',
+  // Ids and endpoint from the gallery's trimurti-gateway as DEPLOYED — the
+  // Supabase function's own source (version 12, 12 Sept 2026), read from the
+  // project rather than from any branch. It posts deepseek-v4-flash and
+  // deepseek-v4-pro to api.deepseek.com/chat/completions, aliases
+  // deepseek-chat to v4-flash, and sends every DeepSeek model text only.
+  // An unmerged update to that gateway (sb1-vuxiwzek #132 and its
+  // successors) renames the Flash id to deepseek-flash and gives it
+  // low-detail vision; until it is deployed that is a proposal, and an
+  // earlier commit here that followed it was wrong to. The direct endpoint
+  // has never been called from this code, so neither id is confirmed live.
+  defaultModel: 'deepseek-v4-flash',
   defaultBaseUrl: 'https://api.deepseek.com',
-  modelSuggestions: ['deepseek-flash', 'deepseek-v4-pro'],
+  modelSuggestions: ['deepseek-v4-flash', 'deepseek-v4-pro', 'deepseek-flash'],
   supportsRemoteImageUrl: false,
-  // Vision is per MODEL here. The deployed gateway passes photographs (at
-  // low detail) to deepseek-flash and flattens them to a placeholder string
-  // for every other DeepSeek model, so V4 Pro and the reasoner family are
-  // refused images by this layer rather than fed ones they cannot see.
+  // Both the deployed gateway and its unmerged successor agree that the
+  // Pro / reasoner family cannot see a photograph, so it is refused here.
+  // Whether a Flash model can is exactly where the two disagree, and this
+  // code has no evidence of its own; it is left to DeepSeek's endpoint,
+  // which refuses an image part it cannot read rather than dropping it.
   textOnlyModels: /pro|reasoner/i,
   modelLabel: 'Model',
   keyLabel: 'API key',
@@ -769,7 +830,7 @@ export const DEEPSEEK: AiProvider = openAiCompatible({
   // providers fall back to, and parseCatalogueRecord rejects a wrong shape
   // either way — but a mis-shaped reply costs a call rather than being
   // refused by the endpoint up front.
-  note: 'deepseek-flash reads photographs; DeepSeek V4 Pro and the reasoner family do not, so keep this on deepseek-flash for cataloguing from an image. DeepSeek is asked for JSON mode rather than a strict schema, so a reply of the wrong shape is caught here rather than refused by the endpoint.',
+  note: "DeepSeek V4 Pro and the reasoner family cannot read photographs and are refused one here. Whether a Flash model can is not confirmed by the gallery's own gateway, which sends DeepSeek text only; if it cannot, DeepSeek refuses the request and nothing is applied. DeepSeek is asked for JSON mode rather than a strict schema, so a reply of the wrong shape is caught here rather than refused by the endpoint.",
   auth: 'bearer',
   primaryMode: 'json',
   fallbackMode: 'none',
@@ -864,16 +925,24 @@ const TRIMURTI_OWN_HOSTS = /(^|\.)supabase\.co$/i;
  * access passphrase. Routing this feature through it is the only
  * configuration in which no provider key exists in this browser at all.
  *
- * What the gateway's contract fixes, and this entry therefore mirrors:
+ * The contract below is the DEPLOYED function's (its source as read from
+ * the Supabase project: version 12, 12 Sept 2026), which is the code on the
+ * repository's claude/kapoor-galleries-redesign-ku77v6 branch — not the
+ * unmerged codex/* chain, whose DeepSeek changes an earlier commit here
+ * mistook for live. This entry therefore mirrors:
  *   - model ids are publisher-namespaced (google/…, openai/…, anthropic/…,
  *     deepseek/…) and allowlisted server-side;
  *   - it honours only model, messages and stream — response_format,
- *     temperature and max_tokens are dropped, replies are capped at 4096
- *     tokens and OpenAI images are forced to detail:'low';
- *   - images must be JPEG data URLs of at most 1280px on the longest edge;
+ *     temperature and max_tokens are dropped, every reply is capped at
+ *     4096 tokens, and only OpenAI images are forced to detail:'low' (Gemini
+ *     and Claude receive the full 1280px JPEG);
+ *   - every deepseek/* model is sent text only — the photograph is replaced
+ *     by a placeholder before the model sees it;
+ *   - images must be JPEG data URLs of at most 1280px on the longest edge,
+ *     5 MB and four per request;
  *   - it streams unless stream:false is sent explicitly;
  *   - its own page keeps the access key session-only, never in storage.
- * The low-detail cap and the 4096-token ceiling are the gateway's cost
+ * The low-detail rule and the 4096-token ceiling are the gateway's cost
  * controls; for inscription-heavy work they cost legibility, and the note
  * says so rather than hiding it.
  */
@@ -885,26 +954,30 @@ export const TRIMURTI: AiProvider = openAiCompatible({
   defaultModel: 'google/gemini-3.5-flash-lite',
   defaultBaseUrl:
     'https://lbiabcdeojolvxezytkw.supabase.co/functions/v1/trimurti-gateway',
-  // The gateway's own allowlist (its /models endpoint is the live source).
+  // The deployed gateway's own allowlist, image-reading models first; its
+  // GET /models endpoint is the live source.
   modelSuggestions: [
     'google/gemini-3.5-flash-lite',
     'openai/gpt-5.6-terra',
     'openai/gpt-5.6-sol',
     'anthropic/claude-sonnet-5',
     'anthropic/claude-opus-5',
-    'deepseek/deepseek-flash',
+    'deepseek/deepseek-v4-flash',
   ],
   supportsRemoteImageUrl: false,
-  // The gateway flattens images to a placeholder for these; see its textOf.
-  textOnlyModels: /^(deepseek\/deepseek-v4-pro|local\/)/i,
+  // The gateway flattens images to a placeholder for EVERY deepseek/* model
+  // (its textOf, under the comment "DeepSeek is text-only"); local/* slots
+  // exist only in its unmerged successor and would be flattened there too.
+  textOnlyModels: /^(deepseek\/|local\/)/i,
   maxImageEdgePx: 1280,
   requiresJpeg: true,
+  outputTokenCap: 4096,
   persistKey: false,
   modelLabel: 'Gateway model',
   keyLabel: 'Access key',
   baseUrlHelp:
     'Your trimurti-gateway function URL. Anything placed in front of it must accept POST {base}/chat/completions and GET {base}/key and forward the Authorization header.',
-  note: 'Routes through your own Trimurti gateway, so no provider key is kept in this browser — only the gateway access key, and that is held in memory until the tab closes. Two limits come from the gateway itself: it sends photographs at low detail and caps replies at 4,096 tokens, so fine inscriptions may read less well and a long record can be cut off. Use a direct provider for inscription-heavy pieces until the gateway has a cataloguing path. The record shape is checked here, not enforced by the model.',
+  note: 'Routes through your own Trimurti gateway, so no provider key for this route is kept in this browser — only the gateway access key, and that is held only while this form is open (a reload or leaving this step clears it). Limits the gateway itself imposes: OpenAI models receive photographs at low detail (Gemini and Claude receive the full image); every reply is capped at 4,096 tokens whatever Max output tokens says; DeepSeek models receive no photograph at all. Use a direct provider for inscription-heavy pieces until the gateway has a cataloguing path. The record shape is checked here, not enforced by the model.',
   auth: 'bearer',
   // The gateway drops response_format, so the schema travels in the prompt.
   primaryMode: 'none',

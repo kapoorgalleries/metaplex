@@ -247,6 +247,15 @@ export function runCatalogue(
  * Only meaningful for the 'trimurti' provider; other providers have no such
  * endpoint and the caller does not offer it for them.
  */
+/** Publisher prefix of a gateway model id → the field of /key's `providers`
+ *  that says whether the gateway holds that provider's secret. */
+const GATEWAY_KEY_FIELD: Record<string, string> = {
+  google: 'gemini',
+  openai: 'gpt',
+  anthropic: 'claude',
+  deepseek: 'deepseek',
+};
+
 export function probeGateway(
   settings: AiSettings,
   opts: { signal?: AbortSignal; fetchImpl?: typeof fetch } = {},
@@ -260,12 +269,51 @@ export function probeGateway(
     headers.Authorization = 'Bearer ' + cfg.apiKey;
   }
 
+  /* The same hand-composed timeout as attempt(): a /key that never answers
+   * (a proxy that swallows the request, a sleeping function) would otherwise
+   * leave the settings panel on "Testing…" until the tab is closed. */
+  const ctl = new AbortController();
+  let timedOut = false;
+  let cancelled = false;
+  const onAbort = () => {
+    cancelled = true;
+    ctl.abort();
+  };
+  const timer = setTimeout(() => {
+    timedOut = true;
+    ctl.abort();
+  }, settings.requestTimeoutMs);
+  const signal = opts.signal;
+  if (signal) {
+    if (signal.aborted) {
+      onAbort();
+    } else {
+      signal.addEventListener('abort', onAbort);
+    }
+  }
+  const release = () => {
+    clearTimeout(timer);
+    if (signal) {
+      signal.removeEventListener('abort', onAbort);
+    }
+  };
+
   return doFetch(joinUrl(cfg.baseUrl, '/key'), {
     method: 'GET',
     headers: headers,
-    signal: opts.signal,
+    signal: ctl.signal,
   })
     .catch(() => {
+      if (cancelled) {
+        throw aiError('aborted', '', { providerId: 'trimurti' });
+      }
+      if (timedOut) {
+        throw aiError(
+          'timeout',
+          'No response after ' + settings.requestTimeoutMs / 1000 + 's.',
+          { providerId: 'trimurti' },
+        );
+      }
       throw aiError(
         'network',
         'Could not reach ' + hostOf(cfg.baseUrl) + '. ' + NETWORK_HINT,
@@ -287,7 +335,10 @@ export function probeGateway(
                 : '';
             throw mapStatus(res.status, message, 'trimurti', cfg.model);
           }
-          const data = (body as { data?: GatewayProbe } | null) || {};
+          const data =
+            (body as {
+              data?: { label?: unknown; providers?: unknown };
+            } | null) || {};
           const probe = data.data;
           if (!probe || typeof probe.label !== 'string') {
             throw aiError(
@@ -296,15 +347,36 @@ export function probeGateway(
               { providerId: 'trimurti' },
             );
           }
-          return { label: probe.label, providers: probe.providers || {} };
+          const providers =
+            probe.providers && typeof probe.providers === 'object'
+              ? (probe.providers as Record<string, boolean>)
+              : {};
+          /* "Connected" alone answered the wrong question: the gateway can
+           * hold three keys and still 503 the one model the dealer chose. */
+          const field = GATEWAY_KEY_FIELD[cfg.model.split('/')[0]];
+          const held = field === undefined ? undefined : providers[field];
+          const keyForModel: GatewayProbe['keyForModel'] =
+            typeof held !== 'boolean'
+              ? 'unknown'
+              : held
+              ? 'present'
+              : 'missing';
+          return { label: probe.label, providers: providers, keyForModel };
         }),
     )
-    .catch(e => {
-      if (isAiError(e)) {
-        throw aiError(e.kind, redactSecrets(e.message, settings), {
-          providerId: 'trimurti',
-        });
-      }
-      throw e;
-    });
+    .then(
+      value => {
+        release();
+        return value;
+      },
+      e => {
+        release();
+        if (isAiError(e)) {
+          throw aiError(e.kind, redactSecrets(e.message, settings), {
+            providerId: 'trimurti',
+          });
+        }
+        throw e;
+      },
+    );
 }

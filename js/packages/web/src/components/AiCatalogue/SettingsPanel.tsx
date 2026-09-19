@@ -54,7 +54,7 @@ function positive(raw: number, fallback: number): number {
 }
 
 const SESSION_KEY_NOTE =
-  "This access key is held in memory only and is never written to this browser — the same policy as the gateway's own page. Enter it again after a reload.";
+  "This access key is held only while this form is open and is never written to this browser — the same policy as the gateway's own page. Enter it again after a reload, or after leaving this step of the mint form.";
 
 export const SettingsPanel = (props: {
   value: AiSettings;
@@ -246,21 +246,6 @@ export const SettingsPanel = (props: {
               {provider.persistKey ? null : (
                 <span className="field-info">{SESSION_KEY_NOTE}</span>
               )}
-              {props.onProbe ? (
-                <div>
-                  <Button
-                    type="link"
-                    style={{ paddingLeft: 0 }}
-                    disabled={props.probing || cfg.apiKey === ''}
-                    onClick={props.onProbe}
-                  >
-                    {props.probing ? 'Testing…' : 'Test connection'}
-                  </Button>
-                  {props.probeResult ? (
-                    <span className="field-info">{props.probeResult}</span>
-                  ) : null}
-                </div>
-              ) : null}
             </React.Fragment>
           ) : null}
           {anyKeyStored ? (
@@ -273,6 +258,26 @@ export const SettingsPanel = (props: {
                 Clear stored keys
               </Button>
             </div>
+          ) : null}
+        </div>
+      ) : null}
+
+      {/* Offered whenever the provider has a /key endpoint, including in
+          proxy mode with a blank key — that is the one configuration the
+          probe exists to confirm (the proxy supplies the key, or it does
+          not, and /key is how you find out without spending anything). */}
+      {props.onProbe ? (
+        <div className="action-field">
+          <Button
+            type="link"
+            style={{ paddingLeft: 0 }}
+            disabled={props.probing}
+            onClick={props.onProbe}
+          >
+            {props.probing ? 'Testing…' : 'Test connection'}
+          </Button>
+          {props.probeResult ? (
+            <span className="field-info">{props.probeResult}</span>
           ) : null}
         </div>
       ) : null}
