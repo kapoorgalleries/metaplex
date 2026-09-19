@@ -15,16 +15,27 @@
  */
 
 /**
- * Five providers, one interface. Four of them speak the OpenAI
+ * Six providers, one interface. Five of them speak the OpenAI
  * chat/completions dialect and are built by one factory in providers.ts;
  * Gemini has its own request and response shape.
+ *
+ * 'trimurti' is not a model vendor: it is the gallery's own trimurti-gateway,
+ * a Supabase Edge Function that holds the Anthropic, OpenAI, DeepSeek and
+ * Gemini keys server-side and speaks the OpenAI dialect to the browser. It is
+ * the one configuration in which no provider key exists in this browser.
  *
  * 'azure' is Microsoft's hosting of the OpenAI models (Azure OpenAI, sold
  * inside Microsoft Foundry). 'github' is GitHub Models, which fronts several
  * publishers' models — including Microsoft's own Phi family — behind one
  * GitHub token.
  */
-export type ProviderId = 'gemini' | 'openai' | 'deepseek' | 'github' | 'azure';
+export type ProviderId =
+  | 'gemini'
+  | 'openai'
+  | 'deepseek'
+  | 'github'
+  | 'azure'
+  | 'trimurti';
 
 export type ConfidenceLevel = 'high' | 'medium' | 'low' | 'unable';
 
@@ -241,6 +252,21 @@ export interface AiProvider {
    *  means the shape is only requested in the prompt and checked here, which
    *  the review panel must disclose. */
   structuredOutput: boolean;
+  /** Models within an otherwise image-capable provider that cannot see a
+   *  photograph (DeepSeek's Pro/reasoner family; the gateway's local Llama
+   *  slots). Matched against the configured model id. */
+  textOnlyModels?: RegExp;
+  /** A hard cap the endpoint itself imposes on the longest image edge, in
+   *  pixels. The image pipeline takes the smaller of this and the dealer's
+   *  own setting. */
+  maxImageEdgePx?: number;
+  /** True when the endpoint accepts only JPEG data URLs, so every image must
+   *  be re-encoded even when it already fits. */
+  requiresJpeg?: boolean;
+  /** False for a secret that must never be written to localStorage. The
+   *  gateway's own page keeps its access key session-only; this layer honours
+   *  the same policy for that provider rather than weakening it. */
+  persistKey: boolean;
   /** What the provider calls the model field. Azure addresses a *deployment*
    *  you named yourself, not a published model id, and mislabelling it sends
    *  people hunting for a model list that will not help them. */
@@ -274,6 +300,13 @@ export interface AiProvider {
    * on a request that goes straight to Microsoft.
    */
   isOwnEndpoint?(baseUrl: string): boolean;
+}
+
+/** What GET {base}/key on a trimurti-gateway reports: which provider keys
+ *  the gateway holds. Nothing here is a secret. */
+export interface GatewayProbe {
+  label: string;
+  providers: Record<string, boolean>;
 }
 
 /* ------------------------------------------------------------------ */

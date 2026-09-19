@@ -160,7 +160,10 @@ export function saveSettings(next: AiSettings, store?: SettingsStore): void {
   PROVIDER_IDS.forEach(id => {
     const cfg = next.providers[id];
     providers[id] = {
-      apiKey: cfg.apiKey,
+      /* A session-only secret is written as blank: the gateway's own page
+       * never stores its access key, and this layer keeps that policy rather
+       * than being the one place the passphrase lands on disk. */
+      apiKey: PROVIDERS[id].persistKey ? cfg.apiKey : '',
       model: cfg.model,
       baseUrl: trimTrailingSlash(cfg.baseUrl),
     };

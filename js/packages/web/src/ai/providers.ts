@@ -35,6 +35,7 @@ const PROVIDER_LABELS: Record<ProviderId, string> = {
   deepseek: 'DeepSeek',
   github: 'GitHub Models',
   azure: 'Azure OpenAI',
+  trimurti: 'Trimurti',
 };
 
 /** Azure has no single hostname: every resource gets its own. The default
@@ -132,12 +133,19 @@ export function mapStatus(
     );
   }
   if (status >= 500 && status <= 599) {
+    /* A 503 from the gallery's gateway names its cause ("The selected
+     * provider is not configured", "The usage guard is unavailable"); hiding
+     * that behind a generic line sends the dealer to the wrong fix. */
+    const detail =
+      status === 503 && providerMessage ? ' ' + providerMessage : '';
     return aiError(
       'server',
       label +
         ' is having problems (' +
         status +
-        '). Try again, or switch provider.',
+        ').' +
+        detail +
+        ' Try again, or switch provider.',
       opts,
     );
   }
@@ -292,16 +300,22 @@ export const GEMINI: AiProvider = {
   keyUrl: 'https://aistudio.google.com/apikey',
   // Gemini 2.0 shut down on June 1, 2026. Keep the editable default on a
   // supported stable model with image input and structured output.
-  defaultModel: 'gemini-2.5-flash',
+  // gemini-3.5-flash-lite is the id the gallery's own trimurti-gateway runs
+  // against this API in production (sb1-vuxiwzek PR #130); 3.8-flash and
+  // 3.1-pro are the ids its staged Gemini bridge (PR #138) lists. 2.5-flash
+  // is kept last as the previous generation, not confirmed live either way.
+  defaultModel: 'gemini-3.5-flash-lite',
   defaultBaseUrl: 'https://generativelanguage.googleapis.com/v1beta',
   modelSuggestions: [
+    'gemini-3.5-flash-lite',
+    'gemini-3.8-flash',
+    'gemini-3.1-pro',
     'gemini-2.5-flash',
-    'gemini-2.5-flash-lite',
-    'gemini-2.5-pro',
   ],
   supportsRemoteImageUrl: false,
   supportsImages: true,
   structuredOutput: true,
+  persistKey: true,
   modelLabel: 'Model',
   keyLabel: 'API key',
   baseUrlHelp:
@@ -461,6 +475,10 @@ function openaiPlan(
     model: cfg.model,
     temperature: req.temperature,
     max_tokens: req.maxOutputTokens,
+    /* Explicit, because the gallery's trimurti-gateway defaults to streaming
+     * when the field is absent and would answer with an SSE stream this
+     * driver cannot read. Every direct provider accepts it too. */
+    stream: false,
   };
 
   if (mode === 'schema') {
@@ -545,6 +563,12 @@ interface OpenAiCompatible {
   supportsRemoteImageUrl: boolean;
   /** Omit for a provider that reads photographs; false for a text-only one. */
   supportsImages?: boolean;
+  /** Models that cannot see a photograph even though the provider can. */
+  textOnlyModels?: RegExp;
+  maxImageEdgePx?: number;
+  requiresJpeg?: boolean;
+  /** Omit to persist the key; false keeps it in memory for the session. */
+  persistKey?: boolean;
   modelLabel: string;
   keyLabel: string;
   baseUrlHelp: string;
@@ -560,16 +584,30 @@ function openAiCompatible(spec: OpenAiCompatible): AiProvider {
   const shortLabel = PROVIDER_LABELS[spec.id];
   const supportsImages = spec.supportsImages !== false;
 
-  /** A text-only family must refuse the photographs rather than post them:
-   *  the gallery's own trimurti-gateway flattens them to
-   *  "[photo attached — not visible to this model]", so the model would
-   *  describe an artwork it never saw. */
-  function requireImageSupport(req: CatalogueRequest): void {
-    if (!supportsImages && req.images.length > 0) {
+  /** A text-only model must refuse the photographs rather than post them:
+   *  the gallery's trimurti-gateway flattens them to "[photo attached — not
+   *  visible to this model]" for such models, so a run that looked like it
+   *  worked would describe an artwork the model never saw. The check is per
+   *  MODEL, not per provider: DeepSeek's V4.1 Flash reads images and its V4
+   *  Pro does not. */
+  function requireImageSupport(
+    req: CatalogueRequest,
+    cfg: ProviderSettings,
+  ): void {
+    if (req.images.length === 0) {
+      return;
+    }
+    const textOnly =
+      !supportsImages ||
+      (spec.textOnlyModels !== undefined &&
+        spec.textOnlyModels.test(cfg.model));
+    if (textOnly) {
       throw aiError(
         'image',
         shortLabel +
-          ' cannot read photographs — it is a text-only model family, so an image sent to it is dropped before the model sees it. Switch provider to catalogue from a photograph.',
+          ' model "' +
+          cfg.model +
+          '" cannot read photographs — an image sent to it is dropped before the model sees it. Choose an image-reading model, or switch provider.',
         { providerId: spec.id },
       );
     }
@@ -585,13 +623,14 @@ function openAiCompatible(spec: OpenAiCompatible): AiProvider {
     supportsRemoteImageUrl: spec.supportsRemoteImageUrl,
     supportsImages: supportsImages,
     structuredOutput: spec.primaryMode === 'schema',
+    persistKey: spec.persistKey !== false,
     modelLabel: spec.modelLabel,
     keyLabel: spec.keyLabel,
     baseUrlHelp: spec.baseUrlHelp,
     note: spec.note,
 
     buildRequest(req: CatalogueRequest, cfg: ProviderSettings): HttpPlan {
-      requireImageSupport(req);
+      requireImageSupport(req, cfg);
       return openaiPlan(req, cfg, spec.auth, spec.primaryMode);
     },
 
@@ -599,7 +638,7 @@ function openAiCompatible(spec: OpenAiCompatible): AiProvider {
       req: CatalogueRequest,
       cfg: ProviderSettings,
     ): HttpPlan {
-      requireImageSupport(req);
+      requireImageSupport(req, cfg);
       return openaiPlan(req, cfg, spec.auth, spec.fallbackMode);
     },
 
@@ -658,6 +697,15 @@ function openAiCompatible(spec: OpenAiCompatible): AiProvider {
   if (spec.isOwnEndpoint) {
     provider.isOwnEndpoint = spec.isOwnEndpoint;
   }
+  if (spec.textOnlyModels) {
+    provider.textOnlyModels = spec.textOnlyModels;
+  }
+  if (spec.maxImageEdgePx !== undefined) {
+    provider.maxImageEdgePx = spec.maxImageEdgePx;
+  }
+  if (spec.requiresJpeg) {
+    provider.requiresJpeg = true;
+  }
   return provider;
 }
 
@@ -696,20 +744,21 @@ export const DEEPSEEK: AiProvider = openAiCompatible({
   id: 'deepseek',
   label: 'DeepSeek',
   keyUrl: 'https://platform.deepseek.com/api_keys',
-  // Ids and endpoint taken from the gallery's own trimurti-gateway, which
-  // calls this API in production: it posts to api.deepseek.com/chat/completions
-  // and records deepseek-chat/deepseek-reasoner as legacy aliases of the v4
-  // pair below.
-  defaultModel: 'deepseek-v4-flash',
+  // Ids and endpoint from the gallery's trimurti-gateway as it is actually
+  // deployed (the Codex chain: sb1-vuxiwzek #130/#132, not the stale copy on
+  // its main branch): it posts to api.deepseek.com/chat/completions, lists
+  // deepseek-flash as "DeepSeek V4.1 Flash", and records deepseek-v4-flash
+  // and deepseek-chat as ALIASES of it. The earlier commit here that set
+  // deepseek-v4-flash was taken from that stale main copy.
+  defaultModel: 'deepseek-flash',
   defaultBaseUrl: 'https://api.deepseek.com',
-  modelSuggestions: ['deepseek-v4-flash', 'deepseek-v4-pro'],
+  modelSuggestions: ['deepseek-flash', 'deepseek-v4-pro'],
   supportsRemoteImageUrl: false,
-  // The whole input to this feature is a photograph, and DeepSeek cannot see
-  // one. trimurti-gateway flattens every image part to the literal string
-  // "[photo attached — not visible to this model]" before forwarding, so a
-  // request that looked like it worked would describe an artwork the model
-  // never saw. buildRequest therefore refuses images outright.
-  supportsImages: false,
+  // Vision is per MODEL here. The deployed gateway passes photographs (at
+  // low detail) to deepseek-flash and flattens them to a placeholder string
+  // for every other DeepSeek model, so V4 Pro and the reasoner family are
+  // refused images by this layer rather than fed ones they cannot see.
+  textOnlyModels: /pro|reasoner/i,
   modelLabel: 'Model',
   keyLabel: 'API key',
   baseUrlHelp:
@@ -720,7 +769,7 @@ export const DEEPSEEK: AiProvider = openAiCompatible({
   // providers fall back to, and parseCatalogueRecord rejects a wrong shape
   // either way — but a mis-shaped reply costs a call rather than being
   // refused by the endpoint up front.
-  note: 'DeepSeek is text-only: it cannot read photographs, so it cannot catalogue from an image. It is kept here for text-only work from your own notes. It is also asked for JSON mode rather than a strict schema, so a reply of the wrong shape is caught here rather than refused by the endpoint.',
+  note: 'deepseek-flash reads photographs; DeepSeek V4 Pro and the reasoner family do not, so keep this on deepseek-flash for cataloguing from an image. DeepSeek is asked for JSON mode rather than a strict schema, so a reply of the wrong shape is caught here rather than refused by the endpoint.',
   auth: 'bearer',
   primaryMode: 'json',
   fallbackMode: 'none',
@@ -800,6 +849,78 @@ export const AZURE: AiProvider = openAiCompatible({
 });
 
 /* ------------------------------------------------------------------ */
+/* Trimurti — the gallery's own gateway                                */
+/* ------------------------------------------------------------------ */
+
+/** The gallery's Supabase project, as its own site addresses it. Any other
+ *  host is something the dealer put in front of the gateway. */
+const TRIMURTI_OWN_HOSTS = /(^|\.)supabase\.co$/i;
+
+/**
+ * trimurti-gateway (kapoorgalleries/sb1-vuxiwzek, supabase/functions/
+ * trimurti-gateway) is a Supabase Edge Function that holds the Anthropic,
+ * OpenAI, DeepSeek and Gemini keys as server-side secrets and exposes one
+ * OpenAI-dialect POST {base}/chat/completions to the browser, gated by an
+ * access passphrase. Routing this feature through it is the only
+ * configuration in which no provider key exists in this browser at all.
+ *
+ * What the gateway's contract fixes, and this entry therefore mirrors:
+ *   - model ids are publisher-namespaced (google/…, openai/…, anthropic/…,
+ *     deepseek/…) and allowlisted server-side;
+ *   - it honours only model, messages and stream — response_format,
+ *     temperature and max_tokens are dropped, replies are capped at 4096
+ *     tokens and OpenAI images are forced to detail:'low';
+ *   - images must be JPEG data URLs of at most 1280px on the longest edge;
+ *   - it streams unless stream:false is sent explicitly;
+ *   - its own page keeps the access key session-only, never in storage.
+ * The low-detail cap and the 4096-token ceiling are the gateway's cost
+ * controls; for inscription-heavy work they cost legibility, and the note
+ * says so rather than hiding it.
+ */
+export const TRIMURTI: AiProvider = openAiCompatible({
+  id: 'trimurti',
+  label: 'Trimurti gateway',
+  keyUrl:
+    'https://github.com/kapoorgalleries/sb1-vuxiwzek/blob/main/TRIMURTI.md',
+  defaultModel: 'google/gemini-3.5-flash-lite',
+  defaultBaseUrl:
+    'https://lbiabcdeojolvxezytkw.supabase.co/functions/v1/trimurti-gateway',
+  // The gateway's own allowlist (its /models endpoint is the live source).
+  modelSuggestions: [
+    'google/gemini-3.5-flash-lite',
+    'openai/gpt-5.6-terra',
+    'openai/gpt-5.6-sol',
+    'anthropic/claude-sonnet-5',
+    'anthropic/claude-opus-5',
+    'deepseek/deepseek-flash',
+  ],
+  supportsRemoteImageUrl: false,
+  // The gateway flattens images to a placeholder for these; see its textOf.
+  textOnlyModels: /^(deepseek\/deepseek-v4-pro|local\/)/i,
+  maxImageEdgePx: 1280,
+  requiresJpeg: true,
+  persistKey: false,
+  modelLabel: 'Gateway model',
+  keyLabel: 'Access key',
+  baseUrlHelp:
+    'Your trimurti-gateway function URL. Anything placed in front of it must accept POST {base}/chat/completions and GET {base}/key and forward the Authorization header.',
+  note: 'Routes through your own Trimurti gateway, so no provider key is kept in this browser — only the gateway access key, and that is held in memory until the tab closes. Two limits come from the gateway itself: it sends photographs at low detail and caps replies at 4,096 tokens, so fine inscriptions may read less well and a long record can be cut off. Use a direct provider for inscription-heavy pieces until the gateway has a cataloguing path. The record shape is checked here, not enforced by the model.',
+  auth: 'bearer',
+  // The gateway drops response_format, so the schema travels in the prompt.
+  primaryMode: 'none',
+  fallbackMode: 'none',
+  isOwnEndpoint(baseUrl: string): boolean {
+    try {
+      return TRIMURTI_OWN_HOSTS.test(
+        new URL(baseUrl).hostname.replace(/\.$/, ''),
+      );
+    } catch (e) {
+      return true;
+    }
+  },
+});
+
+/* ------------------------------------------------------------------ */
 /* The table                                                           */
 /* ------------------------------------------------------------------ */
 
@@ -809,6 +930,7 @@ export const PROVIDERS: Record<ProviderId, AiProvider> = {
   deepseek: DEEPSEEK,
   github: GITHUB,
   azure: AZURE,
+  trimurti: TRIMURTI,
 };
 
 /** Display order in the settings form. Every ProviderId appears exactly once;
@@ -820,4 +942,5 @@ export const PROVIDER_IDS: ProviderId[] = [
   'deepseek',
   'github',
   'azure',
+  'trimurti',
 ];

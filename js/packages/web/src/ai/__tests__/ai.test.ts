@@ -41,6 +41,7 @@ import {
   OPENAI,
   PROVIDERS,
   PROVIDER_IDS,
+  TRIMURTI,
   joinUrl,
 } from '../providers';
 import {
@@ -58,7 +59,7 @@ import {
   redactSecrets,
   saveSettings,
 } from '../settings';
-import { runCatalogue } from '../client';
+import { probeGateway, runCatalogue } from '../client';
 import {
   MAX_NAME_BYTES,
   TRAIT_VOCABULARY,
@@ -1584,7 +1585,13 @@ function cfgFor(provider: AiProvider, apiKey: string): ProviderSettings {
 }
 
 /** The OpenAI-dialect providers, which is every one except Gemini. */
-const OPENAI_DIALECT: AiProvider[] = [OPENAI, DEEPSEEK, GITHUB, AZURE];
+const OPENAI_DIALECT: AiProvider[] = [
+  OPENAI,
+  DEEPSEEK,
+  GITHUB,
+  AZURE,
+  TRIMURTI,
+];
 
 /** Those of them that can actually see a photograph. DeepSeek cannot. */
 const VISION_DIALECT: AiProvider[] = OPENAI_DIALECT.filter(
@@ -1827,7 +1834,10 @@ describe('providers — the wider table', () => {
     const back = loadSettings(store);
     expect(back.activeProvider).toBe('deepseek');
     PROVIDER_IDS.forEach((id, i) => {
-      expect(back.providers[id].apiKey).toBe('key-for-' + id);
+      // A session-only secret comes back blank by design (test 65).
+      expect(back.providers[id].apiKey).toBe(
+        PROVIDERS[id].persistKey ? 'key-for-' + id : '',
+      );
       expect(back.providers[id].model).toBe('model-' + i);
       // Trailing slash normalised on save, for every provider.
       expect(back.providers[id].baseUrl).toBe(
@@ -1837,7 +1847,7 @@ describe('providers — the wider table', () => {
 
     // Every configured key is masked, whichever provider holds it.
     const echoed = PROVIDER_IDS.map(id => 'key-for-' + id).join(' and ');
-    const masked = redactSecrets(echoed, back);
+    const masked = redactSecrets(echoed, next);
     PROVIDER_IDS.forEach(id => {
       expect(masked).not.toContain('key-for-' + id);
     });
@@ -1878,7 +1888,7 @@ describe('providers — the wider table', () => {
     expect(loaded.providers.openai.apiKey).toBe('o');
     // The three that were absent come back at their defaults, fully formed,
     // rather than undefined — which is what would crash the settings form.
-    ([DEEPSEEK, GITHUB, AZURE] as AiProvider[]).forEach(provider => {
+    ([DEEPSEEK, GITHUB, AZURE, TRIMURTI] as AiProvider[]).forEach(provider => {
       const cfg = loaded.providers[provider.id];
       expect(cfg).toBeDefined();
       expect(cfg.apiKey).toBe('');
@@ -1895,40 +1905,48 @@ describe('providers — the wider table', () => {
 /* ------------------------------------------------------------------ */
 
 describe('providers — corrections', () => {
-  it('57. DeepSeek refuses photographs instead of posting ones it cannot see', () => {
-    expect(DEEPSEEK.supportsImages).toBe(false);
-
-    // The gateway flattens every image part to a placeholder string before
-    // forwarding to DeepSeek, so a request that "worked" would describe an
-    // artwork the model never saw. Both builders must refuse.
-    const cfg = cfgFor(DEEPSEEK, 'sk-x');
-    const primary = thrownAiError(() =>
-      DEEPSEEK.buildRequest(twoInlineImages(), cfg),
-    );
-    expect(primary.kind).toBe('image');
-    expect(primary.message).toContain('text-only');
-    expect(
-      thrownAiError(() => DEEPSEEK.buildFallbackRequest(twoInlineImages(), cfg))
-        .kind,
-    ).toBe('image');
-
-    // Text-only work still goes through.
-    expect(DEEPSEEK.buildRequest(notesOnlyRequest(), cfg).url).toContain(
+  it('57. DeepSeek refuses photographs only for its text-only models', () => {
+    // The deployed gateway passes photographs to deepseek-flash and flattens
+    // them to a placeholder for every other DeepSeek model, so the refusal
+    // is per MODEL. A provider-wide refusal — this file's previous state —
+    // was taken from the gateway's stale main branch.
+    expect(DEEPSEEK.supportsImages).toBe(true);
+    const flash = cfgFor(DEEPSEEK, 'sk-x');
+    expect(flash.model).toBe('deepseek-flash');
+    expect(DEEPSEEK.buildRequest(twoInlineImages(), flash).url).toContain(
       '/chat/completions',
     );
 
-    // Every other provider in the table reads photographs.
-    PROVIDER_IDS.filter(id => id !== 'deepseek').forEach(id => {
+    const pro: ProviderSettings = { ...flash, model: 'deepseek-v4-pro' };
+    const refused = thrownAiError(() =>
+      DEEPSEEK.buildRequest(twoInlineImages(), pro),
+    );
+    expect(refused.kind).toBe('image');
+    expect(refused.message).toContain('deepseek-v4-pro');
+    expect(
+      thrownAiError(() => DEEPSEEK.buildFallbackRequest(twoInlineImages(), pro))
+        .kind,
+    ).toBe('image');
+    // Text-only work on Pro still goes through.
+    expect(DEEPSEEK.buildRequest(notesOnlyRequest(), pro).url).toContain(
+      '/chat/completions',
+    );
+
+    PROVIDER_IDS.forEach(id => {
       expect(PROVIDERS[id].supportsImages).toBe(true);
     });
   });
 
   it('58. structuredOutput is declared, and seeds the review panel caveat', () => {
-    // Only DeepSeek is never schema-constrained by the endpoint.
+    // DeepSeek asks for JSON mode; the gateway drops response_format
+    // entirely. Neither is schema-constrained by the endpoint.
     expect(DEEPSEEK.structuredOutput).toBe(false);
-    PROVIDER_IDS.filter(id => id !== 'deepseek').forEach(id => {
-      expect(PROVIDERS[id].structuredOutput).toBe(true);
-    });
+    expect(TRIMURTI.structuredOutput).toBe(false);
+    PROVIDER_IDS.filter(id => id !== 'deepseek' && id !== 'trimurti').forEach(
+      id => {
+        expect(PROVIDERS[id].structuredOutput).toBe(true);
+      },
+    );
   });
 
   it('59. a prompt filtered as a 400 reads as blocked, not as a bad request', () => {
@@ -2009,5 +2027,203 @@ describe('providers — corrections', () => {
     expect(configProblem(cfgFor(AZURE, 'k'), AZURE)).toContain(
       BASE_URL_PLACEHOLDER,
     );
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* Coordinating with the gallery's trimurti-gateway                    */
+/*                                                                     */
+/* Every assertion here mirrors a line of the gateway's own contract   */
+/* (kapoorgalleries/sb1-vuxiwzek, supabase/functions/trimurti-gateway, */
+/* Codex chain #130/#132): what it honours, what it drops, and what    */
+/* its own page does with the access key.                              */
+/* ------------------------------------------------------------------ */
+
+describe('providers — trimurti gateway', () => {
+  it('62. sends exactly what the gateway honours: namespaced model, messages, stream:false', () => {
+    const cfg = cfgFor(TRIMURTI, 'a-passphrase-of-at-least-32-characters!!');
+    const plan = TRIMURTI.buildRequest(twoInlineImages(), cfg);
+    expect(plan.url).toBe(
+      'https://lbiabcdeojolvxezytkw.supabase.co/functions/v1/trimurti-gateway/chat/completions',
+    );
+    expect(plan.headers.Authorization).toBe(
+      'Bearer a-passphrase-of-at-least-32-characters!!',
+    );
+    expect(plan.headers['api-key']).toBeUndefined();
+
+    const body = JSON.parse(plan.body) as RawNode;
+    expect(body.model).toBe('google/gemini-3.5-flash-lite');
+    expect(body.stream).toBe(false);
+    // The gateway drops response_format, so none is sent and the schema
+    // travels in the system prompt instead.
+    expect(body.response_format).toBeUndefined();
+    const messages = body.messages as { role: string; content: unknown }[];
+    expect(messages[0].role).toBe('system');
+    expect(String(messages[0].content)).toContain(
+      JSON.stringify(CATALOGUE_JSON_SCHEMA),
+    );
+    // Every suggested model carries a publisher prefix; a bare id 400s.
+    TRIMURTI.modelSuggestions.forEach(m => {
+      expect(m.indexOf('/')).toBeGreaterThan(0);
+    });
+    expect(TRIMURTI.defaultModel.indexOf('/')).toBeGreaterThan(0);
+  });
+
+  it('63. every OpenAI-dialect provider now sends stream:false explicitly', () => {
+    OPENAI_DIALECT.forEach(provider => {
+      const req =
+        provider.textOnlyModels &&
+        provider.textOnlyModels.test(provider.defaultModel)
+          ? notesOnlyRequest()
+          : twoInlineImages();
+      const body = JSON.parse(
+        provider.buildRequest(req, cfgFor(provider, 'k')).body,
+      ) as RawNode;
+      expect(body.stream).toBe(false);
+    });
+  });
+
+  it('64. carries the gateway image and model limits into the pipeline', () => {
+    expect(TRIMURTI.supportsRemoteImageUrl).toBe(false);
+    expect(TRIMURTI.requiresJpeg).toBe(true);
+    expect(TRIMURTI.maxImageEdgePx).toBe(1280);
+
+    // Models the gateway flattens images for are refused photographs here.
+    const cfg = cfgFor(TRIMURTI, 'k');
+    ['deepseek/deepseek-v4-pro', 'local/llama3.3-70b'].forEach(model => {
+      expect(
+        thrownAiError(() =>
+          TRIMURTI.buildRequest(twoInlineImages(), { ...cfg, model: model }),
+        ).kind,
+      ).toBe('image');
+    });
+    // Vision-capable gateway models take them.
+    [
+      'google/gemini-3.5-flash-lite',
+      'openai/gpt-5.6-terra',
+      'anthropic/claude-sonnet-5',
+      'deepseek/deepseek-flash',
+    ].forEach(model => {
+      expect(
+        TRIMURTI.buildRequest(twoInlineImages(), { ...cfg, model: model }).url,
+      ).toContain('/chat/completions');
+    });
+  });
+
+  it('65. the access key is session-only: never written, always required', () => {
+    expect(TRIMURTI.persistKey).toBe(false);
+    PROVIDER_IDS.filter(id => id !== 'trimurti').forEach(id => {
+      expect(PROVIDERS[id].persistKey).toBe(true);
+    });
+
+    const store = fakeStore(null);
+    const next = defaultSettings();
+    next.providers.trimurti.apiKey = 'a-passphrase-of-at-least-32-characters!!';
+    next.providers.openai.apiKey = 'sk-persisted';
+    saveSettings(next, store);
+    expect(store.value).not.toContain('a-passphrase-of-at-least-32');
+    const back = loadSettings(store);
+    expect(back.providers.trimurti.apiKey).toBe('');
+    expect(back.providers.openai.apiKey).toBe('sk-persisted');
+
+    // The gateway host is the provider's own, so a blank key is refused
+    // rather than read as "a proxy holds it".
+    expect(isProxyMode(defaultSettings().providers.trimurti, TRIMURTI)).toBe(
+      false,
+    );
+    expect(
+      configProblem(defaultSettings().providers.trimurti, TRIMURTI),
+    ).not.toBe('');
+    expect(
+      isProxyMode(
+        { apiKey: '', model: 'm', baseUrl: 'https://gateway.kapoors.com/v1' },
+        TRIMURTI,
+      ),
+    ).toBe(true);
+  });
+
+  it('66. a 503 from the gateway keeps its own explanation', () => {
+    const err = thrownAiError(() =>
+      TRIMURTI.extractText(
+        503,
+        { error: { message: 'The selected provider is not configured.' } },
+        cfgFor(TRIMURTI, 'k'),
+      ),
+    );
+    expect(err.kind).toBe('server');
+    expect(err.message).toContain('The selected provider is not configured.');
+    // A bare 5xx still reads as before.
+    expect(
+      thrownAiError(() =>
+        TRIMURTI.extractText(502, null, cfgFor(TRIMURTI, 'k')),
+      ).message,
+    ).toContain('Try again');
+  });
+
+  it('67. probeGateway reads /key without spending anything, and maps failures', async () => {
+    const settings = defaultSettings();
+    settings.providers.trimurti.apiKey =
+      'a-passphrase-of-at-least-32-characters!!';
+    const seen: { url: string; method: string; auth: string }[] = [];
+    const fetchImpl = ((input: RequestInfo, init?: RequestInit) => {
+      const headers = (init && (init.headers as Record<string, string>)) || {};
+      seen.push({
+        url: String(input),
+        method: (init && init.method) || 'GET',
+        auth: headers.Authorization || '',
+      });
+      return Promise.resolve(
+        new Response(
+          JSON.stringify({
+            data: {
+              label:
+                'Trimurti gateway · keys: Claude, GPT, Gemini · missing: TRIMURTI_DEEPSEEK_API_KEY',
+              providers: {
+                claude: true,
+                gpt: true,
+                deepseek: false,
+                gemini: true,
+              },
+            },
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        ),
+      );
+    }) as typeof fetch;
+
+    const probe = await probeGateway(settings, { fetchImpl });
+    expect(seen).toEqual([
+      {
+        url: 'https://lbiabcdeojolvxezytkw.supabase.co/functions/v1/trimurti-gateway/key',
+        method: 'GET',
+        auth: 'Bearer a-passphrase-of-at-least-32-characters!!',
+      },
+    ]);
+    expect(probe.providers.gemini).toBe(true);
+    expect(probe.providers.deepseek).toBe(false);
+    expect(probe.label).toContain('Gemini');
+
+    // A rejected passphrase is an auth error naming the gateway, redacted.
+    const rejecting = (() =>
+      Promise.resolve(
+        new Response(
+          JSON.stringify({ error: { message: 'Invalid access key.' } }),
+          { status: 401 },
+        ),
+      )) as typeof fetch;
+    const auth = await probeGateway(settings, { fetchImpl: rejecting }).then(
+      () => null,
+      (e: unknown) => (isAiError(e) ? e : null),
+    );
+    expect(auth && auth.kind).toBe('auth');
+    expect(auth && auth.providerId).toBe('trimurti');
+  });
+
+  it('68. Gemini and DeepSeek defaults are the ids the deployed gateway runs', () => {
+    expect(GEMINI.defaultModel).toBe('gemini-3.5-flash-lite');
+    expect(GEMINI.modelSuggestions).toContain('gemini-3.5-flash-lite');
+    expect(DEEPSEEK.defaultModel).toBe('deepseek-flash');
+    expect(DEEPSEEK.modelSuggestions).not.toContain('deepseek-v4-flash');
+    expect(DEEPSEEK.defaultBaseUrl).toBe('https://api.deepseek.com');
   });
 });

@@ -95,9 +95,15 @@ export const AiCatalogueAssist = (props: {
     controllerRef.current = controller;
 
     try {
+      /* The endpoint's own image limits win over the dealer's setting: the
+       * gateway rejects anything over 1280px or not JPEG outright. */
       const imageOpts = {
-        maxEdgePx: settings.imageMaxEdgePx,
+        maxEdgePx:
+          provider.maxImageEdgePx === undefined
+            ? settings.imageMaxEdgePx
+            : Math.min(settings.imageMaxEdgePx, provider.maxImageEdgePx),
         supportsRemoteImageUrl: provider.supportsRemoteImageUrl,
+        forceJpeg: provider.requiresJpeg === true,
       };
 
       /* The mint form leaves the primary artwork either as a data URL / absolute

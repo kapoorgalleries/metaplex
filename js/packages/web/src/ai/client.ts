@@ -18,12 +18,13 @@ import {
   AiSettings,
   CatalogueRequest,
   CatalogueResult,
+  GatewayProbe,
   HttpPlan,
   ProviderId,
   aiError,
   isAiError,
 } from './types';
-import { PROVIDERS, mapStatus } from './providers';
+import { PROVIDERS, joinUrl, mapStatus } from './providers';
 import { auditRecord, parseCatalogueRecord } from './validate';
 import { redactSecrets } from './settings';
 
@@ -236,4 +237,74 @@ export function runCatalogue(
   return run().catch(e => {
     throw redactErr(e);
   });
+}
+
+/**
+ * GET {base}/key on the gallery's trimurti-gateway: the same "Test
+ * connection" the gateway's own page performs. It costs nothing (no provider
+ * call, no budget reservation) and reports which provider keys the gateway
+ * holds, so a missing secret is found here rather than as a 503 mid-run.
+ * Only meaningful for the 'trimurti' provider; other providers have no such
+ * endpoint and the caller does not offer it for them.
+ */
+export function probeGateway(
+  settings: AiSettings,
+  opts: { signal?: AbortSignal; fetchImpl?: typeof fetch } = {},
+): Promise<GatewayProbe> {
+  const cfg = settings.providers.trimurti;
+  const doFetch: typeof fetch = opts.fetchImpl
+    ? opts.fetchImpl
+    : (input, init) => window.fetch(input, init);
+  const headers: Record<string, string> = {};
+  if (cfg.apiKey !== '') {
+    headers.Authorization = 'Bearer ' + cfg.apiKey;
+  }
+
+  return doFetch(joinUrl(cfg.baseUrl, '/key'), {
+    method: 'GET',
+    headers: headers,
+    signal: opts.signal,
+  })
+    .catch(() => {
+      throw aiError(
+        'network',
+        'Could not reach ' + hostOf(cfg.baseUrl) + '. ' + NETWORK_HINT,
+        { providerId: 'trimurti' },
+      );
+    })
+    .then(res =>
+      res
+        .json()
+        .catch(() => null)
+        .then((body: unknown) => {
+          if (res.status !== 200) {
+            const wrapper = body as { error?: { message?: unknown } } | null;
+            const message =
+              wrapper &&
+              wrapper.error &&
+              typeof wrapper.error.message === 'string'
+                ? wrapper.error.message
+                : '';
+            throw mapStatus(res.status, message, 'trimurti', cfg.model);
+          }
+          const data = (body as { data?: GatewayProbe } | null) || {};
+          const probe = data.data;
+          if (!probe || typeof probe.label !== 'string') {
+            throw aiError(
+              'parse',
+              'That URL answered, but not like a Trimurti gateway.',
+              { providerId: 'trimurti' },
+            );
+          }
+          return { label: probe.label, providers: probe.providers || {} };
+        }),
+    )
+    .catch(e => {
+      if (isAiError(e)) {
+        throw aiError(e.kind, redactSecrets(e.message, settings), {
+          providerId: 'trimurti',
+        });
+      }
+      throw e;
+    });
 }

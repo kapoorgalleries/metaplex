@@ -53,9 +53,16 @@ function positive(raw: number, fallback: number): number {
     : fallback;
 }
 
+const SESSION_KEY_NOTE =
+  "This access key is held in memory only and is never written to this browser — the same policy as the gateway's own page. Enter it again after a reload.";
+
 export const SettingsPanel = (props: {
   value: AiSettings;
   onChange: (next: AiSettings) => void;
+  /** Offered only for a provider with a /key endpoint (the gateway). */
+  onProbe?: () => void;
+  probing?: boolean;
+  probeResult?: string;
 }) => {
   const value = props.value;
   const activeId = value.activeProvider;
@@ -68,8 +75,9 @@ export const SettingsPanel = (props: {
 
   // Nothing to type a key into when a proxy holds it and none is stored.
   const showKeyInput = !(proxyMode && cfg.apiKey === '');
+  // Only keys that actually reach localStorage count towards the warning.
   const anyKeyStored = PROVIDER_IDS.some(
-    id => value.providers[id].apiKey !== '',
+    id => PROVIDERS[id].persistKey && value.providers[id].apiKey !== '',
   );
 
   /** Rebuilds the whole providers record every time, so no edit can leave a
@@ -166,7 +174,7 @@ export const SettingsPanel = (props: {
           Gated on the active provider alone, the panel told a dealer sitting
           on a proxy-mode provider that "no key is stored in this browser at
           all" while four other providers' keys sat in local storage. */}
-      {!proxyMode || anyKeyStored ? (
+      {(!proxyMode && provider.persistKey) || anyKeyStored ? (
         <div className="ai-key-warning">
           {KEY_WARNING.map((paragraph, i) => (
             <p key={i} style={{ marginBottom: 0 }}>
@@ -235,6 +243,24 @@ export const SettingsPanel = (props: {
                   {provider.keyLabel.toLowerCase()}
                 </a>
               </span>
+              {provider.persistKey ? null : (
+                <span className="field-info">{SESSION_KEY_NOTE}</span>
+              )}
+              {props.onProbe ? (
+                <div>
+                  <Button
+                    type="link"
+                    style={{ paddingLeft: 0 }}
+                    disabled={props.probing || cfg.apiKey === ''}
+                    onClick={props.onProbe}
+                  >
+                    {props.probing ? 'Testing…' : 'Test connection'}
+                  </Button>
+                  {props.probeResult ? (
+                    <span className="field-info">{props.probeResult}</span>
+                  ) : null}
+                </div>
+              ) : null}
             </React.Fragment>
           ) : null}
           {anyKeyStored ? (
