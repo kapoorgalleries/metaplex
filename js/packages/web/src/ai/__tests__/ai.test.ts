@@ -2043,9 +2043,10 @@ describe('providers — corrections', () => {
 /* ------------------------------------------------------------------ */
 /* Coordinating with the gallery's trimurti-gateway                    */
 /*                                                                     */
-/* Every assertion here mirrors a line of the gateway's own contract   */
-/* (kapoorgalleries/sb1-vuxiwzek, supabase/functions/trimurti-gateway, */
-/* Codex chain #130/#132): what it honours, what it drops, and what    */
+/* Every assertion here mirrors a line of the gateway's contract AS     */
+/* DEPLOYED — the Supabase function's own source (version 12, 12 Sept  */
+/* 2026), which is kapoorgalleries/sb1-vuxiwzek PR #130's code and not  */
+/* its unmerged codex/* chain: what it honours, what it drops, and what */
 /* its own page does with the access key.                              */
 /* ------------------------------------------------------------------ */
 
@@ -2100,7 +2101,10 @@ describe('providers — trimurti gateway', () => {
 
     // Models the deployed gateway flattens images for — EVERY deepseek/*
     // slot, under its comment "DeepSeek is text-only" — are refused
-    // photographs here rather than sent ones the model never sees.
+    // photographs here rather than sent ones the model never sees. local/*
+    // is not a deployed slot at all (the deployed gateway 400s it as not
+    // allowed); it exists only in the unmerged chain, flattened there too,
+    // so refusing it costs nothing either way.
     const cfg = cfgFor(TRIMURTI, 'k');
     [
       'deepseek/deepseek-v4-flash',
@@ -2275,6 +2279,20 @@ describe('providers — trimurti gateway', () => {
     );
     expect(net.kind).toBe('network');
     expect(net.message).toContain('lbiabcdeojolvxezytkw.supabase.co');
+    // The deployed gateway refuses an unadmitted origin BEFORE the CORS
+    // preflight, so from a browser the allowlist looks exactly like this —
+    // the one hint the dealer needs is named here, and only for the gateway.
+    expect(net.message).toContain('origin allowlist');
+    const direct = await rejectedAiError(
+      runCatalogue(
+        'openai',
+        settingsFixture('openai', 'sk-test0123456789'),
+        dataUrlRequest(),
+        { fetchImpl: unreachable },
+      ),
+    );
+    expect(direct.kind).toBe('network');
+    expect(direct.message).not.toContain('origin allowlist');
 
     // A /key that never answers is a timeout, not a panel stuck on
     // "Testing…" — the probe carries the same ceiling as a run.
@@ -2357,11 +2375,31 @@ describe('providers — trimurti gateway', () => {
     expect(badKey.message).toContain('access key');
     expect(badKey.message).not.toContain('API key');
 
-    // A 403 is the origin allowlist, which no re-typed key cures; the
-    // gateway's line is the only clue the dealer gets.
+    // A 403 body is the origin allowlist, which no re-typed key cures. A
+    // browser rarely sees it (the gateway refuses before the CORS preflight,
+    // so the fetch fails — test 67 covers that path); a forwarding proxy
+    // delivers it, and then the gateway's line is kept.
     const badOrigin = gatewaySays(403, 'Browser origin is not allowed.');
     expect(badOrigin.kind).toBe('auth');
     expect(badOrigin.message).toContain('Browser origin is not allowed.');
+
+    // A provider's own 401 relayed verbatim through the gateway is about the
+    // key the GATEWAY holds; sending the dealer to the access key would be
+    // the wrong secret.
+    const relayed = gatewaySays(
+      401,
+      'Incorrect API key provided: sk-proj-********. You can find your API key at https://platform.openai.com.',
+    );
+    expect(relayed.kind).toBe('auth');
+    expect(relayed.message).toContain('held on the gateway');
+    expect(relayed.message).toContain('Incorrect API key provided');
+    expect(relayed.message).not.toContain('Check the access key');
+
+    // The gateway's 8 MB body cap, which four large details can exceed.
+    const tooLarge = gatewaySays(413, 'Request body exceeds 8388608 bytes.');
+    expect(tooLarge.kind).toBe('bad_request');
+    expect(tooLarge.message).toContain('8388608');
+    expect(tooLarge.message).toContain('Image max edge');
 
     const budget = gatewaySays(
       429,

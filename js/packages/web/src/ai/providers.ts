@@ -51,6 +51,13 @@ const SECRET_NAMES: Record<ProviderId, string> = {
   trimurti: 'access key',
 };
 
+/** The two 401/403 bodies the gateway writes itself. Any other 401/403 from
+ *  it is a model provider's, relayed verbatim (OpenAI and DeepSeek bodies
+ *  pass through untouched; Anthropic's message with its status) — which
+ *  means the key held ON the gateway was rejected, not the access key here. */
+const GATEWAY_OWN_AUTH =
+  /^(Invalid access key\.|Browser origin is not allowed\.)$/;
+
 /** Azure has no single hostname: every resource gets its own. The default
  *  Base URL therefore carries a placeholder, and settings.ts refuses a
  *  configuration that still contains it. */
@@ -136,11 +143,32 @@ export function mapStatus(
     );
   }
   if (status === 401 || status === 403) {
-    /* The endpoint's own line is kept: the gateway says "Invalid access
-     * key." for a 401 and "Browser origin is not allowed." for a 403, and
-     * only the first is fixed in these settings — the second is fixed on
-     * the gateway's allowlist, which no amount of re-typing the key cures. */
     const secret = SECRET_NAMES[providerId];
+    /* A model provider's 401/403 relayed through the gateway is about the
+     * provider key the gateway holds, and "check the access key" would send
+     * the dealer to the wrong secret. */
+    if (
+      providerId === 'trimurti' &&
+      providerMessage !== '' &&
+      !GATEWAY_OWN_AUTH.test(providerMessage)
+    ) {
+      return aiError(
+        'auth',
+        label +
+          ' relayed a ' +
+          status +
+          ' from the model provider: ' +
+          providerMessage +
+          ' That is the provider key held on the gateway, not the access key in these settings.',
+        opts,
+      );
+    }
+    /* The endpoint's own line is kept: the gateway says "Invalid access
+     * key." for a 401 and "Browser origin is not allowed." for a 403. In a
+     * browser the second is rarely seen as a body — the gateway sends it
+     * before answering the CORS preflight, so the fetch simply fails and
+     * client.ts names the allowlist in its network error instead. Anything
+     * in front of the gateway that forwards the body lands here. */
     const detail = providerMessage ? ' ' + providerMessage : '';
     return aiError(
       'auth',
@@ -164,11 +192,22 @@ export function mapStatus(
       opts,
     );
   }
+  if (status === 413) {
+    /* The gateway caps the whole body at 8 MB; four detail photographs at
+     * the storefront's own 4 MB-per-image ceiling can exceed it. */
+    return aiError(
+      'bad_request',
+      (providerMessage || 'The endpoint refused the request as too large.') +
+        ' Lower "Image max edge" in AI settings, or send fewer detail photographs.',
+      opts,
+    );
+  }
   if (status === 429) {
-    /* The gateway's 429 is its own usage budget rather than a provider
+    /* The gateway's own 429 is its usage budget rather than a provider
      * quota, and its body says so ("...was not sent to the model
-     * provider"); that line is the difference between waiting and knowing
-     * the budget needs raising. */
+     * provider"); a provider's quota 429 is relayed with the provider's own
+     * line. Either way the line is the difference between waiting and
+     * knowing which budget needs raising. */
     const detail = providerMessage ? ' ' + providerMessage : '';
     return aiError(
       'rate_limit',
@@ -350,10 +389,12 @@ export const GEMINI: AiProvider = {
   keyUrl: 'https://aistudio.google.com/apikey',
   // Gemini 2.0 shut down on June 1, 2026. Keep the editable default on a
   // supported stable model with image input and structured output.
-  // gemini-3.5-flash-lite is the id the gallery's own trimurti-gateway runs
-  // against this API in production (sb1-vuxiwzek PR #130); 3.8-flash and
-  // 3.1-pro are the ids its staged Gemini bridge (PR #138) lists. 2.5-flash
-  // is kept last as the previous generation, not confirmed live either way.
+  // gemini-3.5-flash-lite is the id the gallery's deployed trimurti-gateway
+  // sends to Google in production (through Google's Interactions API rather
+  // than the generateContent route used here, but the model id is the same);
+  // 3.8-flash and 3.1-pro are the ids its staged Gemini bridge (PR #138)
+  // lists. 2.5-flash is kept last as the previous generation, not confirmed
+  // live either way.
   defaultModel: 'gemini-3.5-flash-lite',
   defaultBaseUrl: 'https://generativelanguage.googleapis.com/v1beta',
   modelSuggestions: [
@@ -934,13 +975,18 @@ const TRIMURTI_OWN_HOSTS = /(^|\.)supabase\.co$/i;
  *     deepseek/…) and allowlisted server-side;
  *   - it honours only model, messages and stream — response_format,
  *     temperature and max_tokens are dropped, every reply is capped at
- *     4096 tokens, and only OpenAI images are forced to detail:'low' (Gemini
- *     and Claude receive the full 1280px JPEG);
+ *     4096 tokens (OpenAI models run at reasoning_effort 'low' and their
+ *     reasoning counts inside that cap; Claude Opus 5 and Sonnet 5 run with
+ *     thinking disabled), and only OpenAI images are forced to detail:'low'
+ *     (Gemini and Claude receive the full 1280px JPEG);
  *   - every deepseek/* model is sent text only — the photograph is replaced
  *     by a placeholder before the model sees it;
  *   - images must be JPEG data URLs of at most 1280px on the longest edge,
- *     5 MB and four per request;
- *   - it streams unless stream:false is sent explicitly;
+ *     5 MB and four per request, inside an 8 MB body;
+ *   - it streams unless stream:false is sent explicitly, and abandons an
+ *     upstream call after 90 s (Gemini 120 s) whatever the timeout here;
+ *   - an origin it does not admit is refused before the CORS preflight, so
+ *     a browser sees a failed fetch rather than the 403 body;
  *   - its own page keeps the access key session-only, never in storage.
  * The low-detail rule and the 4096-token ceiling are the gateway's cost
  * controls; for inscription-heavy work they cost legibility, and the note
@@ -954,15 +1000,20 @@ export const TRIMURTI: AiProvider = openAiCompatible({
   defaultModel: 'google/gemini-3.5-flash-lite',
   defaultBaseUrl:
     'https://lbiabcdeojolvxezytkw.supabase.co/functions/v1/trimurti-gateway',
-  // The deployed gateway's own allowlist, image-reading models first; its
-  // GET /models endpoint is the live source.
+  // The deployed gateway's complete allowlist (ten ids), image-reading
+  // models first and the text-only DeepSeek slots last; its GET /models
+  // endpoint is the live source.
   modelSuggestions: [
     'google/gemini-3.5-flash-lite',
     'openai/gpt-5.6-terra',
     'openai/gpt-5.6-sol',
+    'openai/gpt-5.6-luna',
     'anthropic/claude-sonnet-5',
     'anthropic/claude-opus-5',
+    'anthropic/claude-sonnet-4-6',
+    'anthropic/claude-haiku-4-5',
     'deepseek/deepseek-v4-flash',
+    'deepseek/deepseek-v4-pro',
   ],
   supportsRemoteImageUrl: false,
   // The gateway flattens images to a placeholder for EVERY deepseek/* model
@@ -977,7 +1028,7 @@ export const TRIMURTI: AiProvider = openAiCompatible({
   keyLabel: 'Access key',
   baseUrlHelp:
     'Your trimurti-gateway function URL. Anything placed in front of it must accept POST {base}/chat/completions and GET {base}/key and forward the Authorization header.',
-  note: 'Routes through your own Trimurti gateway, so no provider key for this route is kept in this browser — only the gateway access key, and that is held only while this form is open (a reload or leaving this step clears it). Limits the gateway itself imposes: OpenAI models receive photographs at low detail (Gemini and Claude receive the full image); every reply is capped at 4,096 tokens whatever Max output tokens says; DeepSeek models receive no photograph at all. Use a direct provider for inscription-heavy pieces until the gateway has a cataloguing path. The record shape is checked here, not enforced by the model.',
+  note: "Routes through your own Trimurti gateway, so no provider key for this route is kept in this browser — only the gateway access key, and that is held only while this form is open (a reload or leaving this step clears it). Limits the gateway itself imposes, whatever the Advanced settings below say: photographs are capped at 1,280 px; OpenAI models receive them at low detail (Gemini and Claude receive the full image); every reply is capped at 4,096 tokens; DeepSeek models receive no photograph at all; a slow provider is abandoned after 90 seconds. This site must also be on the gateway's origin allowlist, or every request fails as if the network were down. Use a direct provider for inscription-heavy pieces until the gateway has a cataloguing path. The record shape is checked here, not enforced by the model.",
   auth: 'bearer',
   // The gateway drops response_format, so the schema travels in the prompt.
   primaryMode: 'none',

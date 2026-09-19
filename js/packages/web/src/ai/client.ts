@@ -46,12 +46,31 @@ const STRUCTURED_OUTPUT_REJECTED =
 const NETWORK_HINT =
   'A browser CORS block looks identical to a network failure — if this persists, set a proxy Base URL in AI settings.';
 
+/** The gateway refuses an origin it does not admit BEFORE answering the CORS
+ *  preflight, with a non-matching Access-Control-Allow-Origin, so a browser
+ *  never sees its 403 body — the fetch simply rejects. Until this site is on
+ *  the gateway's allowlist, every request to it looks exactly like this. */
+const GATEWAY_ORIGIN_HINT =
+  " For the Trimurti gateway this is also what an origin it does not admit looks like: this site's address must be on the gateway's origin allowlist.";
+
 function hostOf(u: string): string {
   try {
     return new URL(u).host;
   } catch (e) {
     return u;
   }
+}
+
+function networkError(providerId: ProviderId, url: string): AiError {
+  return aiError(
+    'network',
+    'Could not reach ' +
+      hostOf(url) +
+      '. ' +
+      NETWORK_HINT +
+      (providerId === 'trimurti' ? GATEWAY_ORIGIN_HINT : ''),
+    { providerId },
+  );
 }
 
 export function runCatalogue(
@@ -135,14 +154,7 @@ export function runCatalogue(
           signal: ctl.signal,
         });
       } catch (e) {
-        throw (
-          stoppedBy() ||
-          aiError(
-            'network',
-            'Could not reach ' + hostOf(plan.url) + '. ' + NETWORK_HINT,
-            { providerId },
-          )
-        );
+        throw stoppedBy() || networkError(providerId, plan.url);
       }
 
       let body: unknown;
@@ -314,11 +326,7 @@ export function probeGateway(
           { providerId: 'trimurti' },
         );
       }
-      throw aiError(
-        'network',
-        'Could not reach ' + hostOf(cfg.baseUrl) + '. ' + NETWORK_HINT,
-        { providerId: 'trimurti' },
-      );
+      throw networkError('trimurti', cfg.baseUrl);
     })
     .then(res =>
       res
