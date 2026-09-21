@@ -15,6 +15,7 @@
 
 import {
   AiError,
+  AiProvider,
   AiSettings,
   CatalogueRequest,
   CatalogueResult,
@@ -53,6 +54,42 @@ const NETWORK_HINT =
 const GATEWAY_ORIGIN_HINT =
   " For the Trimurti gateway this is also what an origin it does not admit looks like: this site's address must be on the gateway's origin allowlist.";
 
+/** The gateway's code for a refusal it made BEFORE reserving usage. */
+const GATEWAY_FREE_REFUSAL = 'trimurti_response_format_unsupported';
+
+/**
+ * Whether a 400 may be retried at all without paying twice.
+ *
+ * Every direct provider bills only for calls it actually ran, so a rejected
+ * request costs nothing and a retry is free. The gallery's gateway is
+ * different: it reserves a worst-case token allowance against a daily cap
+ * BEFORE calling a provider, and never refunds it. Its own refusals happen
+ * before that reservation and say so with a code; a provider's rejection
+ * relayed through it arrives with the reservation already spent, and those
+ * two are indistinguishable by message — both name response_format. Retrying
+ * the second kind would spend a second reservation, roughly a fifth of the
+ * day's allowance, for a request that was never going to differ.
+ *
+ * This gates BOTH retry branches, not just the schema fallback. A relayed
+ * parameter-drift 400 is the worse case of the two: retryBody rewrites
+ * max_tokens into max_completion_tokens and drops temperature, and the
+ * gateway strips all three from the body before it calls the provider — so
+ * the retry reaches the provider byte-identical, fails identically, and has
+ * spent a second reservation to do it.
+ */
+function freeToRetry(e: AiError, providerId: ProviderId): boolean {
+  return providerId !== 'trimurti' || e.code === GATEWAY_FREE_REFUSAL;
+}
+
+/** The dealer's ceiling, never below the endpoint's own. A stored setting
+ *  from before this provider existed must not make the browser give up
+ *  first; see AiProvider.minRequestTimeoutMs. */
+function timeoutFor(provider: AiProvider, settings: AiSettings): number {
+  return provider.minRequestTimeoutMs === undefined
+    ? settings.requestTimeoutMs
+    : Math.max(settings.requestTimeoutMs, provider.minRequestTimeoutMs);
+}
+
 function hostOf(u: string): string {
   try {
     return new URL(u).host;
@@ -82,6 +119,7 @@ export function runCatalogue(
   const provider = PROVIDERS[providerId];
   const cfg = settings.providers[providerId];
   const started = Date.now();
+  const timeoutMs = timeoutFor(provider, settings);
 
   /* window.fetch is bound lazily and explicitly: calling an unbound reference
    * throws "Illegal invocation" in browsers, and reading window.fetch eagerly
@@ -94,12 +132,19 @@ export function runCatalogue(
     if (!isAiError(e)) {
       return e;
     }
-    const carry: { status?: number; providerId?: ProviderId } = {};
+    const carry: {
+      status?: number;
+      providerId?: ProviderId;
+      code?: string;
+    } = {};
     if (e.status !== null) {
       carry.status = e.status;
     }
     if (e.providerId !== null) {
       carry.providerId = e.providerId;
+    }
+    if (e.code !== null) {
+      carry.code = e.code;
     }
     return aiError(e.kind, redactSecrets(e.message, settings), carry);
   }
@@ -119,7 +164,7 @@ export function runCatalogue(
     const timer = setTimeout(() => {
       timedOut = true;
       ctl.abort();
-    }, settings.requestTimeoutMs);
+    }, timeoutMs);
 
     const signal = opts.signal;
     if (signal) {
@@ -136,7 +181,7 @@ export function runCatalogue(
         return aiError('aborted', '', { providerId });
       }
       if (timedOut) {
-        const seconds = settings.requestTimeoutMs / 1000;
+        const seconds = timeoutMs / 1000;
         return aiError('timeout', 'No response after ' + seconds + 's.', {
           providerId,
         });
@@ -200,6 +245,11 @@ export function runCatalogue(
       text = await attempt(plan);
     } catch (e) {
       if (!isAiError(e) || e.kind !== 'bad_request') {
+        throw e;
+      }
+      /* A second call through the gallery's gateway is a second charge, so
+       * one that cannot be free is not made at all. */
+      if (!freeToRetry(e, providerId)) {
         throw e;
       }
       /* Exactly one of these two branches runs, exactly once. Anything the
@@ -283,7 +333,13 @@ export function probeGateway(
 
   /* The same hand-composed timeout as attempt(): a /key that never answers
    * (a proxy that swallows the request, a sleeping function) would otherwise
-   * leave the settings panel on "Testing…" until the tab is closed. */
+   * leave the settings panel on "Testing…" until the tab is closed.
+   *
+   * Deliberately the stored setting, NOT timeoutFor(): minRequestTimeoutMs is
+   * a floor for calls the gateway abandons upstream at 140s and then explains.
+   * /key calls no provider and answers at once, so the floor buys nothing here
+   * and would only hold the panel on "Testing…" thirty seconds longer when the
+   * Base URL points somewhere that never replies. */
   const ctl = new AbortController();
   let timedOut = false;
   let cancelled = false;

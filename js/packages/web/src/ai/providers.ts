@@ -131,9 +131,14 @@ export function mapStatus(
   providerMessage: string,
   providerId: ProviderId,
   model: string,
+  providerCode?: string,
 ): AiError {
   const label = PROVIDER_LABELS[providerId];
-  const opts = { status: status, providerId: providerId };
+  const opts = {
+    status: status,
+    providerId: providerId,
+    ...(providerCode ? { code: providerCode } : {}),
+  };
 
   if (status === 400) {
     return aiError(
@@ -270,6 +275,15 @@ function providerErrorMessage(body: unknown): string {
   const wrapper = body as { error?: { message?: unknown } } | null | undefined;
   const err = wrapper ? wrapper.error : undefined;
   return err && typeof err.message === 'string' ? err.message : '';
+}
+
+/** The endpoint's own machine-readable code, when it supplies one. Only the
+ *  gallery's gateway does, and only client.ts reads it — to tell a refusal
+ *  that cost nothing from one that already spent a budget reservation. */
+function providerErrorCode(body: unknown): string {
+  const wrapper = body as { error?: { code?: unknown } } | null | undefined;
+  const err = wrapper ? wrapper.error : undefined;
+  return err && typeof err.code === 'string' ? err.code : '';
 }
 
 /**
@@ -557,6 +571,7 @@ function openaiPlan(
   cfg: ProviderSettings,
   auth: AuthStyle,
   mode: ResponseFormatMode,
+  completionsPath: string,
 ): HttpPlan {
   /* Key order is deliberate: response_format is emitted before `messages` so
    * that a provider echoing the head of a rejected body in its 400 shows the
@@ -600,7 +615,7 @@ function openaiPlan(
   ];
 
   return {
-    url: joinUrl(cfg.baseUrl, '/chat/completions'),
+    url: joinUrl(cfg.baseUrl, completionsPath),
     method: 'POST',
     headers: openaiHeaders(cfg, auth),
     body: JSON.stringify(body),
@@ -659,6 +674,10 @@ interface OpenAiCompatible {
   requiresJpeg?: boolean;
   /** A reply ceiling the endpoint imposes itself and max_tokens cannot raise. */
   outputTokenCap?: number;
+  /** Omit for the OpenAI dialect's own path, /chat/completions. */
+  completionsPath?: string;
+  /** A floor on the request timeout for an endpoint with a ceiling of its own. */
+  minRequestTimeoutMs?: number;
   /** Omit to persist the key; false keeps it in memory for the session. */
   persistKey?: boolean;
   modelLabel: string;
@@ -675,6 +694,7 @@ interface OpenAiCompatible {
 function openAiCompatible(spec: OpenAiCompatible): AiProvider {
   const shortLabel = PROVIDER_LABELS[spec.id];
   const supportsImages = spec.supportsImages !== false;
+  const completionsPath = spec.completionsPath || '/chat/completions';
 
   /** A text-only model must refuse the photographs rather than post them:
    *  the gallery's trimurti-gateway flattens them to "[photo attached — not
@@ -716,6 +736,7 @@ function openAiCompatible(spec: OpenAiCompatible): AiProvider {
     supportsRemoteImageUrl: spec.supportsRemoteImageUrl,
     supportsImages: supportsImages,
     structuredOutput: spec.primaryMode === 'schema',
+    completionsPath: completionsPath,
     persistKey: spec.persistKey !== false,
     modelLabel: spec.modelLabel,
     keyLabel: spec.keyLabel,
@@ -724,7 +745,7 @@ function openAiCompatible(spec: OpenAiCompatible): AiProvider {
 
     buildRequest(req: CatalogueRequest, cfg: ProviderSettings): HttpPlan {
       requireImageSupport(req, cfg);
-      return openaiPlan(req, cfg, spec.auth, spec.primaryMode);
+      return openaiPlan(req, cfg, spec.auth, spec.primaryMode, completionsPath);
     },
 
     buildFallbackRequest(
@@ -732,7 +753,13 @@ function openAiCompatible(spec: OpenAiCompatible): AiProvider {
       cfg: ProviderSettings,
     ): HttpPlan {
       requireImageSupport(req, cfg);
-      return openaiPlan(req, cfg, spec.auth, spec.fallbackMode);
+      return openaiPlan(
+        req,
+        cfg,
+        spec.auth,
+        spec.fallbackMode,
+        completionsPath,
+      );
     },
 
     extractText(status: number, body: unknown, cfg: ProviderSettings): string {
@@ -745,7 +772,13 @@ function openAiCompatible(spec: OpenAiCompatible): AiProvider {
             { providerId: spec.id, status: status },
           );
         }
-        throw mapStatus(status, providerErrorMessage(body), spec.id, cfg.model);
+        throw mapStatus(
+          status,
+          providerErrorMessage(body),
+          spec.id,
+          cfg.model,
+          providerErrorCode(body),
+        );
       }
 
       const parsed = (body || {}) as OpenAiBody;
@@ -801,6 +834,9 @@ function openAiCompatible(spec: OpenAiCompatible): AiProvider {
   }
   if (spec.outputTokenCap !== undefined) {
     provider.outputTokenCap = spec.outputTokenCap;
+  }
+  if (spec.minRequestTimeoutMs !== undefined) {
+    provider.minRequestTimeoutMs = spec.minRequestTimeoutMs;
   }
   return provider;
 }
@@ -965,31 +1001,38 @@ const TRIMURTI_OWN_HOSTS = /(^|\.)supabase\.co$/i;
  * access passphrase. Routing this feature through it is the only
  * configuration in which no provider key exists in this browser at all.
  *
- * The contract below is the DEPLOYED function's (its source as read from
- * the Supabase project: version 12, 12 Sept 2026), which is the code on the
- * repository's claude/kapoor-galleries-redesign-ku77v6 branch — not the
- * unmerged codex/* chain, whose DeepSeek changes an earlier commit here
- * mistook for live. This entry therefore mirrors:
- *   - model ids are publisher-namespaced (google/…, openai/…, anthropic/…,
- *     deepseek/…) and allowlisted server-side;
- *   - it honours only model, messages and stream — response_format,
- *     temperature and max_tokens are dropped, every reply is capped at
- *     4096 tokens (OpenAI models run at reasoning_effort 'low' and their
- *     reasoning counts inside that cap; Claude Opus 5 and Sonnet 5 run with
- *     thinking disabled), and only OpenAI images are forced to detail:'low'
- *     (Gemini and Claude receive the full 1280px JPEG);
- *   - every deepseek/* model is sent text only — the photograph is replaced
- *     by a placeholder before the model sees it;
+ * This entry posts to the gateway's CATALOGUING route, POST
+ * {base}/catalogue/completions (kapoorgalleries/sb1-vuxiwzek #146), which
+ * exists for exactly this feature. Its contract, as that source states it:
+ *   - model ids are publisher-namespaced (google/…, openai/…, anthropic/…)
+ *     and allowlisted server-side; deepseek/* is refused on this route
+ *     because the gateway sends those models no photograph;
+ *   - every provider gets an 8192-token reply ceiling; max_tokens and
+ *     temperature are still dropped (OpenAI runs at reasoning_effort 'low',
+ *     Claude Opus 5 and Sonnet 5 with thinking disabled);
+ *   - OpenAI receives the photograph at detail 'high'; Gemini and Claude
+ *     receive the full 1280px JPEG as they always did;
+ *   - a strict json_schema response_format is FORWARDED for OpenAI (as
+ *     response_format) and for Claude Opus 5, Sonnet 5 and Haiku 4.5 (mapped
+ *     to Anthropic's output_config.format). Forwarded is all this layer may
+ *     claim: the Anthropic mapping has not been exercised against the real
+ *     API from here, so a reply of the wrong shape is still possible on
+ *     those slots and is caught by the parse either way. Gemini — the
+ *     DEFAULT model — and Sonnet 4.6 are refused a schema outright with a
+ *     free 400 naming response_format (code
+ *     trimurti_response_format_unsupported), which client.ts turns into the
+ *     single schema-in-prompt retry, so usedFallback is true for them;
+ *   - streaming is refused, so stream:false is required, not just sent;
  *   - images must be JPEG data URLs of at most 1280px on the longest edge,
  *     5 MB and four per request, inside an 8 MB body;
- *   - it streams unless stream:false is sent explicitly, and abandons an
- *     upstream call after 90 s (Gemini 120 s) whatever the timeout here;
+ *   - the gateway abandons an upstream call after 140 s, which is why this
+ *     entry carries minRequestTimeoutMs: the browser waits 150 s whatever
+ *     the stored setting says, so the gateway's own clean error arrives;
  *   - an origin it does not admit is refused before the CORS preflight, so
  *     a browser sees a failed fetch rather than the 403 body;
+ *   - a gateway without the route answers 404 "No such endpoint", which
+ *     mapStatus reports as not_found — never the chat limits in disguise;
  *   - its own page keeps the access key session-only, never in storage.
- * The low-detail rule and the 4096-token ceiling are the gateway's cost
- * controls; for inscription-heavy work they cost legibility, and the note
- * says so rather than hiding it.
  */
 export const TRIMURTI: AiProvider = openAiCompatible({
   id: 'trimurti',
@@ -1020,16 +1063,22 @@ export const TRIMURTI: AiProvider = openAiCompatible({
   textOnlyModels: /^(deepseek\/|local\/)/i,
   maxImageEdgePx: 1280,
   requiresJpeg: true,
-  outputTokenCap: 4096,
+  outputTokenCap: 8192,
+  completionsPath: '/catalogue/completions',
+  /* The route abandons an upstream call at 140s; waiting 150 means the
+   * gateway's own explanation arrives instead of a local timeout, and the
+   * reservation it already spent buys something. */
+  minRequestTimeoutMs: 150000,
   persistKey: false,
   modelLabel: 'Gateway model',
   keyLabel: 'Access key',
   baseUrlHelp:
-    'Your trimurti-gateway function URL. Anything placed in front of it must accept POST {base}/chat/completions and GET {base}/key and forward the Authorization header.',
-  note: "Routes through your own Trimurti gateway, so no provider key for this route is kept in this browser — only the gateway access key, and that is held in this page's memory alone: never written to the browser, and gone after a reload or after leaving this step of the mint form. Limits the gateway itself imposes, whatever the Advanced settings below say: photographs are capped at 1,280 px; OpenAI models receive them at low detail (Gemini and Claude receive the full image); every reply is capped at 4,096 tokens; DeepSeek models receive no photograph at all; a slow provider is abandoned after 90 seconds. This site must also be on the gateway's origin allowlist, or every request fails as if the network were down. Use a direct provider for inscription-heavy pieces until the gateway has a cataloguing path. The record shape is checked here, not enforced by the model.",
+    "Your trimurti-gateway function URL. Anything placed in front of it must forward the Authorization header and accept POST {base}/catalogue/completions, which is what this page uses, as well as GET {base}/key. Keep POST {base}/chat/completions working too: the gateway's own trimurti.html page still posts there.",
+  note: "Routes through your own Trimurti gateway's cataloguing route, so no provider key for this route is kept in this browser — only the gateway access key, and that is held in this page's memory alone: never written to the browser, and gone after a reload or after leaving this step of the mint form. Limits the gateway itself imposes, whatever the Advanced settings below say: photographs are capped at 1,280 px and every reply at 8,192 tokens; DeepSeek models are refused because the gateway sends them no photograph; a slow provider is abandoned after 140 seconds, so this page waits at least 150 seconds for the gateway's own answer even if Request timeout is set lower. On Gemini — the model this provider starts on — the gateway does not accept a schema at all: the record shape is described in the prompt and checked here, and the run is marked as having used the fallback. The schema is passed on to the provider for GPT and for Claude Opus 5, Sonnet 5 and Haiku 4.5; a reply of the wrong shape is still checked here on those too. This site must be on the gateway's origin allowlist, or every request fails as if the network were down; a gateway without the cataloguing route answers \"endpoint not found\". Each run reserves roughly 46,000 of the 100,000 gateway tokens allowed per day from one address.",
   auth: 'bearer',
-  // The gateway drops response_format, so the schema travels in the prompt.
-  primaryMode: 'none',
+  // Strict json_schema first; the gateway's free 400 for the slots that
+  // cannot enforce one is the single schema-in-prompt retry.
+  primaryMode: 'schema',
   fallbackMode: 'none',
   isOwnEndpoint(baseUrl: string): boolean {
     try {
