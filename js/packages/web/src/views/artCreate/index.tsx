@@ -21,6 +21,7 @@ import './../styles.less';
 import { mintNFT } from '../../actions';
 import {
   MAX_METADATA_LEN,
+  MAX_NAME_LENGTH,
   useConnection,
   useWallet,
   IMetadataExtension,
@@ -39,7 +40,7 @@ import { cleanName } from '../../utils/utils';
 import { AmountLabel } from '../../components/AmountLabel';
 import useWindowDimensions from '../../utils/layout';
 import { AiCatalogueAssist } from '../../components/AiCatalogue';
-import { MetadataPatch } from '../../ai/apply';
+import { MetadataPatch, utf8ByteLength } from '../../ai/apply';
 
 const { Step } = Steps;
 const { Dragger } = Upload;
@@ -515,6 +516,8 @@ const InfoStep = (props: {
 
   const file = props.attributes.properties.files?.[0];
   const fileName = typeof file === 'string' ? file : file?.name;
+  const titleBytes = utf8ByteLength(props.attributes.name);
+  const titleOverLimit = titleBytes > MAX_NAME_LENGTH;
 
   useEffect(() => {
     setRoyalties(
@@ -569,7 +572,7 @@ const InfoStep = (props: {
             <Input
               autoFocus
               className="input"
-              placeholder="Max 50 characters"
+              placeholder={`Max ${MAX_NAME_LENGTH} bytes`}
               allowClear
               value={props.attributes.name}
               onChange={info =>
@@ -579,6 +582,16 @@ const InfoStep = (props: {
                 })
               }
             />
+            {/* The token-metadata program rejects a name over MAX_NAME_LENGTH
+                with NameTooLong, and the limit is UTF-8 bytes, not characters:
+                IAST diacritics and Devanagari cost two or three each. The old
+                "Max 50 characters" hint enforced nothing and let a title fail
+                at mint with no earlier warning. */}
+            <Text type={titleOverLimit ? 'danger' : 'secondary'}>
+              {titleBytes} / {MAX_NAME_LENGTH} bytes
+              {titleOverLimit &&
+                ' — too long to mint; shorten the title to continue.'}
+            </Text>
           </label>
           {/* <label className="action-field">
             <span className="field-title">Symbol</span>
@@ -634,6 +647,7 @@ const InfoStep = (props: {
         <Button
           type="primary"
           size="large"
+          disabled={titleOverLimit}
           onClick={() => {
             props.setAttributes({
               ...props.attributes,

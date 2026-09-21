@@ -18,12 +18,13 @@ import {
   AiSettings,
   CatalogueRequest,
   CatalogueResult,
+  GatewayProbe,
   HttpPlan,
   ProviderId,
   aiError,
   isAiError,
 } from './types';
-import { PROVIDERS, mapStatus } from './providers';
+import { PROVIDERS, joinUrl, mapStatus } from './providers';
 import { auditRecord, parseCatalogueRecord } from './validate';
 import { redactSecrets } from './settings';
 
@@ -45,12 +46,31 @@ const STRUCTURED_OUTPUT_REJECTED =
 const NETWORK_HINT =
   'A browser CORS block looks identical to a network failure — if this persists, set a proxy Base URL in AI settings.';
 
+/** The gateway refuses an origin it does not admit BEFORE answering the CORS
+ *  preflight, with a non-matching Access-Control-Allow-Origin, so a browser
+ *  never sees its 403 body — the fetch simply rejects. Until this site is on
+ *  the gateway's allowlist, every request to it looks exactly like this. */
+const GATEWAY_ORIGIN_HINT =
+  " For the Trimurti gateway this is also what an origin it does not admit looks like: this site's address must be on the gateway's origin allowlist.";
+
 function hostOf(u: string): string {
   try {
     return new URL(u).host;
   } catch (e) {
     return u;
   }
+}
+
+function networkError(providerId: ProviderId, url: string): AiError {
+  return aiError(
+    'network',
+    'Could not reach ' +
+      hostOf(url) +
+      '. ' +
+      NETWORK_HINT +
+      (providerId === 'trimurti' ? GATEWAY_ORIGIN_HINT : ''),
+    { providerId },
+  );
 }
 
 export function runCatalogue(
@@ -134,14 +154,7 @@ export function runCatalogue(
           signal: ctl.signal,
         });
       } catch (e) {
-        throw (
-          stoppedBy() ||
-          aiError(
-            'network',
-            'Could not reach ' + hostOf(plan.url) + '. ' + NETWORK_HINT,
-            { providerId },
-          )
-        );
+        throw stoppedBy() || networkError(providerId, plan.url);
       }
 
       let body: unknown;
@@ -176,7 +189,11 @@ export function runCatalogue(
 
   async function run(): Promise<CatalogueResult> {
     let plan = provider.buildRequest(req, cfg);
-    let usedFallback = false;
+    /* Seeded from the provider, not from whether a retry happened: DeepSeek
+     * never asks the endpoint to enforce the schema, so without this the one
+     * provider that is NEVER schema-constrained is the only one whose record
+     * carries no "not schema-constrained" caveat in the review panel. */
+    let usedFallback = !provider.structuredOutput;
     let text: string;
 
     try {
@@ -232,4 +249,176 @@ export function runCatalogue(
   return run().catch(e => {
     throw redactErr(e);
   });
+}
+
+/**
+ * GET {base}/key on the gallery's trimurti-gateway: the same "Test
+ * connection" the gateway's own page performs. It costs nothing (no provider
+ * call, no budget reservation) and reports which provider keys the gateway
+ * holds, so a missing secret is found here rather than as a 503 mid-run.
+ * Only meaningful for the 'trimurti' provider; other providers have no such
+ * endpoint and the caller does not offer it for them.
+ */
+/** Publisher prefix of a gateway model id → the field of /key's `providers`
+ *  that says whether the gateway holds that provider's secret. */
+const GATEWAY_KEY_FIELD: Record<string, string> = {
+  google: 'gemini',
+  openai: 'gpt',
+  anthropic: 'claude',
+  deepseek: 'deepseek',
+};
+
+export function probeGateway(
+  settings: AiSettings,
+  opts: { signal?: AbortSignal; fetchImpl?: typeof fetch } = {},
+): Promise<GatewayProbe> {
+  const cfg = settings.providers.trimurti;
+  const doFetch: typeof fetch = opts.fetchImpl
+    ? opts.fetchImpl
+    : (input, init) => window.fetch(input, init);
+  const headers: Record<string, string> = {};
+  if (cfg.apiKey !== '') {
+    headers.Authorization = 'Bearer ' + cfg.apiKey;
+  }
+
+  /* The same hand-composed timeout as attempt(): a /key that never answers
+   * (a proxy that swallows the request, a sleeping function) would otherwise
+   * leave the settings panel on "Testing…" until the tab is closed. */
+  const ctl = new AbortController();
+  let timedOut = false;
+  let cancelled = false;
+  const onAbort = () => {
+    cancelled = true;
+    ctl.abort();
+  };
+  const timer = setTimeout(() => {
+    timedOut = true;
+    ctl.abort();
+  }, settings.requestTimeoutMs);
+  const signal = opts.signal;
+  if (signal) {
+    if (signal.aborted) {
+      onAbort();
+    } else {
+      signal.addEventListener('abort', onAbort);
+    }
+  }
+  const release = () => {
+    clearTimeout(timer);
+    if (signal) {
+      signal.removeEventListener('abort', onAbort);
+    }
+  };
+  const stoppedBy = (): AiError | null => {
+    if (cancelled) {
+      return aiError('aborted', '', { providerId: 'trimurti' });
+    }
+    if (timedOut) {
+      return aiError(
+        'timeout',
+        'No response after ' + settings.requestTimeoutMs / 1000 + 's.',
+        { providerId: 'trimurti' },
+      );
+    }
+    return null;
+  };
+
+  /* Refused before any request leaves: a Base URL that does not parse would
+   * make fetch resolve it against the page's own origin and send the access
+   * key there, and a signal already aborted has nothing to probe. The form
+   * disables the button on a configuration problem too; this is the layer
+   * that must hold whatever the form does. */
+  let url: string;
+  try {
+    new URL(cfg.baseUrl);
+    url = joinUrl(cfg.baseUrl, '/key');
+  } catch (e) {
+    release();
+    return Promise.reject(
+      aiError('bad_request', 'Base URL is not a valid URL.', {
+        providerId: 'trimurti',
+      }),
+    );
+  }
+  const early = stoppedBy();
+  if (early) {
+    release();
+    return Promise.reject(early);
+  }
+
+  return doFetch(url, {
+    method: 'GET',
+    headers: headers,
+    signal: ctl.signal,
+  })
+    .catch(() => {
+      throw stoppedBy() || networkError('trimurti', cfg.baseUrl);
+    })
+    .then(res =>
+      res
+        .json()
+        .catch(() => {
+          /* A timeout or cancel that lands during the body read must not
+           * masquerade as "answered, but not like a gateway". */
+          const stop = stoppedBy();
+          if (stop) {
+            throw stop;
+          }
+          return null;
+        })
+        .then((body: unknown) => {
+          if (res.status !== 200) {
+            const wrapper = body as { error?: { message?: unknown } } | null;
+            const message =
+              wrapper &&
+              wrapper.error &&
+              typeof wrapper.error.message === 'string'
+                ? wrapper.error.message
+                : '';
+            throw mapStatus(res.status, message, 'trimurti', cfg.model);
+          }
+          const data =
+            (body as {
+              data?: { label?: unknown; providers?: unknown };
+            } | null) || {};
+          const probe = data.data;
+          if (!probe || typeof probe.label !== 'string') {
+            throw aiError(
+              'parse',
+              'That URL answered, but not like a Trimurti gateway.',
+              { providerId: 'trimurti' },
+            );
+          }
+          const providers =
+            probe.providers && typeof probe.providers === 'object'
+              ? (probe.providers as Record<string, boolean>)
+              : {};
+          /* "Connected" alone answered the wrong question: the gateway can
+           * hold three keys and still 503 the one model the dealer chose. */
+          const field = GATEWAY_KEY_FIELD[cfg.model.split('/')[0]];
+          const held = field === undefined ? undefined : providers[field];
+          const keyForModel: GatewayProbe['keyForModel'] =
+            typeof held !== 'boolean'
+              ? 'unknown'
+              : held
+              ? 'present'
+              : 'missing';
+          return { label: probe.label, providers: providers, keyForModel };
+        }),
+    )
+    .then(
+      value => {
+        release();
+        return value;
+      },
+      e => {
+        release();
+        if (isAiError(e)) {
+          throw aiError(e.kind, redactSecrets(e.message, settings), {
+            providerId: 'trimurti',
+          });
+        }
+        throw e;
+      },
+    );
 }

@@ -25,10 +25,10 @@ const KEY_WARNING: string[] = [
 ];
 
 const PROXY_NOTE =
-  'Requests go to your proxy. Leave the key blank if the proxy supplies it — then no key is stored in this browser at all.';
+  'Requests for this provider go to your proxy. Leave the key blank if the proxy supplies it — then no key is stored for this provider.';
 
 const BASE_URL_HELP =
-  'Point this at a proxy you control to keep the key off this machine. Gemini proxy must accept POST {base}/models/{model}:generateContent; OpenAI proxy must accept POST {base}/chat/completions.';
+  'Point this at a proxy you control to keep the key off this machine. ';
 
 const MODEL_HELP =
   'Free text: any model id the provider accepts. The suggestions are a convenience only — provider catalogues change.';
@@ -53,9 +53,16 @@ function positive(raw: number, fallback: number): number {
     : fallback;
 }
 
+const SESSION_KEY_NOTE =
+  "This access key is held in this page's memory alone and is never written to this browser — the same policy as the gateway's own page. It survives closing this panel, but not a reload or leaving this step of the mint form.";
+
 export const SettingsPanel = (props: {
   value: AiSettings;
   onChange: (next: AiSettings) => void;
+  /** Offered only for a provider with a /key endpoint (the gateway). */
+  onProbe?: () => void;
+  probing?: boolean;
+  probeResult?: string;
 }) => {
   const value = props.value;
   const activeId = value.activeProvider;
@@ -68,33 +75,32 @@ export const SettingsPanel = (props: {
 
   // Nothing to type a key into when a proxy holds it and none is stored.
   const showKeyInput = !(proxyMode && cfg.apiKey === '');
-  const anyKeyStored =
-    value.providers.gemini.apiKey !== '' ||
-    value.providers.openai.apiKey !== '';
+  // Only keys that actually reach localStorage count towards the warning.
+  const anyKeyStored = PROVIDER_IDS.some(
+    id => PROVIDERS[id].persistKey && value.providers[id].apiKey !== '',
+  );
 
+  /** Rebuilds the whole providers record every time, so no edit can leave a
+   *  stale object shared with the caller's previous value. */
   const emit = (patch: {
     activeProvider?: ProviderId;
-    gemini?: ProviderSettings;
-    openai?: ProviderSettings;
+    providers?: Record<ProviderId, ProviderSettings>;
     imageMaxEdgePx?: number;
     maxOutputTokens?: number;
     requestTimeoutMs?: number;
   }) => {
+    const source = patch.providers || value.providers;
+    const providers = {} as Record<ProviderId, ProviderSettings>;
+    PROVIDER_IDS.forEach(id => {
+      providers[id] = copyProvider(source[id]);
+    });
+
     props.onChange({
       activeProvider:
         patch.activeProvider === undefined
           ? value.activeProvider
           : patch.activeProvider,
-      providers: {
-        gemini:
-          patch.gemini === undefined
-            ? copyProvider(value.providers.gemini)
-            : patch.gemini,
-        openai:
-          patch.openai === undefined
-            ? copyProvider(value.providers.openai)
-            : patch.openai,
-      },
+      providers: providers,
       imageMaxEdgePx:
         patch.imageMaxEdgePx === undefined
           ? value.imageMaxEdgePx
@@ -110,6 +116,15 @@ export const SettingsPanel = (props: {
     });
   };
 
+  /** Replaces one provider's entry, leaving the other four untouched. */
+  const withProvider = (id: ProviderId, next: ProviderSettings) => {
+    const providers = {} as Record<ProviderId, ProviderSettings>;
+    PROVIDER_IDS.forEach(other => {
+      providers[other] = other === id ? next : value.providers[other];
+    });
+    return providers;
+  };
+
   const editActive = (patch: {
     apiKey?: string;
     model?: string;
@@ -120,22 +135,21 @@ export const SettingsPanel = (props: {
       model: patch.model === undefined ? cfg.model : patch.model,
       baseUrl: patch.baseUrl === undefined ? cfg.baseUrl : patch.baseUrl,
     };
-    emit(activeId === 'gemini' ? { gemini: next } : { openai: next });
+    emit({ providers: withProvider(activeId, next) });
   };
 
+  /** Clears every provider's key, not just the active one: the warning this
+   *  button answers is about what is stored in the browser, all of it. */
   const clearKeys = () => {
-    emit({
-      gemini: {
+    const providers = {} as Record<ProviderId, ProviderSettings>;
+    PROVIDER_IDS.forEach(id => {
+      providers[id] = {
         apiKey: '',
-        model: value.providers.gemini.model,
-        baseUrl: value.providers.gemini.baseUrl,
-      },
-      openai: {
-        apiKey: '',
-        model: value.providers.openai.model,
-        baseUrl: value.providers.openai.baseUrl,
-      },
+        model: value.providers[id].model,
+        baseUrl: value.providers[id].baseUrl,
+      };
     });
+    emit({ providers: providers });
   };
 
   return (
@@ -154,9 +168,13 @@ export const SettingsPanel = (props: {
         </Radio.Group>
       </label>
 
-      {proxyMode ? (
-        <div className="ai-proxy-note">{PROXY_NOTE}</div>
-      ) : (
+      {proxyMode ? <div className="ai-proxy-note">{PROXY_NOTE}</div> : null}
+
+      {/* Shown whenever ANY provider holds a key, not just the active one.
+          Gated on the active provider alone, the panel told a dealer sitting
+          on a proxy-mode provider that "no key is stored in this browser at
+          all" while four other providers' keys sat in local storage. */}
+      {(!proxyMode && provider.persistKey) || anyKeyStored ? (
         <div className="ai-key-warning">
           {KEY_WARNING.map((paragraph, i) => (
             <p key={i} style={{ marginBottom: 0 }}>
@@ -164,10 +182,14 @@ export const SettingsPanel = (props: {
             </p>
           ))}
         </div>
+      ) : null}
+
+      {provider.note === '' ? null : (
+        <div className="ai-proxy-note">{provider.note}</div>
       )}
 
       <label className="action-field">
-        <span className="field-title">Model</span>
+        <span className="field-title">{provider.modelLabel}</span>
         <Input
           className="input"
           list={datalistId}
@@ -191,20 +213,22 @@ export const SettingsPanel = (props: {
           value={cfg.baseUrl}
           onChange={info => editActive({ baseUrl: info.target.value })}
         />
-        <span className="field-info">{BASE_URL_HELP}</span>
+        <span className="field-info">
+          {BASE_URL_HELP + provider.baseUrlHelp}
+        </span>
       </label>
 
       {showKeyInput || anyKeyStored ? (
         <div className="action-field">
           {showKeyInput ? (
             <React.Fragment>
-              <span className="field-title">API key</span>
+              <span className="field-title">{provider.keyLabel}</span>
               <Input.Password
                 className="input"
                 placeholder={
                   proxyMode
                     ? 'Leave blank if the proxy supplies the key'
-                    : provider.label + ' API key'
+                    : provider.label + ' ' + provider.keyLabel.toLowerCase()
                 }
                 value={cfg.apiKey}
                 onChange={info => editActive({ apiKey: info.target.value })}
@@ -215,9 +239,13 @@ export const SettingsPanel = (props: {
                   target="_blank"
                   rel="noopener noreferrer"
                 >
-                  Where to get a {provider.label} key
+                  Where to get a {provider.label}{' '}
+                  {provider.keyLabel.toLowerCase()}
                 </a>
               </span>
+              {provider.persistKey ? null : (
+                <span className="field-info">{SESSION_KEY_NOTE}</span>
+              )}
             </React.Fragment>
           ) : null}
           {anyKeyStored ? (
@@ -230,6 +258,29 @@ export const SettingsPanel = (props: {
                 Clear stored keys
               </Button>
             </div>
+          ) : null}
+        </div>
+      ) : null}
+
+      {/* Offered whenever the provider has a /key endpoint, including in
+          proxy mode with a blank key — that is the one configuration the
+          probe exists to confirm (the proxy supplies the key, or it does
+          not, and /key is how you find out without spending anything). */}
+      {props.onProbe ? (
+        <div className="action-field">
+          {/* Gated on the same configuration check as a run: a Base URL that
+              does not parse would resolve against this page's own origin and
+              carry the access key there. probeGateway refuses that too. */}
+          <Button
+            type="link"
+            style={{ paddingLeft: 0 }}
+            disabled={props.probing || problem !== ''}
+            onClick={props.onProbe}
+          >
+            {props.probing ? 'Testing…' : 'Test connection'}
+          </Button>
+          {props.probeResult ? (
+            <span className="field-info">{props.probeResult}</span>
           ) : null}
         </div>
       ) : null}
@@ -249,7 +300,16 @@ export const SettingsPanel = (props: {
               emit({ imageMaxEdgePx: positive(val, value.imageMaxEdgePx) })
             }
           />
-          <span className="field-info">{IMAGE_HELP}</span>
+          <span className="field-info">
+            {IMAGE_HELP +
+              (provider.maxImageEdgePx === undefined
+                ? ''
+                : ' ' +
+                  provider.label +
+                  ' accepts at most ' +
+                  provider.maxImageEdgePx +
+                  ' px, so anything larger is reduced to that first.')}
+          </span>
         </label>
 
         <label className="action-field">
@@ -264,7 +324,16 @@ export const SettingsPanel = (props: {
               emit({ maxOutputTokens: positive(val, value.maxOutputTokens) })
             }
           />
-          <span className="field-info">{TOKENS_HELP}</span>
+          <span className="field-info">
+            {TOKENS_HELP +
+              (provider.outputTokenCap === undefined
+                ? ''
+                : ' ' +
+                  provider.label +
+                  ' ignores this and caps every reply at ' +
+                  provider.outputTokenCap +
+                  ' tokens.')}
+          </span>
         </label>
 
         <label className="action-field">

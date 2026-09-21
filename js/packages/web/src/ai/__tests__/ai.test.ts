@@ -32,7 +32,18 @@ import {
 } from '../schema';
 import { NO_PROVENANCE_SENTINEL } from '../prompt';
 import { auditRecord, parseCatalogueRecord } from '../validate';
-import { GEMINI, OPENAI } from '../providers';
+import {
+  AZURE,
+  BASE_URL_PLACEHOLDER,
+  DEEPSEEK,
+  GEMINI,
+  GITHUB,
+  OPENAI,
+  PROVIDERS,
+  PROVIDER_IDS,
+  TRIMURTI,
+  joinUrl,
+} from '../providers';
 import {
   base64ByteLength,
   bytesToBase64,
@@ -48,13 +59,15 @@ import {
   redactSecrets,
   saveSettings,
 } from '../settings';
-import { runCatalogue } from '../client';
+import { probeGateway, runCatalogue } from '../client';
 import {
   MAX_NAME_BYTES,
   TRAIT_VOCABULARY,
   buildPatch,
   composeDescription,
   recordToTraits,
+  truncateUtf8Bytes,
+  utf8ByteLength,
 } from '../apply';
 
 /* ------------------------------------------------------------------ */
@@ -1525,5 +1538,1011 @@ describe('apply', () => {
       { ...cfg, apiKey: 'k' },
     );
     expect(plan.url.indexOf('v1beta//')).toBe(-1);
+  });
+
+  it('45. counts UTF-8 bytes the way the on-chain limit does', () => {
+    // One helper now feeds the mint form's counter, the review panel's
+    // counter and truncateUtf8Bytes. Pin it against Buffer, the reference
+    // implementation, across every byte width the field produces.
+    const cases = [
+      'Phurba',
+      'Śākyamuni',
+      'पद्मपाणि लोकेश्वर',
+      'བཀྲ་ཤིས་',
+      'Figure of Padmapani \u{1F4FF}',
+      '',
+    ];
+    cases.forEach(s => {
+      expect(utf8ByteLength(s)).toBe(Buffer.byteLength(s, 'utf8'));
+    });
+
+    // The truncation and the counter must agree: whatever truncateUtf8Bytes
+    // returns for a limit, the counter must measure at or under that limit.
+    const long = 'Śākyamuni, gilt copper alloy, Newar, Kathmandu Valley';
+    for (let limit = 0; limit <= 40; limit++) {
+      expect(
+        utf8ByteLength(truncateUtf8Bytes(long, limit)),
+      ).toBeLessThanOrEqual(limit);
+    }
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* The three providers added alongside Gemini and OpenAI               */
+/*                                                                     */
+/* DeepSeek, GitHub Models and Azure OpenAI are built by one factory,  */
+/* so these tests pin the things the factory is parameterised on — the */
+/* auth header, the response_format mode, the URL — rather than        */
+/* re-asserting the shared body for each one.                          */
+/* ------------------------------------------------------------------ */
+
+function cfgFor(provider: AiProvider, apiKey: string): ProviderSettings {
+  return {
+    apiKey,
+    model: provider.defaultModel,
+    baseUrl: provider.defaultBaseUrl,
+  };
+}
+
+/** The OpenAI-dialect providers, which is every one except Gemini. */
+const OPENAI_DIALECT: AiProvider[] = [
+  OPENAI,
+  DEEPSEEK,
+  GITHUB,
+  AZURE,
+  TRIMURTI,
+];
+
+/** Every one of them accepts a photograph on its default model. A filter on
+ *  supportsImages once lived here and had become a no-op; the per-model
+ *  refusals are what the table actually expresses, and tests 57 and 64
+ *  cover those. */
+const VISION_DIALECT: AiProvider[] = OPENAI_DIALECT;
+
+/** What a text-only provider is limited to: the dealer's own notes. */
+function notesOnlyRequest(): CatalogueRequest {
+  return {
+    images: [],
+    dealerNotes: 'Gilt copper alloy, Newar, acquired 1998.',
+    maxOutputTokens: 4096,
+    temperature: 0.2,
+  };
+}
+
+describe('providers — the wider table', () => {
+  it('46. PROVIDER_IDS lists every provider in the table exactly once', () => {
+    const tableIds = Object.keys(PROVIDERS) as ProviderId[];
+    expect(PROVIDER_IDS.slice().sort()).toEqual(tableIds.slice().sort());
+    expect(PROVIDER_IDS.length).toBe(tableIds.length);
+
+    // Each entry answers to its own key: a copy-paste in the table would
+    // otherwise route one provider's requests through another's builder.
+    PROVIDER_IDS.forEach(id => {
+      expect(PROVIDERS[id].id).toBe(id);
+      expect(PROVIDERS[id].label).not.toBe('');
+      expect(PROVIDERS[id].modelLabel).not.toBe('');
+      expect(PROVIDERS[id].keyLabel).not.toBe('');
+      expect(PROVIDERS[id].baseUrlHelp).not.toBe('');
+      // The 401 copy names the secret the way the form labels it, so a
+      // dealer told to "check the access key" finds a field called that.
+      const refused = thrownAiError(() =>
+        PROVIDERS[id].extractText(401, null, cfgFor(PROVIDERS[id], 'k')),
+      );
+      expect(refused.message.toLowerCase()).toContain(
+        PROVIDERS[id].keyLabel.toLowerCase(),
+      );
+    });
+  });
+
+  it('47. joinUrl re-attaches a query string after the appended path', () => {
+    expect(joinUrl('https://h/openai/v1', '/chat/completions')).toBe(
+      'https://h/openai/v1/chat/completions',
+    );
+    // The paste this exists for: Azure's documented endpoints carry one.
+    expect(
+      joinUrl('https://h/openai/v1?api-version=preview', '/chat/completions'),
+    ).toBe('https://h/openai/v1/chat/completions?api-version=preview');
+    // A trailing slash BEFORE the query must not survive either.
+    expect(
+      joinUrl('https://h/openai/v1/?api-version=preview', '/chat/completions'),
+    ).toBe('https://h/openai/v1/chat/completions?api-version=preview');
+    expect(joinUrl('https://h/v1//', '/chat/completions')).toBe(
+      'https://h/v1/chat/completions',
+    );
+  });
+
+  it('48. every image-reading provider posts to {base}/chat/completions', () => {
+    VISION_DIALECT.forEach(provider => {
+      const plan = provider.buildRequest(
+        twoInlineImages(),
+        cfgFor(provider, 'k'),
+      );
+      expect(plan.method).toBe('POST');
+      expect(plan.url.indexOf('/chat/completions')).toBeGreaterThan(0);
+      expect(plan.headers['Content-Type']).toBe('application/json');
+
+      // The shared body: the model, the ceiling, and one labelled part per
+      // image ahead of the image itself.
+      const body = openaiBody(plan);
+      expect(body.model).toBe(provider.defaultModel);
+      expect(body.max_tokens).toBe(4096);
+      const parts = userParts(body);
+      expect(parts.filter(p => p.type === 'image_url').length).toBe(2);
+      expect(parts[1].text).toBe('Image 1 of 2 — front');
+      expect(parts[3].text).toBe('Image 2 of 2 — reverse');
+    });
+  });
+
+  it('49. Azure authenticates with api-key, never Authorization', () => {
+    const plan = AZURE.buildRequest(twoInlineImages(), cfgFor(AZURE, 'azkey'));
+    expect(plan.headers['api-key']).toBe('azkey');
+    expect(plan.headers.Authorization).toBeUndefined();
+
+    // The deployment name travels in the body, so one Base URL serves every
+    // deployment in the resource.
+    const cfg: ProviderSettings = {
+      apiKey: 'azkey',
+      model: 'kapoor-gpt4o',
+      baseUrl: 'https://kapoor.openai.azure.com/openai/v1?api-version=preview',
+    };
+    const deployed = AZURE.buildRequest(twoInlineImages(), cfg);
+    expect(deployed.url).toBe(
+      'https://kapoor.openai.azure.com/openai/v1/chat/completions?api-version=preview',
+    );
+    expect(openaiBody(deployed).model).toBe('kapoor-gpt4o');
+
+    // Proxy mode still means no header at all.
+    expect(
+      AZURE.buildRequest(twoInlineImages(), cfgFor(AZURE, '')).headers[
+        'api-key'
+      ],
+    ).toBeUndefined();
+  });
+
+  it('50. GitHub Models sends a bearer token and a namespaced model', () => {
+    const plan = GITHUB.buildRequest(
+      twoInlineImages(),
+      cfgFor(GITHUB, 'ghp_exampletoken1234567890'),
+    );
+    expect(plan.headers.Authorization).toBe(
+      'Bearer ghp_exampletoken1234567890',
+    );
+    expect(plan.headers['api-key']).toBeUndefined();
+    expect(plan.url).toBe(
+      'https://models.github.ai/inference/chat/completions',
+    );
+    // A bare 'gpt-4o' 404s on this endpoint; the default must carry the
+    // publisher prefix, and so must every suggestion.
+    expect(GITHUB.defaultModel.indexOf('/')).toBeGreaterThan(0);
+    GITHUB.modelSuggestions.forEach(m => {
+      expect(m.indexOf('/')).toBeGreaterThan(0);
+    });
+  });
+
+  it('51. DeepSeek asks for JSON mode and degrades to no directive at all', () => {
+    const cfg = cfgFor(DEEPSEEK, 'sk-deepseekexamplekey1234');
+    const primary = openaiBody(DEEPSEEK.buildRequest(notesOnlyRequest(), cfg));
+    expect(primary.response_format.type).toBe('json_object');
+    expect(primary.response_format.json_schema).toBeUndefined();
+
+    // Without a strict schema the model is told the field names instead, or
+    // it returns valid JSON of a shape parseCatalogueRecord rejects.
+    expect(systemText(primary)).toContain(
+      JSON.stringify(CATALOGUE_JSON_SCHEMA),
+    );
+
+    const fallback = JSON.parse(
+      DEEPSEEK.buildFallbackRequest(notesOnlyRequest(), cfg).body,
+    ) as RawNode;
+    expect(fallback.response_format).toBeUndefined();
+    const messages = fallback.messages as { content: string }[];
+    expect(messages[0].content).toContain(
+      JSON.stringify(CATALOGUE_JSON_SCHEMA),
+    );
+  });
+
+  it('52. every OpenAI-dialect provider shares the one parameter-drift retry', () => {
+    OPENAI_DIALECT.forEach(provider => {
+      const retry = provider.retryBody;
+      expect(retry).toBeDefined();
+      if (!retry) {
+        return;
+      }
+      const adapted = retry(
+        { model: 'm', temperature: 0.2, max_tokens: 4096 },
+        "Unsupported parameter: 'max_tokens'",
+      ) as RawNode | null;
+      /* Asserted through a non-null local rather than inside `if (adapted)`:
+       * a truthiness guard here silently skips all three assertions on the
+       * exact regression they exist to catch. */
+      if (adapted === null) {
+        throw new Error(provider.id + ': retryBody refused a drift message');
+      }
+      const next: RawNode = adapted;
+      expect(next.max_completion_tokens).toBe(4096);
+      expect(next.max_tokens).toBeUndefined();
+      expect(next.temperature).toBeUndefined();
+      // Never twice, and never for an unrelated 400.
+      expect(
+        retry({ model: 'm', max_completion_tokens: 4096 }, 'Unsupported value'),
+      ).toBeNull();
+      expect(retry({ model: 'm', max_tokens: 4096 }, 'content too large')).toBe(
+        null,
+      );
+    });
+  });
+
+  it('53. Azure reads its own per-tenant hosts as the provider, not a proxy', () => {
+    const own = (host: string) => ({
+      apiKey: 'k',
+      model: 'gpt-4o',
+      baseUrl: 'https://' + host + '/openai/v1',
+    });
+    expect(isProxyMode(own('kapoor.openai.azure.com'), AZURE)).toBe(false);
+    expect(isProxyMode(own('kapoor.services.ai.azure.com'), AZURE)).toBe(false);
+    expect(isProxyMode(own('kapoor.cognitiveservices.azure.com'), AZURE)).toBe(
+      false,
+    );
+    expect(isProxyMode(own('kapoor.openai.azure.us'), AZURE)).toBe(false);
+    expect(isProxyMode(own('kapoor.openai.azure.cn'), AZURE)).toBe(false);
+    // A fully-qualified trailing dot is the same host.
+    expect(isProxyMode(own('kapoor.openai.azure.com.'), AZURE)).toBe(false);
+    expect(
+      isProxyMode(own('notcognitiveservices.azure.com.example.net'), AZURE),
+    ).toBe(true);
+    // A lookalike suffix is not Microsoft.
+    expect(isProxyMode(own('notopenai.azure.com.example.net'), AZURE)).toBe(
+      true,
+    );
+    expect(isProxyMode(own('gateway.kapoors.com'), AZURE)).toBe(true);
+
+    // And because a real Azure endpoint is NOT proxy mode, a blank key there
+    // is still refused rather than read as "the proxy holds it".
+    expect(
+      configProblem(
+        {
+          apiKey: '',
+          model: 'gpt-4o',
+          baseUrl: own('a.openai.azure.com').baseUrl,
+        },
+        AZURE,
+      ),
+    ).not.toBe('');
+  });
+
+  it('54. refuses the Azure Base URL placeholder before it becomes a DNS error', () => {
+    const problem = configProblem(cfgFor(AZURE, 'k'), AZURE);
+    expect(AZURE.defaultBaseUrl).toContain(BASE_URL_PLACEHOLDER);
+    expect(problem).toContain(BASE_URL_PLACEHOLDER);
+    // A finished configuration passes.
+    expect(
+      configProblem(
+        {
+          apiKey: 'k',
+          model: 'gpt-4o',
+          baseUrl: 'https://kapoor.openai.azure.com/openai/v1',
+        },
+        AZURE,
+      ),
+    ).toBe('');
+  });
+
+  it('55. settings round-trip and redact every provider, not just two', () => {
+    const store = fakeStore(null);
+    const next = defaultSettings();
+    PROVIDER_IDS.forEach((id, i) => {
+      next.providers[id] = {
+        apiKey: 'key-for-' + id,
+        model: 'model-' + i,
+        baseUrl: 'https://proxy.kapoors.com/' + id + '/',
+      };
+    });
+    next.activeProvider = 'deepseek';
+    saveSettings(next, store);
+
+    const back = loadSettings(store);
+    expect(back.activeProvider).toBe('deepseek');
+    PROVIDER_IDS.forEach((id, i) => {
+      // A session-only secret comes back blank by design (test 65).
+      expect(back.providers[id].apiKey).toBe(
+        PROVIDERS[id].persistKey ? 'key-for-' + id : '',
+      );
+      expect(back.providers[id].model).toBe('model-' + i);
+      // Trailing slash normalised on save, for every provider.
+      expect(back.providers[id].baseUrl).toBe(
+        'https://proxy.kapoors.com/' + id,
+      );
+    });
+
+    // Every configured key is masked, whichever provider holds it.
+    const echoed = PROVIDER_IDS.map(id => 'key-for-' + id).join(' and ');
+    const masked = redactSecrets(echoed, next);
+    PROVIDER_IDS.forEach(id => {
+      expect(masked).not.toContain('key-for-' + id);
+    });
+
+    // And a GitHub token shape is masked even when it was never configured.
+    expect(
+      redactSecrets('token ghp_A1b2C3d4E5f6G7h8 leaked', defaultSettings()),
+    ).not.toContain('ghp_A1b2C3d4E5f6G7h8');
+    expect(
+      redactSecrets(
+        'token github_pat_11ABCDEFG0abcdefghij leaked',
+        defaultSettings(),
+      ),
+    ).not.toContain('github_pat_11ABCDEFG0abcdefghij');
+  });
+
+  it('56. a stored blob written before these providers existed still loads', () => {
+    // Exactly what v1 of this feature wrote: two providers, nothing else.
+    const store = fakeStore(
+      JSON.stringify({
+        activeProvider: 'openai',
+        providers: {
+          gemini: {
+            apiKey: 'g',
+            model: 'gemini-2.5-flash',
+            baseUrl: 'https://g',
+          },
+          openai: { apiKey: 'o', model: 'gpt-4o', baseUrl: 'https://o' },
+        },
+        imageMaxEdgePx: 1600,
+        maxOutputTokens: 8192,
+        requestTimeoutMs: 120000,
+      }),
+    );
+
+    const loaded = loadSettings(store);
+    expect(loaded.providers.gemini.apiKey).toBe('g');
+    expect(loaded.providers.openai.apiKey).toBe('o');
+    // The three that were absent come back at their defaults, fully formed,
+    // rather than undefined — which is what would crash the settings form.
+    ([DEEPSEEK, GITHUB, AZURE, TRIMURTI] as AiProvider[]).forEach(provider => {
+      const cfg = loaded.providers[provider.id];
+      expect(cfg).toBeDefined();
+      expect(cfg.apiKey).toBe('');
+      expect(cfg.model).toBe(provider.defaultModel);
+      expect(cfg.baseUrl).toBe(provider.defaultBaseUrl);
+    });
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* Corrections found by coordinating with the gallery's own            */
+/* trimurti-gateway (kapoorgalleries/sb1-vuxiwzek), which calls these  */
+/* same APIs in production, and by the adversarial review of 3f2e9f4.  */
+/* ------------------------------------------------------------------ */
+
+describe('providers — corrections', () => {
+  it('57. DeepSeek refuses photographs only for its text-only models', () => {
+    // The deployed gateway sends every DeepSeek model text only; its
+    // unmerged successor gives V4.1 Flash low-detail vision. The two agree
+    // that the Pro / reasoner family cannot see a photograph, so that family
+    // is refused here; whether Flash can is left to DeepSeek's endpoint,
+    // which rejects an image part it cannot read rather than dropping it.
+    expect(DEEPSEEK.supportsImages).toBe(true);
+    const flash = cfgFor(DEEPSEEK, 'sk-x');
+    expect(flash.model).toBe('deepseek-v4-flash');
+    expect(DEEPSEEK.buildRequest(twoInlineImages(), flash).url).toContain(
+      '/chat/completions',
+    );
+
+    const pro: ProviderSettings = { ...flash, model: 'deepseek-v4-pro' };
+    const refused = thrownAiError(() =>
+      DEEPSEEK.buildRequest(twoInlineImages(), pro),
+    );
+    expect(refused.kind).toBe('image');
+    expect(refused.message).toContain('deepseek-v4-pro');
+    expect(
+      thrownAiError(() => DEEPSEEK.buildFallbackRequest(twoInlineImages(), pro))
+        .kind,
+    ).toBe('image');
+    // Text-only work on Pro still goes through.
+    expect(DEEPSEEK.buildRequest(notesOnlyRequest(), pro).url).toContain(
+      '/chat/completions',
+    );
+    // The reasoner half of the family is refused too — a regexp narrowed to
+    // Pro alone would let a photograph through to a model that drops it.
+    expect(
+      thrownAiError(() =>
+        DEEPSEEK.buildRequest(twoInlineImages(), {
+          ...flash,
+          model: 'deepseek-reasoner',
+        }),
+      ).kind,
+    ).toBe('image');
+
+    PROVIDER_IDS.forEach(id => {
+      expect(PROVIDERS[id].supportsImages).toBe(true);
+    });
+  });
+
+  it('58. structuredOutput is declared per provider (test 72 covers what it seeds)', () => {
+    // DeepSeek asks for JSON mode; the gateway drops response_format
+    // entirely. Neither is schema-constrained by the endpoint.
+    expect(DEEPSEEK.structuredOutput).toBe(false);
+    expect(TRIMURTI.structuredOutput).toBe(false);
+    PROVIDER_IDS.filter(id => id !== 'deepseek' && id !== 'trimurti').forEach(
+      id => {
+        expect(PROVIDERS[id].structuredOutput).toBe(true);
+      },
+    );
+  });
+
+  it('59. a prompt filtered as a 400 reads as blocked, not as a bad request', () => {
+    // Azure and GitHub report a filtered prompt this way; OpenAI reports the
+    // same outcome as finish_reason on a 200. Wrathful and yab-yum
+    // iconography is ordinary stock here, so the two must read alike.
+    const byCode = thrownAiError(() =>
+      AZURE.extractText(
+        400,
+        { error: { code: 'content_filter', message: 'blocked' } },
+        cfgFor(AZURE, 'k'),
+      ),
+    );
+    expect(byCode.kind).toBe('blocked');
+
+    const byMessage = thrownAiError(() =>
+      GITHUB.extractText(
+        400,
+        {
+          error: {
+            message:
+              'The response was filtered due to the prompt triggering our content management policy.',
+          },
+        },
+        cfgFor(GITHUB, 'k'),
+      ),
+    );
+    expect(byMessage.kind).toBe('blocked');
+
+    // An ordinary 400 is still a bad request — otherwise client.ts could
+    // never reach the structured-output fallback.
+    expect(
+      thrownAiError(() =>
+        AZURE.extractText(
+          400,
+          { error: { message: "Unknown parameter: 'response_format'." } },
+          cfgFor(AZURE, 'k'),
+        ),
+      ).kind,
+    ).toBe('bad_request');
+  });
+
+  it('60. a query string on a default Base URL is not proxy mode', () => {
+    // Compared by where the request lands, not by string identity: the raw
+    // compare accepted a blank key on a request going straight to OpenAI.
+    PROVIDER_IDS.filter(id => id !== 'azure').forEach(id => {
+      const provider = PROVIDERS[id];
+      const withQuery: ProviderSettings = {
+        apiKey: '',
+        model: provider.defaultModel,
+        baseUrl: provider.defaultBaseUrl + '?x=1',
+      };
+      expect(isProxyMode(withQuery, provider)).toBe(false);
+      expect(configProblem(withQuery, provider)).not.toBe('');
+
+      // A genuinely different host is still proxy mode.
+      expect(
+        isProxyMode(
+          { apiKey: '', model: 'm', baseUrl: 'https://gateway.kapoors.com/v1' },
+          provider,
+        ),
+      ).toBe(true);
+    });
+  });
+
+  it('61. the Base URL placeholder is only checked for the provider that has one', () => {
+    // 'YOUR-RESOURCE' is a legal path segment; only Azure's default carries it.
+    expect(
+      configProblem(
+        {
+          apiKey: 'k',
+          model: 'gpt-5.6-terra',
+          baseUrl: 'https://proxy.kapoors.com/YOUR-RESOURCE/v1',
+        },
+        OPENAI,
+      ),
+    ).toBe('');
+    expect(configProblem(cfgFor(AZURE, 'k'), AZURE)).toContain(
+      BASE_URL_PLACEHOLDER,
+    );
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* Coordinating with the gallery's trimurti-gateway                    */
+/*                                                                     */
+/* Every assertion here mirrors a line of the gateway's contract AS     */
+/* DEPLOYED — the Supabase function's own source (version 12, 12 Sept  */
+/* 2026), which is kapoorgalleries/sb1-vuxiwzek PR #130's code and not  */
+/* its unmerged codex/* chain: what it honours, what it drops, and what */
+/* its own page does with the access key.                              */
+/* ------------------------------------------------------------------ */
+
+describe('providers — trimurti gateway', () => {
+  it('62. sends exactly what the gateway honours: namespaced model, messages, stream:false', () => {
+    const cfg = cfgFor(TRIMURTI, 'a-passphrase-of-at-least-32-characters!!');
+    const plan = TRIMURTI.buildRequest(twoInlineImages(), cfg);
+    expect(plan.url).toBe(
+      'https://lbiabcdeojolvxezytkw.supabase.co/functions/v1/trimurti-gateway/chat/completions',
+    );
+    expect(plan.headers.Authorization).toBe(
+      'Bearer a-passphrase-of-at-least-32-characters!!',
+    );
+    expect(plan.headers['api-key']).toBeUndefined();
+
+    const body = JSON.parse(plan.body) as RawNode;
+    expect(body.model).toBe('google/gemini-3.5-flash-lite');
+    expect(body.stream).toBe(false);
+    // The gateway drops response_format, so none is sent and the schema
+    // travels in the system prompt instead.
+    expect(body.response_format).toBeUndefined();
+    const messages = body.messages as { role: string; content: unknown }[];
+    expect(messages[0].role).toBe('system');
+    expect(String(messages[0].content)).toContain(
+      JSON.stringify(CATALOGUE_JSON_SCHEMA),
+    );
+    // Every suggested model carries a publisher prefix; a bare id 400s.
+    TRIMURTI.modelSuggestions.forEach(m => {
+      expect(m.indexOf('/')).toBeGreaterThan(0);
+    });
+    expect(TRIMURTI.defaultModel.indexOf('/')).toBeGreaterThan(0);
+  });
+
+  it('63. every OpenAI-dialect provider now sends stream:false explicitly', () => {
+    OPENAI_DIALECT.forEach(provider => {
+      const req =
+        provider.textOnlyModels &&
+        provider.textOnlyModels.test(provider.defaultModel)
+          ? notesOnlyRequest()
+          : twoInlineImages();
+      const body = JSON.parse(
+        provider.buildRequest(req, cfgFor(provider, 'k')).body,
+      ) as RawNode;
+      expect(body.stream).toBe(false);
+    });
+  });
+
+  it('64. declares the gateway image limits and refuses its text-only slots', () => {
+    expect(TRIMURTI.supportsRemoteImageUrl).toBe(false);
+    expect(TRIMURTI.requiresJpeg).toBe(true);
+    expect(TRIMURTI.maxImageEdgePx).toBe(1280);
+
+    // Models the deployed gateway flattens images for — EVERY deepseek/*
+    // slot, under its comment "DeepSeek is text-only" — are refused
+    // photographs here rather than sent ones the model never sees. local/*
+    // is not a deployed slot at all (the deployed gateway 400s it as not
+    // allowed); it exists only in the unmerged chain, flattened there too,
+    // so refusing it costs nothing either way.
+    const cfg = cfgFor(TRIMURTI, 'k');
+    [
+      'deepseek/deepseek-v4-flash',
+      'deepseek/deepseek-v4-pro',
+      'deepseek/deepseek-chat',
+      'local/llama3.3-70b',
+    ].forEach(model => {
+      const refused = thrownAiError(() =>
+        TRIMURTI.buildRequest(twoInlineImages(), { ...cfg, model: model }),
+      );
+      expect(refused.kind).toBe('image');
+      expect(refused.message).toContain(model);
+    });
+    // The gateway's image-reading slots take them.
+    [
+      'google/gemini-3.5-flash-lite',
+      'openai/gpt-5.6-terra',
+      'anthropic/claude-sonnet-5',
+    ].forEach(model => {
+      expect(
+        TRIMURTI.buildRequest(twoInlineImages(), { ...cfg, model: model }).url,
+      ).toContain('/chat/completions');
+    });
+  });
+
+  it('65. the access key is session-only: never written, always required', () => {
+    expect(TRIMURTI.persistKey).toBe(false);
+    PROVIDER_IDS.filter(id => id !== 'trimurti').forEach(id => {
+      expect(PROVIDERS[id].persistKey).toBe(true);
+    });
+
+    const store = fakeStore(null);
+    const next = defaultSettings();
+    next.providers.trimurti.apiKey = 'a-passphrase-of-at-least-32-characters!!';
+    next.providers.openai.apiKey = 'sk-persisted';
+    saveSettings(next, store);
+    expect(store.value).not.toContain('a-passphrase-of-at-least-32');
+    const back = loadSettings(store);
+    expect(back.providers.trimurti.apiKey).toBe('');
+    expect(back.providers.openai.apiKey).toBe('sk-persisted');
+
+    // The gateway host is the provider's own, so a blank key is refused
+    // rather than read as "a proxy holds it".
+    expect(isProxyMode(defaultSettings().providers.trimurti, TRIMURTI)).toBe(
+      false,
+    );
+    expect(
+      configProblem(defaultSettings().providers.trimurti, TRIMURTI),
+    ).not.toBe('');
+    expect(
+      isProxyMode(
+        { apiKey: '', model: 'm', baseUrl: 'https://gateway.kapoors.com/v1' },
+        TRIMURTI,
+      ),
+    ).toBe(true);
+  });
+
+  it('66. a 503 from the gateway keeps its own explanation', () => {
+    const err = thrownAiError(() =>
+      TRIMURTI.extractText(
+        503,
+        { error: { message: 'The selected provider is not configured.' } },
+        cfgFor(TRIMURTI, 'k'),
+      ),
+    );
+    expect(err.kind).toBe('server');
+    expect(err.message).toContain('The selected provider is not configured.');
+    // A bare 5xx still reads as before.
+    expect(
+      thrownAiError(() =>
+        TRIMURTI.extractText(502, null, cfgFor(TRIMURTI, 'k')),
+      ).message,
+    ).toContain('Try again');
+  });
+
+  it('67. probeGateway reads /key without spending anything, and maps failures', async () => {
+    const settings = defaultSettings();
+    settings.providers.trimurti.apiKey =
+      'a-passphrase-of-at-least-32-characters!!';
+    const seen: { url: string; method: string; auth: string }[] = [];
+    const fetchImpl = ((input: RequestInfo, init?: RequestInit) => {
+      const headers = (init && (init.headers as Record<string, string>)) || {};
+      seen.push({
+        url: String(input),
+        method: (init && init.method) || 'GET',
+        auth: headers.Authorization || '',
+      });
+      return Promise.resolve(
+        new Response(
+          JSON.stringify({
+            data: {
+              label:
+                'Trimurti gateway · keys: Claude, GPT, Gemini · missing: TRIMURTI_DEEPSEEK_API_KEY',
+              providers: {
+                claude: true,
+                gpt: true,
+                deepseek: false,
+                gemini: true,
+              },
+            },
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        ),
+      );
+    }) as typeof fetch;
+
+    const probe = await probeGateway(settings, { fetchImpl });
+    expect(seen).toEqual([
+      {
+        url: 'https://lbiabcdeojolvxezytkw.supabase.co/functions/v1/trimurti-gateway/key',
+        method: 'GET',
+        auth: 'Bearer a-passphrase-of-at-least-32-characters!!',
+      },
+    ]);
+    expect(probe.providers.gemini).toBe(true);
+    expect(probe.providers.deepseek).toBe(false);
+    expect(probe.label).toContain('Gemini');
+    // The default model is Gemini's, and the gateway holds that key.
+    expect(probe.keyForModel).toBe('present');
+
+    // The same gateway with the configured model moved to the one provider
+    // it holds no key for: "connected" alone would hide the 503 a run ends in.
+    settings.providers.trimurti.model = 'deepseek/deepseek-v4-flash';
+    expect((await probeGateway(settings, { fetchImpl })).keyForModel).toBe(
+      'missing',
+    );
+    settings.providers.trimurti.model = 'local/llama3.3-70b';
+    expect((await probeGateway(settings, { fetchImpl })).keyForModel).toBe(
+      'unknown',
+    );
+    settings.providers.trimurti.model = TRIMURTI.defaultModel;
+
+    // A rejected passphrase is an auth error naming the gateway's own
+    // reason, and the passphrase itself is redacted even when echoed back.
+    const rejecting = (() =>
+      Promise.resolve(
+        new Response(
+          JSON.stringify({
+            error: {
+              message:
+                'Invalid access key. a-passphrase-of-at-least-32-characters!!',
+            },
+          }),
+          { status: 401 },
+        ),
+      )) as typeof fetch;
+    const auth = await rejectedAiError(
+      probeGateway(settings, { fetchImpl: rejecting }),
+    );
+    expect(auth.kind).toBe('auth');
+    expect(auth.providerId).toBe('trimurti');
+    expect(auth.message).toContain('Invalid access key.');
+    expect(auth.message).toContain('access key');
+    expect(auth.message).not.toContain('API key');
+    expect(auth.message).not.toContain('at-least-32');
+
+    // A 200 that is not a gateway (a proxy's landing page, say).
+    const notGateway = (() =>
+      Promise.resolve(
+        new Response(JSON.stringify({ hello: 'world' }), { status: 200 }),
+      )) as typeof fetch;
+    expect(
+      (await rejectedAiError(probeGateway(settings, { fetchImpl: notGateway })))
+        .kind,
+    ).toBe('parse');
+
+    // Unreachable: the same network error, naming the host, as a run gives.
+    const unreachable = (() =>
+      Promise.reject(new TypeError('Failed to fetch'))) as typeof fetch;
+    const net = await rejectedAiError(
+      probeGateway(settings, { fetchImpl: unreachable }),
+    );
+    expect(net.kind).toBe('network');
+    expect(net.message).toContain('lbiabcdeojolvxezytkw.supabase.co');
+    // The deployed gateway refuses an unadmitted origin BEFORE the CORS
+    // preflight, so from a browser the allowlist looks exactly like this —
+    // the one hint the dealer needs is named here, and only for the gateway.
+    expect(net.message).toContain('origin allowlist');
+    const direct = await rejectedAiError(
+      runCatalogue(
+        'openai',
+        settingsFixture('openai', 'sk-test0123456789'),
+        dataUrlRequest(),
+        { fetchImpl: unreachable },
+      ),
+    );
+    expect(direct.kind).toBe('network');
+    expect(direct.message).not.toContain('origin allowlist');
+
+    // A /key that never answers is a timeout, not a panel stuck on
+    // "Testing…" — the probe carries the same ceiling as a run.
+    settings.requestTimeoutMs = 20;
+    const hanging = ((_input: RequestInfo, init?: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => {
+        const signal = init ? init.signal : undefined;
+        if (signal) {
+          signal.addEventListener('abort', () => reject(new Error('aborted')));
+        }
+      })) as typeof fetch;
+    const late = await rejectedAiError(
+      probeGateway(settings, { fetchImpl: hanging }),
+    );
+    expect(late.kind).toBe('timeout');
+
+    // A caller's own abort reads as aborted, not as a timeout or a failure.
+    const ctl = new AbortController();
+    const pending = rejectedAiError(
+      probeGateway(settings, { fetchImpl: hanging, signal: ctl.signal }),
+    );
+    ctl.abort();
+    expect((await pending).kind).toBe('aborted');
+
+    // A signal already aborted, and a Base URL that does not parse, never
+    // reach fetch at all — the second would resolve against the page's own
+    // origin and carry the access key there.
+    const spy = stubFetch([{ status: 200, body: {} }]);
+    const gone = new AbortController();
+    gone.abort();
+    expect(
+      (
+        await rejectedAiError(
+          probeGateway(settings, { fetchImpl: spy.impl, signal: gone.signal }),
+        )
+      ).kind,
+    ).toBe('aborted');
+    settings.providers.trimurti.baseUrl = 'trimurti-gateway';
+    const bad = await rejectedAiError(
+      probeGateway(settings, { fetchImpl: spy.impl }),
+    );
+    expect(bad.kind).toBe('bad_request');
+    expect(bad.message).toContain('not a valid URL');
+    expect(spy.calls).toHaveLength(0);
+    settings.providers.trimurti.baseUrl = TRIMURTI.defaultBaseUrl;
+
+    // A timeout that lands while the BODY is being read is still a timeout,
+    // not "answered, but not like a gateway".
+    const slowBody = ((_input: RequestInfo, init?: RequestInit) =>
+      Promise.resolve({
+        status: 200,
+        ok: true,
+        json: () =>
+          new Promise<unknown>((_resolve, reject) => {
+            const s = init ? init.signal : undefined;
+            if (s) {
+              s.addEventListener('abort', () => reject(new Error('aborted')));
+            }
+          }),
+      } as unknown as Response)) as typeof fetch;
+    expect(
+      (await rejectedAiError(probeGateway(settings, { fetchImpl: slowBody })))
+        .kind,
+    ).toBe('timeout');
+
+    // A blank key sends no Authorization header at all (proxy mode).
+    settings.requestTimeoutMs = 120000;
+    settings.providers.trimurti.apiKey = '';
+    seen.length = 0;
+    await probeGateway(settings, { fetchImpl });
+    expect(seen[0].auth).toBe('');
+  });
+
+  it('68. Gemini, DeepSeek and gateway defaults are the ids the DEPLOYED gateway runs', () => {
+    // Ground truth is the Supabase function's own source (version 12, 12
+    // Sept 2026), not any branch of its repository: the unmerged codex/*
+    // chain renames DeepSeek's Flash id, and an earlier commit here followed
+    // that chain by mistake.
+    expect(GEMINI.defaultModel).toBe('gemini-3.5-flash-lite');
+    expect(GEMINI.modelSuggestions).toContain('gemini-3.5-flash-lite');
+    expect(DEEPSEEK.defaultModel).toBe('deepseek-v4-flash');
+    expect(DEEPSEEK.modelSuggestions).toContain('deepseek-v4-pro');
+    expect(DEEPSEEK.defaultBaseUrl).toBe('https://api.deepseek.com');
+
+    expect(TRIMURTI.defaultModel).toBe('google/gemini-3.5-flash-lite');
+    // The gateway's DeepSeek slots are text-only and every run here carries a
+    // photograph, so the suggestions offer no dead end — and no id that
+    // exists only on the unmerged chain.
+    expect(TRIMURTI.modelSuggestions.some(m => /^deepseek\//.test(m))).toBe(
+      false,
+    );
+    expect(TRIMURTI.modelSuggestions).not.toContain('deepseek/deepseek-flash');
+    expect(DEEPSEEK.modelSuggestions).not.toContain('deepseek-flash');
+    expect(TRIMURTI.outputTokenCap).toBe(4096);
+    PROVIDER_IDS.filter(id => id !== 'trimurti').forEach(id => {
+      expect(PROVIDERS[id].outputTokenCap).toBeUndefined();
+    });
+  });
+
+  it('69. a reply the gateway cut off names the gateway cap, not a setting it ignores', () => {
+    const cutOff = {
+      choices: [{ finish_reason: 'length', message: { content: '{' } }],
+    };
+    const viaGateway = thrownAiError(() =>
+      TRIMURTI.extractText(200, cutOff, cfgFor(TRIMURTI, 'k')),
+    );
+    expect(viaGateway.kind).toBe('truncated');
+    expect(viaGateway.message).toContain('4096');
+    expect(viaGateway.message).toContain('ignores "Max output tokens"');
+    expect(viaGateway.message).not.toContain('Raise');
+
+    // A direct provider honours the ceiling, so raising it is the fix.
+    const direct = thrownAiError(() =>
+      OPENAI.extractText(200, cutOff, cfgFor(OPENAI, 'k')),
+    );
+    expect(direct.kind).toBe('truncated');
+    expect(direct.message).toContain('Raise "Max output tokens"');
+    expect(direct.message).not.toContain('caps every reply');
+  });
+
+  it("70. the gateway's own 401, 403, 429 and 500 explanations survive", () => {
+    const gatewaySays = (status: number, message: string, code?: string) =>
+      thrownAiError(() =>
+        TRIMURTI.extractText(
+          status,
+          { error: code ? { code, message } : { message } },
+          cfgFor(TRIMURTI, 'k'),
+        ),
+      );
+
+    const badKey = gatewaySays(401, 'Invalid access key.');
+    expect(badKey.kind).toBe('auth');
+    expect(badKey.message).toContain('Invalid access key.');
+    expect(badKey.message).toContain('access key');
+    expect(badKey.message).not.toContain('API key');
+
+    // A 403 body is the origin allowlist, which no re-typed key cures. A
+    // browser rarely sees it (the gateway refuses before the CORS preflight,
+    // so the fetch fails — test 67 covers that path); a forwarding proxy
+    // delivers it, and then the gateway's line is kept.
+    const badOrigin = gatewaySays(403, 'Browser origin is not allowed.');
+    expect(badOrigin.kind).toBe('auth');
+    expect(badOrigin.message).toContain('Browser origin is not allowed.');
+
+    // A provider's own 401 relayed verbatim through the gateway is about the
+    // key the GATEWAY holds; sending the dealer to the access key would be
+    // the wrong secret.
+    const relayed = gatewaySays(
+      401,
+      'Incorrect API key provided: sk-proj-********. You can find your API key at https://platform.openai.com.',
+    );
+    expect(relayed.kind).toBe('auth');
+    expect(relayed.message).toContain('held on the gateway');
+    expect(relayed.message).toContain('Incorrect API key provided');
+    expect(relayed.message).not.toContain('Check the access key');
+
+    // The gateway's 8 MB body cap, which four large details can exceed.
+    const tooLarge = gatewaySays(413, 'Request body exceeds 8388608 bytes.');
+    expect(tooLarge.kind).toBe('bad_request');
+    expect(tooLarge.message).toContain('8388608');
+    expect(tooLarge.message).toContain('Image max edge');
+
+    const budget = gatewaySays(
+      429,
+      'This request exceeds the remaining Trimurti app usage budget. It was not sent to the model provider.',
+      'trimurti_usage_limit',
+    );
+    expect(budget.kind).toBe('rate_limit');
+    expect(budget.message).toContain('not sent to the model provider');
+
+    const unset = gatewaySays(
+      500,
+      'TRIMURTI_ACCESS_KEY is not configured on the Supabase project.',
+    );
+    expect(unset.kind).toBe('server');
+    expect(unset.message).toContain('TRIMURTI_ACCESS_KEY is not configured');
+
+    // The other providers' secrets keep their own names in the same line.
+    const github = thrownAiError(() =>
+      GITHUB.extractText(401, null, cfgFor(GITHUB, 'k')),
+    );
+    expect(github.message).toContain('GitHub token');
+  });
+
+  it('71. a root-dot host is the provider itself, not a proxy', () => {
+    // The per-provider isOwnEndpoint tests strip the root dot; the generic
+    // compare used by every other provider must not be the one path that
+    // reads `api.openai.com.` as a proxy and accepts a blank key.
+    expect(
+      isProxyMode(
+        { apiKey: '', model: 'm', baseUrl: 'https://api.openai.com./v1' },
+        OPENAI,
+      ),
+    ).toBe(false);
+    expect(
+      isProxyMode(
+        { apiKey: '', model: 'm', baseUrl: 'https://API.OPENAI.COM/v1/' },
+        OPENAI,
+      ),
+    ).toBe(false);
+    expect(
+      isProxyMode(
+        { apiKey: '', model: 'm', baseUrl: 'https://api.openai.com:8443/v1' },
+        OPENAI,
+      ),
+    ).toBe(true);
+  });
+
+  it('72. a provider the endpoint never schema-constrains seeds the review caveat', async () => {
+    // Through the gateway there is no response_format to reject and so no
+    // fallback retry; the record must still arrive flagged as
+    // "not schema-constrained", because it never was.
+    const record = recordFixture();
+    const stub = stubFetch([
+      { status: 200, body: openaiOk(JSON.stringify(record)) },
+    ]);
+    const settings = settingsFixture(
+      'trimurti',
+      'a-passphrase-of-at-least-32-characters!!',
+    );
+    const result = await runCatalogue('trimurti', settings, dataUrlRequest(), {
+      fetchImpl: stub.impl,
+    });
+    expect(result.usedFallback).toBe(true);
+    expect(result.record).toEqual(record);
+    expect(stub.calls).toHaveLength(1);
+    const body = JSON.parse(stub.calls[0].init.body as string) as RawNode;
+    expect(body.response_format).toBeUndefined();
+    expect(body.stream).toBe(false);
+
+    // A direct, schema-constrained provider that never fell back stays false.
+    const direct = stubFetch([
+      { status: 200, body: openaiOk(JSON.stringify(record)) },
+    ]);
+    const viaOpenAi = await runCatalogue(
+      'openai',
+      settingsFixture('openai', 'sk-test0123456789'),
+      dataUrlRequest(),
+      { fetchImpl: direct.impl },
+    );
+    expect(viaOpenAi.usedFallback).toBe(false);
   });
 });
