@@ -56,7 +56,13 @@ export function defaultSettings(): AiSettings {
     providers: defaultProviders(),
     imageMaxEdgePx: 1600,
     maxOutputTokens: 8192,
-    requestTimeoutMs: 120000,
+    /* Above every endpoint's own ceiling, so the browser is never the first
+     * to give up: the gallery's gateway abandons an upstream call at 140s
+     * and then answers with its own explanation, which is worth waiting the
+     * extra seconds for — giving up first loses the explanation AND the
+     * budget reservation it already spent. client.ts raises a lower stored
+     * value to provider.minRequestTimeoutMs for the same reason. */
+    requestTimeoutMs: 150000,
   };
 }
 

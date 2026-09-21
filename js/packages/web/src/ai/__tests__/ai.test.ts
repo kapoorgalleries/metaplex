@@ -1130,6 +1130,25 @@ function providerError(message: string): unknown {
   return { error: { message } };
 }
 
+/** The gateway's own shape for a refusal it made BEFORE reserving budget:
+ *  a machine-readable code beside the message. A provider's rejection
+ *  relayed through the gateway carries no code, which is the whole
+ *  distinction client.ts acts on. */
+function gatewayError(code: string, message: string): unknown {
+  return { error: { code, message, provider_request_sent: false } };
+}
+
+/** The gateway's free refusal of a schema it cannot enforce, verbatim from
+ *  supabase/functions/trimurti-gateway/index.ts (validateResponseFormat). */
+function schemaUnsupported(model: string): unknown {
+  return gatewayError(
+    'trimurti_response_format_unsupported',
+    'response_format is not enforced for model "' +
+      model +
+      '" on this gateway; omit it and describe the schema in the prompt.',
+  );
+}
+
 describe('client', () => {
   it('29. drives a successful Gemini run from a data-URL image', async () => {
     const record = recordFixture();
@@ -2536,9 +2555,7 @@ describe('providers — trimurti gateway', () => {
     const stub = stubFetch([
       {
         status: 400,
-        body: providerError(
-          'response_format is not enforced for model "google/gemini-3.5-flash-lite" on this gateway; omit it and describe the schema in the prompt.',
-        ),
+        body: schemaUnsupported('google/gemini-3.5-flash-lite'),
       },
       { status: 200, body: openaiOk(JSON.stringify(record)) },
     ]);
@@ -2598,5 +2615,202 @@ describe('providers — trimurti gateway', () => {
       { fetchImpl: direct.impl },
     );
     expect(viaOpenAi.usedFallback).toBe(false);
+  });
+
+  it('73. only the gateway refusal that is FREE is retried without the schema', async () => {
+    const record = recordFixture();
+    const settings = settingsFixture(
+      'trimurti',
+      'a-passphrase-of-at-least-32-characters!!',
+    );
+
+    /* The gateway reserves a worst-case token allowance against a daily cap
+     * BEFORE it calls a provider, and never refunds it. Its own refusals
+     * happen before that reservation and carry a code; a provider's own
+     * rejection relayed back arrives with the reservation already spent and
+     * carries none. Both name response_format, so the code is the only thing
+     * that separates a free retry from a second ~46,000-token charge against
+     * an allowance of 100,000 a day. */
+    const relayed = stubFetch([
+      {
+        status: 400,
+        body: providerError(
+          "Invalid schema for response_format 'catalogue_record': 'additionalProperties' is required to be false.",
+        ),
+      },
+      { status: 200, body: openaiOk(JSON.stringify(record)) },
+    ]);
+    settings.providers.trimurti.model = 'openai/gpt-5.6-terra';
+    const spent = await rejectedAiError(
+      runCatalogue('trimurti', settings, dataUrlRequest(), {
+        fetchImpl: relayed.impl,
+      }),
+    );
+    expect(spent.kind).toBe('bad_request');
+    // One call, not two: the second would have bought nothing and cost a
+    // second reservation.
+    expect(relayed.calls).toHaveLength(1);
+
+    // The same message WITH the gateway's code is free, and is retried.
+    const free = stubFetch([
+      { status: 400, body: schemaUnsupported('openai/gpt-5.6-terra') },
+      { status: 200, body: openaiOk(JSON.stringify(record)) },
+    ]);
+    const retried = await runCatalogue('trimurti', settings, dataUrlRequest(), {
+      fetchImpl: free.impl,
+    });
+    expect(retried.usedFallback).toBe(true);
+    expect(free.calls).toHaveLength(2);
+
+    /* A DIRECT provider bills only for calls it actually ran, so a rejected
+     * request costs nothing and the retry stays unconditional there. The
+     * gate is the gateway's alone. */
+    const openAiDirect = stubFetch([
+      {
+        status: 400,
+        body: providerError(
+          "Invalid schema for response_format 'catalogue_record': 'additionalProperties' is required to be false.",
+        ),
+      },
+      { status: 200, body: openaiOk(JSON.stringify(record)) },
+    ]);
+    const viaOpenAi = await runCatalogue(
+      'openai',
+      settingsFixture('openai', 'sk-test0123456789'),
+      dataUrlRequest(),
+      { fetchImpl: openAiDirect.impl },
+    );
+    expect(viaOpenAi.usedFallback).toBe(true);
+    expect(openAiDirect.calls).toHaveLength(2);
+
+    /* The parameter-drift retry is gated the same way, and is the worse of
+     * the two: retryBody rewrites max_tokens into max_completion_tokens and
+     * drops temperature, all three of which the gateway strips before it
+     * calls the provider. The retry would arrive upstream byte-identical,
+     * fail identically, and spend a second reservation doing it. */
+    const drift = stubFetch([
+      {
+        status: 400,
+        body: providerError(
+          "Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead.",
+        ),
+      },
+      { status: 200, body: openaiOk(JSON.stringify(record)) },
+    ]);
+    const relayedDrift = await rejectedAiError(
+      runCatalogue('trimurti', settings, dataUrlRequest(), {
+        fetchImpl: drift.impl,
+      }),
+    );
+    expect(relayedDrift.kind).toBe('bad_request');
+    expect(drift.calls).toHaveLength(1);
+    // The provider still CARRIES the shared retry (test 52); it is the
+    // driver that declines to spend it here.
+    expect(TRIMURTI.retryBody).toBeDefined();
+
+    // Direct, the very same drift message is retried, as test 31 fixes.
+    const directDrift = stubFetch([
+      {
+        status: 400,
+        body: providerError(
+          "Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead.",
+        ),
+      },
+      { status: 200, body: openaiOk(JSON.stringify(record)) },
+    ]);
+    await runCatalogue(
+      'openai',
+      settingsFixture('openai', 'sk-test0123456789'),
+      dataUrlRequest(),
+      { fetchImpl: directDrift.impl },
+    );
+    expect(directDrift.calls).toHaveLength(2);
+  });
+
+  it('74. the browser never gives up before the gateway does', async () => {
+    /* The route abandons an upstream call at 140s and then answers with its
+     * own explanation. Giving up first loses that explanation AND the
+     * reservation already spent on it, so the provider carries a floor the
+     * stored setting cannot undercut. */
+    expect(TRIMURTI.minRequestTimeoutMs).toBe(150000);
+    expect(defaultSettings().requestTimeoutMs).toBe(150000);
+    PROVIDER_IDS.filter(id => id !== 'trimurti').forEach(id => {
+      expect(PROVIDERS[id].minRequestTimeoutMs).toBeUndefined();
+    });
+
+    const settings = settingsFixture(
+      'trimurti',
+      'a-passphrase-of-at-least-32-characters!!',
+    );
+    // A blob written by an older build, or a dealer who typed a smaller
+    // number into Advanced settings.
+    settings.requestTimeoutMs = 30;
+
+    let aborted = false;
+    const hanging = ((_input: RequestInfo, init?: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => {
+        const signal = init ? init.signal : undefined;
+        if (signal) {
+          signal.addEventListener('abort', () => {
+            aborted = true;
+            reject(new Error('aborted'));
+          });
+        }
+      })) as typeof fetch;
+
+    const ctl = new AbortController();
+    const run = rejectedAiError(
+      runCatalogue('trimurti', settings, dataUrlRequest(), {
+        fetchImpl: hanging,
+        signal: ctl.signal,
+      }),
+    );
+    // Long past the stored 30ms, nowhere near the 150s floor.
+    await new Promise(resolve => setTimeout(resolve, 60));
+    expect(aborted).toBe(false);
+    // Cancelled rather than left pending: a 150s timer outliving the test
+    // would hold the runner open.
+    ctl.abort();
+    expect((await run).kind).toBe('aborted');
+    aborted = false;
+
+    /* The same stored value DOES stop a direct provider, which answers on
+     * its own schedule and has no such floor — the floor is the gateway's,
+     * not a blanket raise. */
+    const direct = await rejectedAiError(
+      runCatalogue(
+        'gemini',
+        (() => {
+          const s = settingsFixture('gemini', 'AIzaSyTESTKEY0123456789');
+          s.requestTimeoutMs = 30;
+          return s;
+        })(),
+        dataUrlRequest(),
+        { fetchImpl: hanging },
+      ),
+    );
+    expect(direct.kind).toBe('timeout');
+    expect(direct.message).toContain('0.03s');
+  });
+
+  it('75. the gateway help names both routes the dealer must keep working', () => {
+    /* This page posts to the cataloguing route, but the gateway's own
+     * trimurti.html still posts to the chat route. Help that names only one
+     * invites a proxy that silently breaks the other. */
+    expect(TRIMURTI.baseUrlHelp).toContain('/catalogue/completions');
+    expect(TRIMURTI.baseUrlHelp).toContain('/chat/completions');
+    expect(TRIMURTI.baseUrlHelp).toContain('/key');
+
+    /* The note must not claim the model enforces the record shape: the
+     * gateway maps response_format onto Anthropic's output_config.format,
+     * and that wire shape has not been exercised against the real API from
+     * here. And it must say plainly what the DEFAULT model does, which is
+     * refuse the schema and leave the checking to this layer. */
+    expect(TRIMURTI.note).not.toMatch(/enforced by the model/i);
+    expect(TRIMURTI.note).toContain('Gemini');
+    expect(TRIMURTI.note).toContain('checked here');
+    // No longer an instruction to the dealer: the client raises it itself.
+    expect(TRIMURTI.note).not.toMatch(/set Request timeout/i);
+    expect(TRIMURTI.note).toContain('150 seconds');
   });
 });

@@ -268,10 +268,16 @@ export interface AiProvider {
    *  URL. '/chat/completions' everywhere except the gallery's gateway, whose
    *  cataloguing route lives at '/catalogue/completions'. */
   completionsPath?: string;
+  /** A floor on the request timeout, in milliseconds, for an endpoint that
+   *  abandons an upstream call on its own schedule. Giving up before it does
+   *  throws away its explanation and, on the gallery's gateway, the budget
+   *  reservation it already spent. client.ts raises a lower setting to this. */
+  minRequestTimeoutMs?: number;
   /** A ceiling on reply length that the endpoint itself imposes and that no
    *  request field can raise. The gateway ignores max_tokens and caps every
-   *  reply at 4096, so the truncation advice must not send the dealer to a
-   *  setting that does nothing there. */
+   *  reply — at 8192 on the cataloguing route this layer posts to, 4096 on
+   *  its older chat route — so the truncation advice must not send the
+   *  dealer to a setting that does nothing there. */
   outputTokenCap?: number;
   /** False for a secret that must never be written to localStorage. The
    *  gateway's own page keeps its access key session-only; this layer honours
@@ -415,12 +421,16 @@ export interface AiError {
   message: string;
   status: number | null;
   providerId: ProviderId | null;
+  /** The machine-readable `error.code` an endpoint supplied, when it did.
+   *  The gallery's gateway uses it to say which of its refusals happened
+   *  BEFORE it reserved usage — the only ones a retry may repeat for free. */
+  code: string | null;
 }
 
 export function aiError(
   kind: AiErrorKind,
   message: string,
-  opts: { status?: number; providerId?: ProviderId } = {},
+  opts: { status?: number; providerId?: ProviderId; code?: string } = {},
 ): AiError {
   return {
     __aiError: true,
@@ -428,6 +438,7 @@ export function aiError(
     message,
     status: opts.status === undefined ? null : opts.status,
     providerId: opts.providerId === undefined ? null : opts.providerId,
+    code: opts.code === undefined ? null : opts.code,
   };
 }
 

@@ -131,9 +131,14 @@ export function mapStatus(
   providerMessage: string,
   providerId: ProviderId,
   model: string,
+  providerCode?: string,
 ): AiError {
   const label = PROVIDER_LABELS[providerId];
-  const opts = { status: status, providerId: providerId };
+  const opts = {
+    status: status,
+    providerId: providerId,
+    ...(providerCode ? { code: providerCode } : {}),
+  };
 
   if (status === 400) {
     return aiError(
@@ -270,6 +275,15 @@ function providerErrorMessage(body: unknown): string {
   const wrapper = body as { error?: { message?: unknown } } | null | undefined;
   const err = wrapper ? wrapper.error : undefined;
   return err && typeof err.message === 'string' ? err.message : '';
+}
+
+/** The endpoint's own machine-readable code, when it supplies one. Only the
+ *  gallery's gateway does, and only client.ts reads it — to tell a refusal
+ *  that cost nothing from one that already spent a budget reservation. */
+function providerErrorCode(body: unknown): string {
+  const wrapper = body as { error?: { code?: unknown } } | null | undefined;
+  const err = wrapper ? wrapper.error : undefined;
+  return err && typeof err.code === 'string' ? err.code : '';
 }
 
 /**
@@ -662,6 +676,8 @@ interface OpenAiCompatible {
   outputTokenCap?: number;
   /** Omit for the OpenAI dialect's own path, /chat/completions. */
   completionsPath?: string;
+  /** A floor on the request timeout for an endpoint with a ceiling of its own. */
+  minRequestTimeoutMs?: number;
   /** Omit to persist the key; false keeps it in memory for the session. */
   persistKey?: boolean;
   modelLabel: string;
@@ -756,7 +772,13 @@ function openAiCompatible(spec: OpenAiCompatible): AiProvider {
             { providerId: spec.id, status: status },
           );
         }
-        throw mapStatus(status, providerErrorMessage(body), spec.id, cfg.model);
+        throw mapStatus(
+          status,
+          providerErrorMessage(body),
+          spec.id,
+          cfg.model,
+          providerErrorCode(body),
+        );
       }
 
       const parsed = (body || {}) as OpenAiBody;
@@ -812,6 +834,9 @@ function openAiCompatible(spec: OpenAiCompatible): AiProvider {
   }
   if (spec.outputTokenCap !== undefined) {
     provider.outputTokenCap = spec.outputTokenCap;
+  }
+  if (spec.minRequestTimeoutMs !== undefined) {
+    provider.minRequestTimeoutMs = spec.minRequestTimeoutMs;
   }
   return provider;
 }
@@ -987,16 +1012,22 @@ const TRIMURTI_OWN_HOSTS = /(^|\.)supabase\.co$/i;
  *     Claude Opus 5 and Sonnet 5 with thinking disabled);
  *   - OpenAI receives the photograph at detail 'high'; Gemini and Claude
  *     receive the full 1280px JPEG as they always did;
- *   - a strict json_schema response_format is forwarded to OpenAI and
- *     enforced on Claude Opus 5, Sonnet 5 and Haiku 4.5; Gemini and Sonnet
- *     4.6 answer a free 400 naming response_format, which client.ts turns
- *     into the single schema-in-prompt retry — so usedFallback is true for
- *     those slots and false for the enforced ones;
+ *   - a strict json_schema response_format is FORWARDED for OpenAI (as
+ *     response_format) and for Claude Opus 5, Sonnet 5 and Haiku 4.5 (mapped
+ *     to Anthropic's output_config.format). Forwarded is all this layer may
+ *     claim: the Anthropic mapping has not been exercised against the real
+ *     API from here, so a reply of the wrong shape is still possible on
+ *     those slots and is caught by the parse either way. Gemini — the
+ *     DEFAULT model — and Sonnet 4.6 are refused a schema outright with a
+ *     free 400 naming response_format (code
+ *     trimurti_response_format_unsupported), which client.ts turns into the
+ *     single schema-in-prompt retry, so usedFallback is true for them;
  *   - streaming is refused, so stream:false is required, not just sent;
  *   - images must be JPEG data URLs of at most 1280px on the longest edge,
  *     5 MB and four per request, inside an 8 MB body;
- *   - the gateway abandons an upstream call after 140 s, so the timeout
- *     here should be at least 150 s to see its own clean error;
+ *   - the gateway abandons an upstream call after 140 s, which is why this
+ *     entry carries minRequestTimeoutMs: the browser waits 150 s whatever
+ *     the stored setting says, so the gateway's own clean error arrives;
  *   - an origin it does not admit is refused before the CORS preflight, so
  *     a browser sees a failed fetch rather than the 403 body;
  *   - a gateway without the route answers 404 "No such endpoint", which
@@ -1034,12 +1065,16 @@ export const TRIMURTI: AiProvider = openAiCompatible({
   requiresJpeg: true,
   outputTokenCap: 8192,
   completionsPath: '/catalogue/completions',
+  /* The route abandons an upstream call at 140s; waiting 150 means the
+   * gateway's own explanation arrives instead of a local timeout, and the
+   * reservation it already spent buys something. */
+  minRequestTimeoutMs: 150000,
   persistKey: false,
   modelLabel: 'Gateway model',
   keyLabel: 'Access key',
   baseUrlHelp:
-    'Your trimurti-gateway function URL. Anything placed in front of it must accept POST {base}/catalogue/completions and GET {base}/key and forward the Authorization header.',
-  note: "Routes through your own Trimurti gateway's cataloguing route, so no provider key for this route is kept in this browser — only the gateway access key, and that is held in this page's memory alone: never written to the browser, and gone after a reload or after leaving this step of the mint form. Limits the gateway itself imposes, whatever the Advanced settings below say: photographs are capped at 1,280 px and every reply at 8,192 tokens; DeepSeek models are refused because the gateway sends them no photograph; a slow provider is abandoned after 140 seconds, so set Request timeout to at least 150000. The record shape is enforced by the model on GPT and on Claude Opus 5, Sonnet 5 and Haiku 4.5, and checked here on Gemini and Sonnet 4.6. This site must be on the gateway's origin allowlist, or every request fails as if the network were down; a gateway without the cataloguing route answers \"endpoint not found\". Each run reserves roughly 46,000 of the 100,000 gateway tokens allowed per day from one address.",
+    "Your trimurti-gateway function URL. Anything placed in front of it must forward the Authorization header and accept POST {base}/catalogue/completions, which is what this page uses, as well as GET {base}/key. Keep POST {base}/chat/completions working too: the gateway's own trimurti.html page still posts there.",
+  note: "Routes through your own Trimurti gateway's cataloguing route, so no provider key for this route is kept in this browser — only the gateway access key, and that is held in this page's memory alone: never written to the browser, and gone after a reload or after leaving this step of the mint form. Limits the gateway itself imposes, whatever the Advanced settings below say: photographs are capped at 1,280 px and every reply at 8,192 tokens; DeepSeek models are refused because the gateway sends them no photograph; a slow provider is abandoned after 140 seconds, so this page waits at least 150 seconds for the gateway's own answer even if Request timeout is set lower. On Gemini — the model this provider starts on — the gateway does not accept a schema at all: the record shape is described in the prompt and checked here, and the run is marked as having used the fallback. The schema is passed on to the provider for GPT and for Claude Opus 5, Sonnet 5 and Haiku 4.5; a reply of the wrong shape is still checked here on those too. This site must be on the gateway's origin allowlist, or every request fails as if the network were down; a gateway without the cataloguing route answers \"endpoint not found\". Each run reserves roughly 46,000 of the 100,000 gateway tokens allowed per day from one address.",
   auth: 'bearer',
   // Strict json_schema first; the gateway's free 400 for the slots that
   // cannot enforce one is the single schema-in-prompt retry.

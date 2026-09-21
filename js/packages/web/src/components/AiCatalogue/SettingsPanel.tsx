@@ -40,7 +40,7 @@ const TOKENS_HELP =
   'Ceiling on the response length. A record with a long inscription needs room — too low and the reply is cut off mid-JSON.';
 
 const TIMEOUT_HELP =
-  'Milliseconds before a request is abandoned. 120000 is two minutes.';
+  'Milliseconds before a request is abandoned. 150000 is two and a half minutes.';
 
 function copyProvider(p: ProviderSettings): ProviderSettings {
   return { apiKey: p.apiKey, model: p.model, baseUrl: p.baseUrl };
@@ -342,13 +342,26 @@ export const SettingsPanel = (props: {
             className="royalties-input"
             min={5000}
             step={5000}
-            placeholder="120000"
+            placeholder="150000"
             value={value.requestTimeoutMs}
             onChange={(val: number) =>
               emit({ requestTimeoutMs: positive(val, value.requestTimeoutMs) })
             }
           />
-          <span className="field-info">{TIMEOUT_HELP}</span>
+          {/* Said plainly rather than by silently rewriting the field: a
+              number typed here that the driver will raise would otherwise
+              read back as accepted and be wrong about what the page does. */}
+          <span className="field-info">
+            {TIMEOUT_HELP +
+              (provider.minRequestTimeoutMs !== undefined &&
+              value.requestTimeoutMs < provider.minRequestTimeoutMs
+                ? ' ' +
+                  provider.label +
+                  ' abandons a slow provider on its own schedule, so this page waits ' +
+                  provider.minRequestTimeoutMs +
+                  ' for it however low this is set.'
+                : '')}
+          </span>
         </label>
       </div>
 
