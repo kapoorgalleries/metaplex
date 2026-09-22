@@ -19,11 +19,11 @@ export DEBIAN_FRONTEND=noninteractive
 
 if [ "$NO_OS" = 0 ]; then
   if [ "$OS" = "Darwin" ]; then
-    log "macOS software update (installs what it can without a restart)"
-    $SUDO softwareupdate -ia --verbose 2>&1 | tail -15
+    log "macOS software update (installs what it can; the OS update itself needs a restart and, on Apple silicon, the owner's password: System Settings > General > Software Update)"
+    $SUDO softwareupdate -ia --agree-to-license --verbose 2>&1 | tail -15
     softwareupdate -l 2>&1 | grep -qi 'restart' && REBOOT=yes
     if have brew; then log "Homebrew"; brew update >/dev/null 2>&1; brew upgrade; brew cleanup -s >/dev/null 2>&1; fi
-    if have mas; then log "App Store"; mas upgrade; fi
+    if have mas; then log "App Store"; $SUDO mas update; fi
   elif have apt-get; then
     log "apt"; $SUDO apt-get update -qq && $SUDO apt-get -y -qq dist-upgrade && $SUDO apt-get -y -qq autoremove
     [ -f /var/run/reboot-required ] && REBOOT=yes
@@ -45,12 +45,10 @@ fi
 
 if [ "$NO_CLIS" = 0 ]; then
   if have claude; then log "Claude Code"; claude update 2>&1 | tail -2; fi
-  if have npm; then
-    for p in @openai/codex @google/gemini-cli; do
-      if npm ls -g --depth=0 "$p" >/dev/null 2>&1; then
-        log "$p"; npm install -g --no-fund --no-audit "$p@latest" >/dev/null 2>&1 || echo "  (npm update of $p failed; rerun bootstrap-ai-clis.sh)"
-      fi
-    done
+  if have codex; then log "Codex CLI"; codex update 2>&1 | tail -2; fi   # knows whether it came from the installer, brew or npm
+  if have npm && npm ls -g --depth=0 @google/gemini-cli >/dev/null 2>&1; then
+    log "Gemini CLI"
+    npm install -g --no-fund --no-audit @google/gemini-cli@latest >/dev/null 2>&1 || echo "  (npm update of Gemini CLI failed; rerun bootstrap-ai-clis.sh)"
   fi
 fi
 

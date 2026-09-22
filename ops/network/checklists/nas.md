@@ -10,9 +10,10 @@ Where the same thing lives per vendor:
 | Storage health | Storage Manager | Storage & Snapshots | Storage → Pools | `cat /proc/mdstat`, `zpool status`, `btrfs fi show` |
 | SMART | Storage Manager → HDD/SSD → Health Info | Storage & Snapshots → Disks → Health | Storage → Disks → SMART | `smartctl -a /dev/sdX` |
 | SMB settings | Control Panel → File Services → SMB → Advanced | Control Panel → Network & File Services → Win/Mac/NFS → Advanced | Shares → SMB → Advanced | `/etc/samba/smb.conf` |
-| Enable SSH | Control Panel → Terminal & SNMP | Control Panel → Telnet/SSH | System → Services → SSH | already on |
+| Enable SSH | Control Panel → Terminal & SNMP; the user must be in the administrators group | Control Panel → Network & File Services → Telnet / SSH, then "Edit Access Permission" (administrators only) | System → Services → SSH (off by default); the user needs a home directory, a shell, and the public key pasted in Credentials → Users → SSH Public Key | already on |
+| Admin login for SSH | the named admin you created (the built-in `admin` should be disabled) | `admin` | `truenas_admin` (root login is disabled) | your user |
 | Updates | Control Panel → Update & Restore | Control Panel → Firmware Update | System → Update | `apt` / vendor |
-| USB backup to an external drive | Hyper Backup → local folder & USB | HBS 3 → local | Data Protection → Replication / rsync task | `rsync -aHAX --delete` cron |
+| USB backup to an external drive | Hyper Backup → local folder & USB; format the drive first under Control Panel → External Devices (ext4; exFAT is included from DSM 7.3) | HBS 3 → local; exFAT is free from QTS 5.0.1 | make the USB disk its own ZFS pool, then Data Protection → Replication (local); the UI cannot write NTFS or exFAT | `rsync -aHAX --delete` cron |
 
 ## Not reachable at all (no ping)
 
@@ -20,18 +21,20 @@ Where the same thing lives per vendor:
 2. Link LED on the NAS port and on the switch port. None → cable, port, or the NAS NIC. Try another cable and port.
 3. Router's client list: is the NAS listed, and at which IP? DHCP may have moved it. If found: fix with a **DHCP reservation**, then set the NAS back to DHCP (or a static outside the pool). If the NAS has a static IP from an old subnet (say `192.168.0.20` on a `192.168.1.x` LAN), it is invisible: plug a laptop directly into the NAS with a static `192.168.0.5/24`, open the web UI, set DHCP, move it back.
 4. Synology Assistant / Qfinder Pro / `find.synology.com` from a PC on the LAN finds a NAS with a wrong IP.
-5. Hung: hold the power button until it shuts down (Synology: ~5 s for a safe shutdown; do not pull the plug while the LED is blinking). Power on, wait 3–5 minutes. Check the log afterwards.
+5. Hung: use the power button for a *software* shutdown, not a forced one. Synology: press and hold only until it beeps (about 3–4 s), then let go and wait; holding 10 s forces power off and risks the volume. QNAP: hold about 1.5–3 s until the beep for a software shutdown; 5–10 s forces it. Never pull the plug while the disk LEDs are blinking. Power on, wait 3–5 minutes. Check the log afterwards.
 6. Still nothing: pull the disks (label their bay order first), power on with no disks. If the UI comes up, a disk is hanging the SATA bus; reinsert one at a time.
 
 ## Reachable but shares will not mount
 
-Windows 10/11 refuses **SMB1** and **guest** (passwordless) access by default, and caches old credentials. macOS is fussy about signing.
+Windows 11 has no SMB1 client at all, refuses **guest** (passwordless) shares (Pro since 24H2), **requires SMB signing** since 24H2, and caches old credentials. macOS is fussy about signing too.
 
-- **Protocol**: on the NAS set min SMB2, max SMB3. Never re-enable SMB1 on the PC.
-- **Guest**: turn guest access off on the NAS; create a real user per person and mount with it.
+- **Protocol**: on the NAS set min SMB2, max SMB3. Never re-enable SMB1 on the PC (QNAP's own guest-access workaround is SMB1: do not take it). Where: Synology Control Panel → File Services → SMB → Advanced; QNAP Control Panel → Network & File Services → Win/Mac/NFS/WebDAV → Microsoft Networking → Advanced Options; TrueNAS Shares → SMB → Advanced (it has only a minimum protocol, default SMB2).
+- **Signing**: Windows 11 24H2 needs it. Synology: SMB signing = "Client defined" (not "Disable"); QNAP and TrueNAS: leave signing enabled or "auto".
+- **Guest**: turn guest access off on the NAS; create a real user per person and mount with it. TrueNAS 25.10 and later has no guest option on normal shares at all.
 - **Stale Windows credentials**: `cmdkey /list` → `cmdkey /delete:nas` (and the IP form), then reconnect with the new user. Mapping: `net use N: \\nas\share /user:nas\sanjay /persistent:yes`.
-- **macOS**: Finder → Go → Connect to Server → `smb://sanjay@nas.local/share`. If it hangs, check the NAS's "SMB signing" setting (leave "auto") and that the Mac resolves `nas.local` (mDNS on the NAS).
-- **Wrong password loop**: reset the user's password on the NAS; check the account is not disabled after failed attempts (Control Panel → Security → Account → Auto block).
+- **macOS**: Finder → Go → Connect to Server → `smb://sanjay@nas.local/share`. If it hangs, check the signing setting above and that the Mac resolves `nas.local` (mDNS on the NAS).
+- **Wrong password loop**: reset the user's password on the NAS; check the account is not blocked after failed attempts (Synology: Control Panel → Security → Protection → Auto Block).
+- A closed port 139 is normal now; SMB runs on 445.
 - **Permissions**: the user must be in the share's permission list *and* have file-level rights on the folder.
 
 ## Web UI up, shares gone
@@ -44,9 +47,10 @@ Windows 10/11 refuses **SMB1** and **guest** (passwordless) access by default, a
 
 1. **Do not pull any disk yet.** Take a screenshot of Storage Manager and the SMART page of every disk.
 2. Is there a current backup of the volume? If not, back it up **now** to the healthiest place available (a PC, or one of the Hulk drives once `disk-triage` calls it HEALTHY). A rebuild with a second marginal disk is how arrays die.
-3. Identify the bad disk (bay number, serial). Replace with a NAS-class CMR drive of the same or larger size. Rebuild from the Storage Manager. Rebuilds take hours per TB; let it finish before anything else.
-4. Two disks bad on a single-parity array (SHR-1, RAID 5): stop. Do not rebuild. Copy data off first; then rebuild from scratch.
-5. Afterwards: schedule monthly SMART extended tests and a quarterly data scrub (Storage Manager → schedule).
+3. Read the state word. Synology: **Degraded** → Storage Manager → Repair (after the swap); **Crashed** → the volume is gone, restore from backup. QNAP: **Degraded** → Rebuild RAID; **Error / Not active** → Recover RAID. TrueNAS: Storage → Pools → offline the disk → Replace; the resilver runs on its own.
+4. Identify the bad disk (bay number, serial). Replace with a NAS-class CMR drive of the same or larger size. Rebuilds take hours per TB; let it finish before anything else.
+5. Two disks bad on a single-parity array (SHR-1, RAID 5): stop. Do not rebuild. Copy data off first; then rebuild from scratch.
+6. Afterwards: schedule monthly SMART extended tests and a monthly data scrub (QNAP's own recommendation; TrueNAS defaults to a weekly scrub). A crashed pool drops out of scrub schedules, so re-add the schedule after a restore.
 
 ## Slow
 
@@ -58,8 +62,8 @@ Windows 10/11 refuses **SMB1** and **guest** (passwordless) access by default, a
 
 - DSM/QTS/TrueNAS **update** (release notes first; do it after the volume is healthy).
 - Admin account: strong password, **2FA**; disable the default `admin` on Synology and use a named admin.
-- Turn off QuickConnect / myQNAPcloud / UPnP port forwarding unless actively used. The NAS should not be reachable from the internet.
+- Turn off QuickConnect / myQNAPcloud / UPnP port forwarding unless actively used (QNAP itself "strongly recommends" UPnP off; the 2021–2022 Qlocker, eCh0raix and DeadBolt ransomware waves hit internet-exposed units). The NAS should not be reachable from the internet.
 - Firewall on the NAS: allow only the LAN subnet.
 - Enable SSH (for these scripts) with key login: on Synology the user's home service must be on (User & Group → Advanced → Enable user home), and `~` must not be group-writable (`chmod 755 ~`) or sshd rejects the key.
-- Snapshots on the main shares (daily, keep 30) and a **USB backup task** to a Hulk drive (see `hulk-drives.md`): one copy on the NAS, one on a rotated external, one off-site (cloud or a drive kept elsewhere).
+- Snapshots on the main shares (daily, keep 30; Synology recommends immutable snapshots locked for 7–14 days) and a **USB backup task** to a Hulk drive (see `hulk-drives.md`): one copy on the NAS, one on a rotated external, one off-site (cloud or a drive kept elsewhere).
 - Reservation on the router, hostname set on the NAS, row filled in `inventory.csv`.

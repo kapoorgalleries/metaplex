@@ -41,7 +41,7 @@ Scope, in the order it should be done: discover the LAN → fix the mess → SSH
 | `ssh-keys.sh` | admin machine | Creates `~/.ssh/id_ed25519_trimurti`, pushes it to every inventory host (asks each password once), proves key-only login |
 | `ssh-config-gen.sh` / `.ps1` | admin machine | Generates `~/.ssh/config.d/trimurti` from the inventory so `ssh <name>` works |
 | `run-remote.sh` | admin machine | Copies a script to every selected host and runs it (`--host`, `--os`, `--role`, `--trimurti` filters; `--tty` for sudo prompts) |
-| `bootstrap-ai-clis.sh` / `.ps1` | each target | Node 20+, Claude Code (native installer), Codex CLI, Gemini CLI; prints versions and the sign-in routes |
+| `bootstrap-ai-clis.sh` / `.ps1` | each target | Claude Code and Codex via their official installers, Gemini CLI via npm (installs Node 20+ for it); prints versions and the sign-in routes |
 | `update-all.sh` / `.ps1` | each target | OS packages, Homebrew/winget, Windows Update, the three CLIs; reports `REBOOT_REQUIRED` and never reboots |
 | `nas-check.sh` | admin machine | Ping, port map, vendor guess, share list, SSH probe of the NAS; points at the right `nas.md` section |
 | `disk-triage.sh` / `.ps1` | the machine with the drives | Read-only disk inventory and SMART verdict per disk |
@@ -75,17 +75,18 @@ The same applies to a Mac with Remote Login off and a Linux box without `openssh
 ## SSH troubleshooting (the usual causes, in order)
 
 1. **Windows, admin user, key ignored**: the key must be in `C:\ProgramData\ssh\administrators_authorized_keys` with the file ACL'd to Administrators + SYSTEM only. `%USERPROFILE%\.ssh\authorized_keys` is ignored for administrators. `ssh-keys.sh` and `enable-ssh-server.ps1` do this.
-2. **Windows on a Public network profile**: nothing inbound works. `Set-NetConnectionProfile -NetworkCategory Private`.
-3. **macOS Remote Login off**, or on but restricted to "Only these users" without yours: System Settings → General → Sharing → Remote Login.
+2. **Windows on a Public network profile**: the machine is hidden and file sharing, discovery and ping are blocked, because those built-in rules are Private-only. The SSH rule `enable-ssh-server.ps1` creates covers all profiles, so SSH can work while SMB does not. `Set-NetConnectionProfile -InterfaceIndex N -NetworkCategory Private`.
+3. **macOS Remote Login off**, or on but restricted: System Settings → General → Sharing → Remote Login on, then its (i) button: "Allow access for" All users, or your user listed; tick "Allow full disk access for remote users" if SSH sessions must reach protected folders. From a terminal, `sudo systemsetup -setremotelogin on` only works when that terminal app has Full Disk Access. On a Mac admin machine, load the key into the Keychain once so it survives reboots: `ssh-add --apple-use-keychain ~/.ssh/id_ed25519_trimurti` (`ssh-keys.sh` does this; `ssh-config-gen.sh` adds `UseKeychain yes`).
 4. **IP moved** since the inventory was written: DHCP reservation, then `ssh-config-gen.sh` again.
 5. **Permissions on the target**: `~/.ssh` 700, `authorized_keys` 600, and the home directory itself not group- or world-writable (Synology defaults to 777: `chmod 755 ~`).
 6. **Host key changed** (machine reinstalled): `ssh-keygen -R <ip>` on the admin machine, then reconnect.
 7. Still stuck: `ssh -vvv <name>` and read the last ten lines; on the target, Linux `sudo journalctl -u ssh -n 50`, Windows `Get-WinEvent -LogName OpenSSH/Operational -MaxEvents 50`.
+8. **What a Windows SSH session can and cannot do**: for a member of Administrators it is elevated, so installs work; but it is a network logon, so it carries no credentials for other machines and the Windows Update Agent refuses it. `update-all.ps1` therefore runs Windows Update through a local scheduled task, and `winget` may need its full path (the scripts find it).
 
 ## Sign-in for the three CLIs (per machine, per user)
 
-- **Claude Code**: `claude` opens a browser. Over SSH press `c` to copy the URL, open it anywhere, paste the code back. Without any browser: `claude setup-token` on a signed-in machine, then `CLAUDE_CODE_OAUTH_TOKEN` on the target. Check: `claude doctor`.
-- **Codex**: `codex login` (browser) or `codex login --device-auth` over SSH; API key via `printenv OPENAI_API_KEY | codex login --with-api-key`. Check: `codex login status`.
-- **Gemini CLI**: `gemini` → "Login with Google". Over SSH: `NO_BROWSER=true gemini`, paste the code. Or `GEMINI_API_KEY`. Check: `gemini --version` and a one-line prompt `gemini -p "hi"`.
+- **Claude Code**: `claude` (or `claude auth login`) opens a browser. Over SSH press `c` to copy the URL, open it anywhere, paste the code back. Without any browser on the target: `claude setup-token` on any machine with a browser prints a one-year token (Pro, Max, Team or Enterprise; model requests only, no Remote Control or connectors), then set `CLAUDE_CODE_OAUTH_TOKEN` on the target. Check the login with `claude auth status`; `claude doctor` checks the install, not the login. Over SSH on a Mac the Keychain is locked, so the login is stored in `~/.claude/.credentials.json` (mode 600), which is expected. One subscription on many machines is fine; they share one usage pool.
+- **Codex**: `codex login` (browser), or over SSH `codex login --device-auth` after enabling device-code sign-in under ChatGPT Settings → Security, or forward the callback with `ssh -L 1455:localhost:1455 <host>` and log in through the forwarded browser. API key via `printenv OPENAI_API_KEY | codex login --with-api-key` (exporting the variable alone is not a login). Credentials live in `~/.codex/auth.json`. Check: `codex login status`; `codex doctor` for the install.
+- **Gemini CLI**: `gemini` → "Sign in with Google". Over SSH: `NO_BROWSER=true gemini`, paste the code. A Google Workspace account (not personal Gmail) must export `GOOGLE_CLOUD_PROJECT` first; a personal account must leave it unset. Or `GEMINI_API_KEY` from https://aistudio.google.com/app/apikey. Check: `gemini --version` and a one-line prompt `gemini -p "hi"`.
 
-Native Claude Code installs auto-update; Codex and Gemini are npm packages that `update-all` moves to `@latest`.
+Claude Code and Codex are installed by their official installers and self-update (`claude update`, `codex update`). Gemini CLI is an npm package that also updates itself on launch; `update-all` still moves it to `@latest`.

@@ -19,7 +19,8 @@ for c in claude codex gemini node; do
 done
 printf "os=%s\n" "$(uname -sr)"'
 
-WIN_PROBE='foreach ($c in "claude","codex","gemini","node") {
+WIN_PROBE='$env:Path = "$env:USERPROFILE\.local\bin;$env:LOCALAPPDATA\Programs\OpenAI\Codex\bin;$env:APPDATA\npm;" + $env:Path
+foreach ($c in "claude","codex","gemini","node") {
   if (Get-Command $c -ErrorAction SilentlyContinue) { $v = (& $c --version 2>&1 | Select-Object -First 1) } else { $v = "missing" }
   "$c=$v"
 }

@@ -44,20 +44,30 @@ case "$LINK" in *100Mb*|100baseT*|*"100baseTX"*) warn "link is 100 Mb/s on $IFAC
 case "$MASK" in /24|255.255.255.0) ;; "") ;; *) warn "subnet mask is $MASK, not /24. Passing the right SUBNET matters and the network may be split." ;; esac
 
 # ---------------------------------------------------------------- 2. double NAT
-is_private() {
+is_rfc1918() {  # 10/8, 172.16/12, 192.168/16: a LAN behind a NAT box
   case "$1" in
     10.*|192.168.*) return 0 ;;
     172.*) o="$(printf '%s' "$1" | cut -d. -f2)"; [ "$o" -ge 16 ] && [ "$o" -le 31 ] ;;
+    *) return 1 ;;
+  esac
+}
+is_cgnat() {  # 100.64/10 (RFC 6598): the ISP's carrier-grade NAT, nothing on this LAN
+  case "$1" in
     100.*) o="$(printf '%s' "$1" | cut -d. -f2)"; [ "$o" -ge 64 ] && [ "$o" -le 127 ] ;;
     *) return 1 ;;
   esac
 }
 if have traceroute; then
-  HOPS="$(traceroute -n -m 3 -w 1 -q 1 1.1.1.1 2>/dev/null | awk 'NR>1 {print $2}' | tr '\n' ' ')"
-  PRIV=0
-  for h in $HOPS; do is_private "$h" && PRIV=$((PRIV+1)); done
+  HOPS="$(traceroute -n -m 4 -w 1 -q 1 1.1.1.1 2>/dev/null | awk 'NR>1 {print $2}' | tr '\n' ' ')"
+  PRIV=0; CG=0
+  for h in $HOPS; do
+    is_rfc1918 "$h" && PRIV=$((PRIV+1))
+    is_cgnat "$h" && CG=$((CG+1))
+  done
   if [ "$PRIV" -ge 2 ]; then
-    warn "DOUBLE NAT: the first $PRIV hops are private addresses ($HOPS). See checklists/network-triage.md, 'Double NAT'."
+    warn "DOUBLE NAT: $PRIV of the first hops are private LAN addresses ($HOPS), so a second NAT box sits between this LAN and the internet. Confirm on the router's status page: a WAN IP in 10/8, 172.16/12 or 192.168/16 proves it. See checklists/network-triage.md, 'Double NAT'."
+  elif [ "$CG" -ge 1 ]; then
+    warn "ISP CGNAT: a hop is in 100.64.0.0/10 ($HOPS). That is the carrier's NAT, not a box on this LAN. Inbound port forwards and some VPNs will not work, and only the ISP can change it (ask for a public IP). Nothing to fix on the router."
   else
     ok "single NAT (first hops: ${HOPS:-none})"
   fi

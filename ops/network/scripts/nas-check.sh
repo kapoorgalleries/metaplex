@@ -10,11 +10,11 @@ set -u
 # shellcheck source=lib.sh
 . "$(dirname "$0")/lib.sh"
 
-NAS="${1:-}"; NAS_USER="${2:-admin}"
+NAS="${1:-}"; NAS_USER="${2:-}"
 if [ -z "$NAS" ]; then
   row="$(FILTER_ROLE=nas select_hosts | head -1)"
   IFS=, read -r name ip mac os user role port trimurti notes <<< "$row"
-  NAS="${ip:-$name}"; [ -n "${user:-}" ] && NAS_USER="$user"
+  NAS="${ip:-$name}"; [ -z "$NAS_USER" ] && NAS_USER="${user:-}"
 fi
 [ -n "$NAS" ] || die "no NAS given and no role=nas row in $INVENTORY"
 
@@ -27,7 +27,7 @@ probe() {
   else return 2; fi
 }
 
-log "NAS = $NAS (ssh user $NAS_USER)"
+log "NAS = $NAS (ssh user ${NAS_USER:-not given})"
 # shellcheck disable=SC2086
 if ping -c 2 $PING_W "$NAS" >/dev/null 2>&1; then ok "ping answers"
 else fail "no ping. Power, link or IP problem -> checklists/nas.md 'Not reachable at all'"; fi
@@ -45,7 +45,9 @@ guess=""
 case " $OPEN " in *" 5000 "*|*" 5001 "*) guess="Synology" ;; esac
 [ -z "$guess" ] && case " $OPEN " in *" 8080 "*) guess="QNAP" ;; esac
 if have curl; then
-  page="$(curl -sk -m 4 -D - "https://$NAS/" 2>/dev/null; curl -s -m 4 -D - "http://$NAS/" 2>/dev/null)"
+  # QTS does not redirect 80 -> 8080 by default and DSM lives on 5000, so look at those too
+  page="$(curl -sk -m 4 -D - "https://$NAS/" 2>/dev/null; curl -s -m 4 -D - "http://$NAS/" 2>/dev/null
+          curl -s -m 4 -D - "http://$NAS:5000/" 2>/dev/null; curl -s -m 4 -D - "http://$NAS:8080/" 2>/dev/null)"
   printf '%s' "$page" | grep -qi truenas  && guess="TrueNAS"
   printf '%s' "$page" | grep -qi synology && guess="Synology"
   printf '%s' "$page" | grep -qi qnap     && guess="QNAP"
@@ -66,11 +68,15 @@ have showmount && { log "NFS exports:"; showmount -e "$NAS" 2>&1 | sed 's/^/   /
 
 case " $OPEN " in
   *" 22 "*)
-    log "ssh probe as $NAS_USER (key, then password if needed):"
-    ssh -o ConnectTimeout=6 -o StrictHostKeyChecking=accept-new "$NAS_USER@$NAS" \
-      'uname -a; for f in /etc/synoinfo.conf /etc/config/uLinux.conf /etc/version; do [ -f $f ] && echo "  $f present"; done; df -h 2>/dev/null | grep -E "^/dev|volume|Filesystem" | head -8' </dev/null 2>&1 | sed 's/^/   /'
+    if [ -n "$NAS_USER" ]; then
+      log "ssh probe as $NAS_USER (key, then password if needed):"
+      ssh -o ConnectTimeout=6 -o StrictHostKeyChecking=accept-new "$NAS_USER@$NAS" \
+        'uname -a; for f in /etc/synoinfo.conf /etc/config/uLinux.conf /etc/version; do [ -f $f ] && echo "  $f present"; done; df -h 2>/dev/null | grep -E "^/dev|volume|Filesystem" | head -8' </dev/null 2>&1 | sed 's/^/   /'
+    else
+      warn "ssh is open but no user known: rerun as  nas-check.sh $NAS <user>  (Synology: your named admin; QNAP: admin; TrueNAS: truenas_admin), or fill the inventory row"
+    fi
     ;;
-  *) warn "ssh is closed on the NAS (Synology: Control Panel > Terminal & SNMP > Enable SSH; QNAP: Control Panel > Network & File Services > Telnet/SSH)" ;;
+  *) warn "ssh is closed on the NAS (Synology: Control Panel > Terminal & SNMP; QNAP: Control Panel > Network & File Services > Telnet/SSH; TrueNAS: System > Services > SSH)" ;;
 esac
 
 echo

@@ -26,7 +26,8 @@ if [ ! -f "$KEY_FILE" ]; then
 fi
 [ -f "$PUB" ] || die "public key missing: $PUB"
 PUBKEY="$(cat "$PUB")"
-ssh-add "$KEY_FILE" >/dev/null 2>&1 || true
+if [ "$(local_os)" = macos ]; then ssh-add --apple-use-keychain "$KEY_FILE" >/dev/null 2>&1 || true
+else ssh-add "$KEY_FILE" >/dev/null 2>&1 || true; fi
 
 test_login() {  # user host port
   ssh $SSH_OPTS -i "$KEY_FILE" -o IdentitiesOnly=yes -o PasswordAuthentication=no -p "$3" "$1@$2" 'echo TRIMURTI_OK' </dev/null 2>/dev/null | grep -q TRIMURTI_OK

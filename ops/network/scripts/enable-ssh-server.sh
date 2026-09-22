@@ -23,10 +23,20 @@ if [ "$OS" = "Darwin" ]; then
   if $SUDO systemsetup -getremotelogin 2>/dev/null | grep -qi ': on'; then
     echo "Remote Login already on"
   else
-    $SUDO systemsetup -setremotelogin on 2>/dev/null || $SUDO launchctl load -w /System/Library/LaunchDaemons/ssh.plist 2>/dev/null || true
+    out="$($SUDO systemsetup -setremotelogin on 2>&1)" || true
+    if printf '%s' "$out" | grep -qi 'Full Disk Access'; then
+      echo "$out"
+      echo "This terminal app needs Full Disk Access for that command (System Settings > Privacy & Security > Full Disk Access)."
+    fi
     if ! $SUDO systemsetup -getremotelogin 2>/dev/null | grep -qi ': on'; then
-      echo "Could not enable Remote Login from the shell (macOS wants Full Disk Access for the terminal app)."
-      echo "Turn it on in System Settings > General > Sharing > Remote Login, allow your user, then rerun."
+      # launchd route (the old 'launchctl load -w' is deprecated)
+      $SUDO launchctl enable system/com.openssh.sshd 2>/dev/null || true
+      $SUDO launchctl bootstrap system /System/Library/LaunchDaemons/ssh.plist 2>/dev/null || true
+    fi
+    if ! $SUDO systemsetup -getremotelogin 2>/dev/null | grep -qi ': on'; then
+      echo "Could not enable Remote Login from the shell."
+      echo "System Settings > General > Sharing > Remote Login: on. Then the (i) button: 'Allow access for' All users, or add your user,"
+      echo "and tick 'Allow full disk access for remote users' if SSH sessions must reach protected folders. Rerun afterwards."
       exit 1
     fi
   fi

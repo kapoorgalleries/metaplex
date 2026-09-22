@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Install Claude Code, OpenAI Codex CLI and Gemini CLI on this macOS or Linux
-# machine, plus Node.js 20+ (Codex and Gemini are npm packages; Claude Code is
-# a native binary and needs no Node). Idempotent: rerun to upgrade everything.
+# machine. Claude Code and Codex are native binaries put in place by their
+# official installers (npm is the fallback for Codex); Gemini CLI is an npm
+# package, so Node.js 20+ is installed for it. Idempotent: rerun to upgrade.
 # Run it on the target, or push it to every host with run-remote.sh.
 #
 # Usage: bootstrap-ai-clis.sh [--skip-claude] [--skip-codex] [--skip-gemini] [--skip-node]
@@ -38,7 +39,7 @@ node_ok() { have node && [ "$(node -p 'process.versions.node.split(".")[0]')" -g
 
 install_node() {
   if node_ok; then log "node $(node --version) present"; return 0; fi
-  log "installing Node.js 22 (Codex and Gemini need 20+)"
+  log "installing Node.js 22 (Gemini CLI needs 20+)"
   if [ "$OS" = "Darwin" ]; then
     have brew || { warn "Homebrew is missing. Install it from https://brew.sh, then rerun."; return 1; }
     brew install node >/dev/null 2>&1 || brew upgrade node >/dev/null 2>&1 || true
@@ -79,17 +80,31 @@ install_claude() {
   ensure_path "$HOME/.local/bin"
 }
 
-install_codex()  { log "installing/updating Codex CLI";  npm install -g --no-fund --no-audit @openai/codex@latest >/dev/null; }
-install_gemini() { log "installing/updating Gemini CLI"; npm install -g --no-fund --no-audit @google/gemini-cli@latest >/dev/null; }
+install_codex() {
+  if have codex; then
+    log "codex present ($(codex --version 2>/dev/null | head -1)); checking for an update"
+    codex update >/dev/null 2>&1 || true
+    return 0
+  fi
+  log "installing Codex CLI (official installer, self-updates with 'codex update')"
+  if curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=1 sh; then
+    ensure_path "$HOME/.local/bin"
+  elif have npm; then
+    warn "installer failed; falling back to npm"
+    npm install -g --no-fund --no-audit @openai/codex@latest >/dev/null
+  else
+    warn "Codex install failed and npm is not available; rerun after fixing network access to chatgpt.com"
+  fi
+}
+
+install_gemini() { log "installing/updating Gemini CLI (npm)"; npm install -g --no-fund --no-audit @google/gemini-cli@latest >/dev/null; }
 
 have curl || { warn "curl is required"; exit 1; }
 [ "$SKIP_CLAUDE" = 1 ] || install_claude
-if [ "$SKIP_CODEX" = 1 ] && [ "$SKIP_GEMINI" = 1 ]; then SKIP_NODE=1; fi
-if [ "$SKIP_NODE" = 1 ] || install_node; then
-  if node_ok; then
-    setup_npm_prefix
-    [ "$SKIP_CODEX" = 1 ]  || install_codex
-    [ "$SKIP_GEMINI" = 1 ] || install_gemini
+[ "$SKIP_CODEX" = 1 ]  || install_codex
+if [ "$SKIP_GEMINI" = 0 ]; then
+  if [ "$SKIP_NODE" = 1 ] || install_node; then
+    if node_ok; then setup_npm_prefix; install_gemini; fi
   fi
 fi
 
@@ -100,13 +115,22 @@ done
 cat <<'EOF'
 
 Sign in once per machine, per user (open a NEW terminal first so PATH is fresh):
-  claude   run `claude`. A browser opens. Over SSH press `c` to copy the URL, open it on any
-           machine, then paste the code back at "Paste code here if prompted".
-           No-browser alternative: on a machine that is already signed in run `claude setup-token`,
-           then on this machine  export CLAUDE_CODE_OAUTH_TOKEN=<token>  (needs a Pro/Max/Team plan).
-  codex    run `codex login` (browser), or over SSH  `codex login --device-auth`.
-           API key instead:  printenv OPENAI_API_KEY | codex login --with-api-key
-           check with:  codex login status
-  gemini   run `gemini` and choose "Login with Google". Over SSH run  NO_BROWSER=true gemini
-           and paste the code back, or use an AI Studio key:  export GEMINI_API_KEY=<key>
+  claude   run `claude` (or `claude auth login`). A browser opens; over SSH press `c` to copy the
+           URL, open it on any machine, then paste the code back at "Paste code here if prompted".
+           No browser anywhere: `claude setup-token` on any machine with a browser prints a one-year
+           token (Pro/Max/Team/Enterprise; model requests only), then here:
+           export CLAUDE_CODE_OAUTH_TOKEN=<token>
+           check:  claude auth status     install health:  claude doctor
+           (Over SSH on a Mac the Keychain is locked, so the login lands in ~/.claude/.credentials.json
+           with mode 600 instead. That is expected.)
+  codex    run `codex login` (browser). Over SSH: `codex login --device-auth` (turn on device-code
+           sign-in under ChatGPT Settings > Security first), or forward the callback port from the
+           machine with the browser:  ssh -L 1455:localhost:1455 <this-host>  then `codex login`.
+           API key:  printenv OPENAI_API_KEY | codex login --with-api-key
+           (exporting OPENAI_API_KEY on its own is not a login)
+           check:  codex login status     credentials: ~/.codex/auth.json
+  gemini   run `gemini` and choose "Sign in with Google". Over SSH run  NO_BROWSER=true gemini
+           and paste the code back. Google Workspace account (not personal Gmail): first
+           export GOOGLE_CLOUD_PROJECT=<project-id>; personal Gmail must leave it unset.
+           API key instead:  export GEMINI_API_KEY=<key>   (https://aistudio.google.com/app/apikey)
 EOF

@@ -16,6 +16,8 @@ umask 077; mkdir -p "$CFG_DIR"; touch "$MAIN"
     [ -n "$name" ] || continue
     printf '\nHost %s\n  HostName %s\n  User %s\n  Port %s\n  IdentityFile %s\n  IdentitiesOnly yes\n  ServerAliveInterval 30\n  ServerAliveCountMax 3\n' \
       "$name" "${ip:-$name}" "$user" "${port:-22}" "$KEY_FILE"
+    # Apple's ssh keeps the key's passphrase in the Keychain across reboots
+    [ "$(local_os)" = macos ] && printf '  IgnoreUnknown UseKeychain\n  UseKeychain yes\n  AddKeysToAgent yes\n'
   done <<< "$(select_hosts)"
 } > "$CFG"
 

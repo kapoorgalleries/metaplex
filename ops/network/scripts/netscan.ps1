@@ -33,24 +33,31 @@ Write-Host "dns servers: $dns"
 if ($adapter.LinkSpeed -match '^100 Mbps') { Write-Warning "link is 100 Mbps: bad cable or a 100 Mb switch port. Gigabit expected." }
 if ($prefix -ne 24) { Write-Warning "prefix is /$prefix, not /24. The network may be split; pass -Subnet if the sweep looks wrong." }
 if ($profile -and $profile -ne 'Private' -and $profile -ne 'DomainAuthenticated') {
-  Write-Warning "network profile is '$profile'. Windows blocks inbound ping, SSH and SMB on Public."
+  Write-Warning "network profile is '$profile'. On Public, Windows hides this machine and blocks file sharing, discovery and ping (SSH only works if its firewall rule covers all profiles, as enable-ssh-server.ps1 sets)."
   Write-Warning "fix (admin): Set-NetConnectionProfile -InterfaceIndex $ifIndex -NetworkCategory Private"
 }
 
 # ---------------------------------------------------------------- 2. double NAT
-function Test-Private([string]$ip) {
+function Test-Rfc1918([string]$ip) {   # 10/8, 172.16/12, 192.168/16: a LAN behind a NAT box
   $o = $ip -split '\.'
   if ($o.Count -ne 4) { return $false }
   return ($o[0] -eq '10') -or ($o[0] -eq '192' -and $o[1] -eq '168') -or
-         ($o[0] -eq '172' -and [int]$o[1] -ge 16 -and [int]$o[1] -le 31) -or
-         ($o[0] -eq '100' -and [int]$o[1] -ge 64 -and [int]$o[1] -le 127)
+         ($o[0] -eq '172' -and [int]$o[1] -ge 16 -and [int]$o[1] -le 31)
 }
-$hops = @(tracert -d -h 3 -w 1000 1.1.1.1 2>$null | ForEach-Object {
+function Test-Cgnat([string]$ip) {     # 100.64/10 (RFC 6598): the ISP's carrier-grade NAT
+  $o = $ip -split '\.'
+  return ($o.Count -eq 4) -and ($o[0] -eq '100' -and [int]$o[1] -ge 64 -and [int]$o[1] -le 127)
+}
+$hops = @(tracert -d -h 4 -w 1000 1.1.1.1 2>$null | ForEach-Object {
   if ($_ -match '^\s*\d+\s.*?(\d+\.\d+\.\d+\.\d+)\s*$') { $matches[1] }
 })
-$priv = @($hops | Where-Object { Test-Private $_ }).Count
-if ($priv -ge 2) { Write-Warning "DOUBLE NAT: the first $priv hops are private ($($hops -join ' ')). See checklists\network-triage.md, 'Double NAT'." }
-else { Write-Host "single NAT (first hops: $($hops -join ' '))" }
+$priv = @($hops | Where-Object { Test-Rfc1918 $_ }).Count
+$cg   = @($hops | Where-Object { Test-Cgnat $_ }).Count
+if ($priv -ge 2) {
+  Write-Warning "DOUBLE NAT: $priv of the first hops are private LAN addresses ($($hops -join ' ')), so a second NAT box sits between this LAN and the internet. Confirm on the router's status page: a WAN IP in 10/8, 172.16/12 or 192.168/16 proves it. See checklists\network-triage.md, 'Double NAT'."
+} elseif ($cg -ge 1) {
+  Write-Warning "ISP CGNAT: a hop is in 100.64.0.0/10 ($($hops -join ' ')). That is the carrier's NAT, not a box on this LAN; inbound port forwards will not work and only the ISP can change it. Nothing to fix on the router."
+} else { Write-Host "single NAT (first hops: $($hops -join ' '))" }
 
 # ---------------------------------------------------------------- 3. sweep
 Write-Host "pinging $Subnet.1-254 in parallel (about 3 s) ..."

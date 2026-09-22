@@ -32,7 +32,8 @@ if (-not (Get-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' -ErrorAction Silentl
   New-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' -DisplayName 'OpenSSH Server (sshd)' -Enabled True `
     -Direction Inbound -Protocol TCP -Action Allow -LocalPort 22 | Out-Null
 }
-# Inbound rules only apply on Private/Domain networks; a Public profile blocks SSH, SMB and ping.
+# The SSH rule above applies to every profile, but on a Public profile Windows hides the machine and blocks
+# file sharing, discovery and ping (those built-in rules are Private-only). The rest of the kit needs Private.
 if (-not $KeepPublicProfile) {
   Get-NetConnectionProfile | Where-Object { $_.NetworkCategory -eq 'Public' } | ForEach-Object {
     Write-Warning "interface '$($_.InterfaceAlias)' was on the Public profile; switching it to Private (pass -KeepPublicProfile to skip)"

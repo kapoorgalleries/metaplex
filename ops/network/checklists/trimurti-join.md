@@ -14,20 +14,22 @@ Whatever the answer, the per-machine onboarding at the bottom applies. The middl
 Install and join, per OS:
 
 ```bash
-# Linux
+# Linux (a real distro; not the Synology/QNAP packages)
 curl -fsSL https://tailscale.com/install.sh | sh
-sudo tailscale up --ssh              # --ssh lets tailnet members SSH in with tailnet identity (Linux only)
-# macOS
-brew install --cask tailscale        # the menu-bar app; sign in from it. CLI: /Applications/Tailscale.app/Contents/MacOS/Tailscale
+sudo tailscale up --ssh              # Tailscale SSH: tailnet members log in with their tailnet identity
+# macOS: the standalone app (Tailscale's recommended build)
+brew install --cask tailscale-app    # sign in from the menu bar. CLI: /Applications/Tailscale.app/Contents/MacOS/Tailscale
 ```
 
 ```powershell
 # Windows
-winget install --id tailscale.tailscale -e
+winget install --id Tailscale.Tailscale -e      # the id is case-sensitive when -e is used
 # then sign in from the tray icon, or:  tailscale up
 ```
 
-Then in the Tailscale admin console: approve the machine if approval is on, give it the right tags/ACL group, turn on **MagicDNS** so `ssh new-pc-1` resolves by tailnet name, and disable key expiry for machines that must stay reachable unattended. Put the tailnet name (`new-pc-1.<tailnet>.ts.net`) in the inventory notes.
+Tailscale SSH (`--ssh`) can run on Linux and the BSDs, and on macOS only with the open-source daemon (`brew install tailscale`, not the app). Windows cannot be a Tailscale SSH server as of September 2026. It also needs an `ssh` section in the tailnet's access policy. Everywhere else, ordinary OpenSSH over the tailnet works, which is what this kit sets up anyway.
+
+Then in the Tailscale admin console: approve the machine if device approval is on, give it the right tags or ACL group, check **MagicDNS** is on (the default for tailnets created since late 2022) so `ssh new-pc-1` resolves as `new-pc-1.<tailnet>.ts.net`, and **Disable key expiry** on machines that must stay reachable unattended (keys otherwise expire after 180 days). The free Personal plan covers 6 users and their devices. Put the tailnet name in the inventory notes.
 
 ## Case B: Convention only
 

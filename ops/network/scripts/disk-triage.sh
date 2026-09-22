@@ -15,22 +15,43 @@ exec > >(tee "$REPORT") 2>&1
 
 echo "== $(hostname) · $(date) · $OS =="
 
+# Raw value of one ATA attribute: column 10, with any "(min max)" tail that some
+# firmwares append stripped off. ($NF would pick up that tail and break the test.)
+attr() { printf '%s\n' "$1" | awk -v id="$2" '$1 == id {v = $10; gsub(/[^0-9].*/, "", v); print v; exit}'; }
+nvme_field() { printf '%s\n' "$1" | awk -F: -v k="$2" 'index($0, k) == 1 {gsub(/[^0-9]/, "", $2); print $2; exit}'; }
+
 smart_verdict() {  # $1 = smartctl -H -A output
-  local out="$1" realloc pend uncorr
-  realloc="$(printf '%s\n' "$out" | awk '$1 == 5   {print $NF}')"
-  pend="$(printf '%s\n' "$out"    | awk '$1 == 197 {print $NF}')"
-  uncorr="$(printf '%s\n' "$out"  | awk '$1 == 198 {print $NF}')"
+  local out="$1" realloc rep_unc cmd_to pend uncorr nvme_err spare used crit
+  realloc="$(attr "$out" 5)"; rep_unc="$(attr "$out" 187)"; cmd_to="$(attr "$out" 188)"
+  pend="$(attr "$out" 197)"; uncorr="$(attr "$out" 198)"
+  nvme_err="$(nvme_field "$out" 'Media and Data Integrity Errors')"
+  spare="$(nvme_field "$out" 'Available Spare:')"; used="$(nvme_field "$out" 'Percentage Used')"
+  crit="$(printf '%s\n' "$out" | awk -F: '/^Critical Warning/ {gsub(/[[:space:]]/, "", $2); print $2; exit}')"
   if printf '%s' "$out" | grep -qE 'overall-health.*FAILED|Health Status: FAILED'; then
-    echo "FAILING (SMART self-assessment failed) - copy data off NOW, then retire"
+    echo "FAILING (SMART self-assessment failed) - copy data off NOW with ddrescue, then retire"
   elif [ "${pend:-0}" -gt 0 ] 2>/dev/null || [ "${uncorr:-0}" -gt 0 ] 2>/dev/null; then
     echo "FAILING (pending=${pend:-0} uncorrectable=${uncorr:-0} sectors) - copy data off NOW with ddrescue, then retire"
-  elif [ "${realloc:-0}" -gt 0 ] 2>/dev/null; then
-    echo "WATCH (reallocated sectors=$realloc) - ok for an offline copy, never for RAID"
-  elif printf '%s' "$out" | grep -qE 'overall-health.*PASSED|Health Status: OK|Percentage Used'; then
-    echo "HEALTHY"
+  elif [ "${nvme_err:-0}" -gt 0 ] 2>/dev/null || { [ -n "$crit" ] && [ "$crit" != "0x00" ]; }; then
+    echo "FAILING (NVMe media errors=${nvme_err:-0} critical warning=${crit:-none}) - copy data off NOW, then retire"
+  elif [ "${realloc:-0}" -gt 0 ] 2>/dev/null || [ "${rep_unc:-0}" -gt 0 ] 2>/dev/null || [ "${cmd_to:-0}" -gt 0 ] 2>/dev/null; then
+    echo "WATCH (reallocated=${realloc:-0} reported-uncorrectable=${rep_unc:-0} command-timeouts=${cmd_to:-0}) - ok for an offline copy, never for RAID"
+  elif { [ -n "$spare" ] && [ "$spare" -lt 10 ]; } 2>/dev/null || { [ -n "$used" ] && [ "$used" -ge 100 ]; } 2>/dev/null; then
+    echo "WATCH (NVMe spare=${spare:-?}% used=${used:-?}%) - near end of life, offline copies only"
+  elif printf '%s' "$out" | grep -qE 'overall-health.*PASSED|Health Status: OK|SMART/Health Information'; then
+    echo "HEALTHY (run a long self-test before trusting it: smartctl -t long, then smartctl -l selftest)"
   else
     echo "UNKNOWN (SMART not readable through this USB bridge; test it in a SATA bay or the NAS)"
   fi
+}
+
+# smartctl output for a device, trying the device types that rescue USB bridges.
+smart_read() {
+  local d out
+  for d in auto sat sat,12 usbjmicron usbsunplus; do
+    out="$($SUDO smartctl -H -A -d "$d" "$1" 2>/dev/null)"
+    if printf '%s' "$out" | grep -qE 'overall-health|Health Status|SMART/Health Information'; then printf '%s' "$out"; return 0; fi
+  done
+  printf '%s' "$out"; return 1
 }
 
 if [ "$OS" = "Linux" ]; then
@@ -45,18 +66,19 @@ if [ "$OS" = "Linux" ]; then
   if have smartctl; then
     for d in $(lsblk -dno NAME,TYPE 2>/dev/null | awk '$2 == "disk" {print "/dev/" $1}'); do
       echo "--- $d  $(lsblk -dno MODEL,SIZE "$d" 2>/dev/null | tr -s ' ')"
-      out="$($SUDO smartctl -H -A -d auto "$d" 2>/dev/null)"
-      printf '%s' "$out" | grep -q 'SMART' || out="$($SUDO smartctl -H -A -d sat "$d" 2>/dev/null)"
+      out="$(smart_read "$d")" || true
       printf '%s\n' "$out" | awk '
         /overall-health|Health Status/ {print "   " $0}
-        /^ *(5|9|187|188|194|196|197|198|199) / {printf "   %-4s %-28s raw=%s\n", $1, $2, $NF}
-        /Percentage Used|Available Spare:|Media and Data Integrity Errors|^Temperature:|Power On Hours/ {print "   " $0}'
+        /^ *(5|9|187|188|194|196|197|198|199) / {printf "   %-4s %-28s raw=%s\n", $1, $2, $10}
+        /Percentage Used|Available Spare:|Media and Data Integrity Errors|Critical Warning|^Temperature:|Power On Hours/ {print "   " $0}'
+      $SUDO smartctl -l selftest "$d" 2>/dev/null | awk '/^# *[0-9]/ {n++; if (n <= 2) print "   selftest " $0}'
       echo "   VERDICT $d: $(smart_verdict "$out")"
     done
   else
     echo "smartctl missing:  sudo apt install smartmontools   (dnf/pacman: smartmontools), then rerun"
   fi
-  echo; echo "To look inside a drive without writing to it:  sudo mkdir -p /mnt/ro && sudo mount -o ro /dev/sdX1 /mnt/ro"
+  echo; echo "To look inside a drive without writing to it:  sudo blockdev --setro /dev/sdX && sudo mkdir -p /mnt/ro && sudo mount -o ro,noload /dev/sdX1 /mnt/ro"
+  echo "   (ro,noload keeps ext4 from replaying its journal; for NTFS use  -t ntfs-3g -o ro)"
 else
   echo; echo "== disks =="
   diskutil list
@@ -68,16 +90,18 @@ else
   echo; echo "== mounted volumes =="
   df -h 2>/dev/null | grep -E '^Filesystem|^/dev/'
   echo; echo "== SMART =="
+  echo "note: macOS has no SAT pass-through, so SMART is normally unreadable for USB drives here ('SMART Status: Not Supported'"
+  echo "      means unknown, not bad), and the third-party SAT SMART driver does not work on Apple-silicon Macs."
+  echo "      For a real answer test the bare drive in a Linux box or a NAS bay."
   if have smartctl; then
     for d in $(diskutil list 2>/dev/null | awk '/^\/dev\/disk[0-9]+ \(/ && !/synthesized/ {print $1}'); do
       echo "--- $d"
-      out="$($SUDO smartctl -H -A "$d" 2>/dev/null)"
-      printf '%s\n' "$out" | grep -E 'overall-health|Health Status|Reallocated|Pending|Uncorrectable|Power_On|Temperature|Percentage Used|Media and Data' | sed 's/^ */   /'
+      out="$(smart_read "$d")" || true
+      printf '%s\n' "$out" | grep -E 'overall-health|Health Status|Reallocated|Reported_Uncorrect|Command_Timeout|Pending|Uncorrectable|Power_On|Temperature|Percentage Used|Available Spare|Media and Data|Critical Warning' | sed 's/^ */   /'
       echo "   VERDICT $d: $(smart_verdict "$out")"
     done
   else
     echo "smartctl missing:  brew install smartmontools"
-    echo "note: USB enclosures rarely pass SMART through on macOS; 'SMART Status: Not Supported' above means unknown, not bad."
   fi
   echo; echo "To look inside a drive without writing to it:  diskutil mount readOnly /dev/diskNsM"
 fi
