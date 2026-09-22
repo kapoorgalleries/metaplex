@@ -50,7 +50,7 @@ if (\$isAdmin) { \$f = 'C:\ProgramData\ssh\administrators_authorized_keys' } els
 \$d = Split-Path -Parent \$f; if (-not (Test-Path \$d)) { New-Item -ItemType Directory -Path \$d -Force | Out-Null }
 if (-not (Test-Path \$f)) { New-Item -ItemType File -Path \$f -Force | Out-Null }
 if (-not (Select-String -Path \$f -SimpleMatch -Pattern \$k -Quiet)) { Add-Content -Path \$f -Value \$k }
-if (\$isAdmin) { icacls.exe \$f /inheritance:r /grant 'Administrators:F' /grant 'SYSTEM:F' | Out-Null }
+if (\$isAdmin) { icacls.exe \$f /inheritance:r /grant '*S-1-5-32-544:F' /grant '*S-1-5-18:F' | Out-Null }
 Write-Output "key installed in \$f"
 EOF
 }

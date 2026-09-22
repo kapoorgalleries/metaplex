@@ -70,7 +70,7 @@ Say which drive, by **serial number**, and get a yes before running any of these
 
 - Format from the NAS UI (for backup targets): the UI names the drive; confirm the serial matches.
 - Linux full wipe: `sudo wipefs -a /dev/sdX` then `sudo mkfs.ext4 -L hulk-1 /dev/sdX` (replace `sdX`; check with `lsblk -o NAME,SERIAL` first).
-- Secure erase before disposal (NIST SP 800-88 Rev. 2 "purge"): NVMe `sudo nvme format --ses=1 /dev/nvme0n1` (`--ses=2` for a crypto erase on self-encrypting drives). SATA: first `sudo hdparm --user-master u --security-set-pass NULL /dev/sdX`, then `sudo hdparm --user-master u --security-erase NULL /dev/sdX`; if hdparm says the drive is "frozen", suspend the machine for a minute and resume, then retry. Spinning disks without either: `shred -n 1 -v /dev/sdX` (do not use shred on SSDs).
+- Secure erase before disposal (NIST SP 800-88 Rev. 2 "purge"): NVMe `sudo nvme format --ses=1 /dev/nvme0n1` (`--ses=2` for a crypto erase on self-encrypting drives), or `sudo nvme sanitize /dev/nvme0 --sanact=2` (block erase; `--sanact=4` crypto erase) and watch `sudo nvme sanitize-log /dev/nvme0`. SATA: first confirm `sudo hdparm -I /dev/sdX` shows "not frozen" under Security; if it says "frozen", suspend the machine for a minute and resume. Then `sudo hdparm --user-master u --security-set-pass NULL /dev/sdX` followed by `sudo hdparm --user-master u --security-erase NULL /dev/sdX`, or `--security-erase-enhanced NULL` when `-I` lists "supported: enhanced erase". Spinning disks without either: `shred -n 1 -v /dev/sdX` (do not use shred on SSDs).
 - Windows: Disk Management → right-click → Format (quick is fine for reuse); before disposal `diskpart` → `select disk N` → `clean all`, which zeroes every sector.
 
 ## 6. Record

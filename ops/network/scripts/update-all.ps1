@@ -30,6 +30,7 @@ if (-not $NoOS) {
   if ($Winget) {
     Log 'winget upgrade --all'
     & $Winget upgrade --all --silent --include-unknown --disable-interactivity --accept-source-agreements --accept-package-agreements | Out-Host
+    if ($LASTEXITCODE -eq -1978335188) { Write-Warning 'winget: some packages failed to upgrade (0x8A15002C); see the lines above and rerun after closing those apps' }
   } else { Write-Warning 'winget missing (install App Installer from the Store and log in to the desktop once); skipping app upgrades' }
 
   # The Windows Update Agent refuses to install from a network logon such as SSH (E_ACCESSDENIED), so the

@@ -34,8 +34,9 @@ function Find-Winget {
 $Winget = Find-Winget
 function Winget-Install($id) {
   & $Winget install --id $id -e --silent --disable-interactivity --accept-source-agreements --accept-package-agreements | Out-Host
-  # -1978335189 = 0x8A15002B "no applicable update found": the package is already current
-  if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne -1978335189) { throw "winget install $id failed ($LASTEXITCODE)" }
+  # benign codes: 0x8A15002B no applicable update, 0x8A150061 already installed, 0x8A15010D newer version present, 0x8A15004F nothing to do
+  $benign = 0, -1978335189, -1978335135, -1978334963, -1978335153
+  if ($benign -notcontains $LASTEXITCODE) { throw "winget install $id failed ($LASTEXITCODE)" }
 }
 function Npm-Global($pkg) {
   & npm install -g --no-fund --no-audit $pkg 2>&1 | Out-Host
@@ -102,14 +103,16 @@ Sign in once per machine, per user (open a NEW terminal first so PATH is fresh):
            token (Pro/Max/Team/Enterprise; model requests only), then here:
            $env:CLAUDE_CODE_OAUTH_TOKEN = '<token>'
            check:  claude auth status     install health:  claude doctor
+           (If ANTHROPIC_API_KEY is set, Claude Code bills that key instead of the subscription: remove it here.)
   codex    run `codex login` (browser). Over SSH: `codex login --device-auth` (turn on device-code
            sign-in under ChatGPT Settings > Security first), or forward the callback port from the
            machine with the browser:  ssh -L 1455:localhost:1455 <this-host>  then `codex login`.
            API key:  $env:OPENAI_API_KEY | codex login --with-api-key
            (setting OPENAI_API_KEY on its own is not a login)
            check:  codex login status     credentials: %USERPROFILE%\.codex\auth.json
-  gemini   run `gemini` and choose "Sign in with Google". Over SSH set  $env:NO_BROWSER = 'true'
-           first and paste the code back. Google Workspace account (not personal Gmail): first
+  gemini   run `gemini` and choose "Sign in with Google". Over SSH (with a terminal: ssh -t) set
+           $env:NO_BROWSER = 'true'  first and paste the code back within 5 minutes.
+           Google Workspace account (not personal Gmail): first
            $env:GOOGLE_CLOUD_PROJECT = '<project-id>'; personal Gmail must leave it unset.
            API key instead:  $env:GEMINI_API_KEY = '<key>'   (https://aistudio.google.com/app/apikey)
 '@ | Write-Host

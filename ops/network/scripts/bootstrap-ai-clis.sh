@@ -100,6 +100,10 @@ install_codex() {
 install_gemini() { log "installing/updating Gemini CLI (npm)"; npm install -g --no-fund --no-audit @google/gemini-cli@latest >/dev/null; }
 
 have curl || { warn "curl is required"; exit 1; }
+if [ "$OS" = "Linux" ] && [ -r /proc/cpuinfo ] && ! grep -qw avx /proc/cpuinfo; then
+  warn "this CPU has no AVX; Claude Code's native binary needs it (pre-2013 hardware). Skipping Claude Code on this machine."
+  SKIP_CLAUDE=1
+fi
 [ "$SKIP_CLAUDE" = 1 ] || install_claude
 [ "$SKIP_CODEX" = 1 ]  || install_codex
 if [ "$SKIP_GEMINI" = 0 ]; then
@@ -122,15 +126,16 @@ Sign in once per machine, per user (open a NEW terminal first so PATH is fresh):
            export CLAUDE_CODE_OAUTH_TOKEN=<token>
            check:  claude auth status     install health:  claude doctor
            (Over SSH on a Mac the Keychain is locked, so the login lands in ~/.claude/.credentials.json
-           with mode 600 instead. That is expected.)
+           with mode 600 instead. That is expected. If ANTHROPIC_API_KEY is set in the environment,
+           Claude Code bills that key instead of the subscription: unset it on these machines.)
   codex    run `codex login` (browser). Over SSH: `codex login --device-auth` (turn on device-code
            sign-in under ChatGPT Settings > Security first), or forward the callback port from the
            machine with the browser:  ssh -L 1455:localhost:1455 <this-host>  then `codex login`.
            API key:  printenv OPENAI_API_KEY | codex login --with-api-key
            (exporting OPENAI_API_KEY on its own is not a login)
            check:  codex login status     credentials: ~/.codex/auth.json
-  gemini   run `gemini` and choose "Sign in with Google". Over SSH run  NO_BROWSER=true gemini
-           and paste the code back. Google Workspace account (not personal Gmail): first
+  gemini   run `gemini` and choose "Sign in with Google". Over SSH (with a terminal: ssh -t) run
+           NO_BROWSER=true gemini  and paste the code back within 5 minutes. Google Workspace account (not personal Gmail): first
            export GOOGLE_CLOUD_PROJECT=<project-id>; personal Gmail must leave it unset.
            API key instead:  export GEMINI_API_KEY=<key>   (https://aistudio.google.com/app/apikey)
 EOF

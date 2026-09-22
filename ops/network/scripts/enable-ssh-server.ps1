@@ -52,7 +52,8 @@ if ($PublicKey) {
   $adminKeys = 'C:\ProgramData\ssh\administrators_authorized_keys'
   if (-not (Test-Path $adminKeys)) { New-Item -ItemType File -Path $adminKeys -Force | Out-Null }
   if (-not (Select-String -Path $adminKeys -SimpleMatch -Pattern $PublicKey -Quiet)) { Add-Content -Path $adminKeys -Value $PublicKey }
-  & icacls.exe $adminKeys /inheritance:r /grant 'Administrators:F' /grant 'SYSTEM:F' | Out-Null
+  # SIDs rather than names so this also works on non-English Windows (Administratoren, Administrateurs ...)
+  & icacls.exe $adminKeys /inheritance:r /grant '*S-1-5-32-544:F' /grant '*S-1-5-18:F' | Out-Null
   Write-Host "admin key installed in $adminKeys"
 }
 

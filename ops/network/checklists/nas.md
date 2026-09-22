@@ -29,7 +29,7 @@ Where the same thing lives per vendor:
 Windows 11 has no SMB1 client at all, refuses **guest** (passwordless) shares (Pro since 24H2), **requires SMB signing** since 24H2, and caches old credentials. macOS is fussy about signing too.
 
 - **Protocol**: on the NAS set min SMB2, max SMB3. Never re-enable SMB1 on the PC (QNAP's own guest-access workaround is SMB1: do not take it). Where: Synology Control Panel → File Services → SMB → Advanced; QNAP Control Panel → Network & File Services → Win/Mac/NFS/WebDAV → Microsoft Networking → Advanced Options; TrueNAS Shares → SMB → Advanced (it has only a minimum protocol, default SMB2).
-- **Signing**: Windows 11 24H2 needs it. Synology: SMB signing = "Client defined" (not "Disable"); QNAP and TrueNAS: leave signing enabled or "auto".
+- **Signing**: Windows 11 24H2 needs it. Synology: SMB signing = "Client defined" (not "Disable"); QNAP: leave signing enabled; TrueNAS has no signing switch and negotiates what the client asks.
 - **Guest**: turn guest access off on the NAS; create a real user per person and mount with it. TrueNAS 25.10 and later has no guest option on normal shares at all.
 - **Stale Windows credentials**: `cmdkey /list` → `cmdkey /delete:nas` (and the IP form), then reconnect with the new user. Mapping: `net use N: \\nas\share /user:nas\sanjay /persistent:yes`.
 - **macOS**: Finder → Go → Connect to Server → `smb://sanjay@nas.local/share`. If it hangs, check the signing setting above and that the Mac resolves `nas.local` (mDNS on the NAS).
@@ -64,6 +64,6 @@ Windows 11 has no SMB1 client at all, refuses **guest** (passwordless) shares (P
 - Admin account: strong password, **2FA**; disable the default `admin` on Synology and use a named admin.
 - Turn off QuickConnect / myQNAPcloud / UPnP port forwarding unless actively used (QNAP itself "strongly recommends" UPnP off; the 2021–2022 Qlocker, eCh0raix and DeadBolt ransomware waves hit internet-exposed units). The NAS should not be reachable from the internet.
 - Firewall on the NAS: allow only the LAN subnet.
-- Enable SSH (for these scripts) with key login: on Synology the user's home service must be on (User & Group → Advanced → Enable user home), and `~` must not be group-writable (`chmod 755 ~`) or sshd rejects the key.
+- Enable SSH (for these scripts) with key login: on Synology the user must be in the administrators group, the home service must be on (User & Group → Advanced → Enable user home), `~` must not be group-writable (`chmod 755 ~`), `~/.ssh` must be 700 and `~/.ssh/authorized_keys` 600, or sshd rejects the key. After changing any of that, toggle SSH off and on in Control Panel → Terminal & SNMP.
 - Snapshots on the main shares (daily, keep 30; Synology recommends immutable snapshots locked for 7–14 days) and a **USB backup task** to a Hulk drive (see `hulk-drives.md`): one copy on the NAS, one on a rotated external, one off-site (cloud or a drive kept elsewhere).
 - Reservation on the router, hostname set on the NAS, row filled in `inventory.csv`.
