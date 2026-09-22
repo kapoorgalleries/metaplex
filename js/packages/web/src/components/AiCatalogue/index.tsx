@@ -17,7 +17,7 @@ import {
 import { PROVIDERS } from '../../ai/providers';
 import { configProblem, loadSettings, saveSettings } from '../../ai/settings';
 import { resolveImage } from '../../ai/image';
-import { runCatalogue } from '../../ai/client';
+import { probeGateway, runCatalogue } from '../../ai/client';
 import { MetadataPatch, buildPatch, recordToTraits } from '../../ai/apply';
 import { SettingsPanel } from './SettingsPanel';
 import { ReviewPanel } from './ReviewPanel';
@@ -59,9 +59,13 @@ export const AiCatalogueAssist = (props: {
   const [dealerNotes, setDealerNotes] = useState<string>('');
   const [details, setDetails] = useState<DetailImage[]>([]);
   const [expanded, setExpanded] = useState<boolean>(false);
+  const [probing, setProbing] = useState<boolean>(false);
+  const [probeResult, setProbeResult] = useState<string>('');
 
   const controllerRef = useRef<AbortController | null>(null);
   const runIdRef = useRef<number>(0);
+  const probeCtlRef = useRef<AbortController | null>(null);
+  const probeIdRef = useRef<number>(0);
 
   const provider = PROVIDERS[settings.activeProvider];
   const cfg = settings.providers[settings.activeProvider];
@@ -70,6 +74,59 @@ export const AiCatalogueAssist = (props: {
   const hasImage = !!props.image || props.primaryFile !== undefined;
 
   const close = useCallback(() => setView('closed'), []);
+
+  const cancelProbe = () => {
+    if (probeCtlRef.current) {
+      probeCtlRef.current.abort();
+      probeCtlRef.current = null;
+    }
+  };
+
+  /* The gateway's free GET /key — the same "Test connection" its own page
+   * offers. Reports which provider keys the gateway holds without spending
+   * anything, so a missing secret is found here rather than as a 503 inside
+   * a run. Only the gateway provider has such an endpoint. */
+  const probe = async () => {
+    /* Numbered like run(): a second click, or an edit to the key or Base
+     * URL while a probe is in flight, must not let the earlier answer land
+     * on the newer configuration and read as its result. */
+    cancelProbe();
+    const myProbe = probeIdRef.current + 1;
+    probeIdRef.current = myProbe;
+    const controller = new AbortController();
+    probeCtlRef.current = controller;
+    setProbing(true);
+    setProbeResult('');
+    try {
+      const info = await probeGateway(settings, { signal: controller.signal });
+      if (probeIdRef.current !== myProbe) {
+        return;
+      }
+      const model = settings.providers.trimurti.model;
+      setProbeResult(
+        'Connected — ' +
+          info.label +
+          (info.keyForModel === 'missing'
+            ? ' — but it holds no key for "' +
+              model +
+              '", so a run on that model would fail. Choose another gateway model, or add that secret on the gateway.'
+            : ''),
+      );
+    } catch (e) {
+      if (probeIdRef.current !== myProbe) {
+        return;
+      }
+      if (isAiError(e) && e.kind === 'aborted') {
+        return;
+      }
+      setProbeResult('Not connected — ' + errorMessage(e));
+    } finally {
+      if (probeIdRef.current === myProbe) {
+        setProbing(false);
+        probeCtlRef.current = null;
+      }
+    }
+  };
 
   const cancel = useCallback(() => {
     if (controllerRef.current) {
@@ -89,9 +146,15 @@ export const AiCatalogueAssist = (props: {
     controllerRef.current = controller;
 
     try {
+      /* The endpoint's own image limits win over the dealer's setting: the
+       * gateway rejects anything over 1280px or not JPEG outright. */
       const imageOpts = {
-        maxEdgePx: settings.imageMaxEdgePx,
+        maxEdgePx:
+          provider.maxImageEdgePx === undefined
+            ? settings.imageMaxEdgePx
+            : Math.min(settings.imageMaxEdgePx, provider.maxImageEdgePx),
         supportsRemoteImageUrl: provider.supportsRemoteImageUrl,
+        forceJpeg: provider.requiresJpeg === true,
       };
 
       /* The mint form leaves the primary artwork either as a data URL / absolute
@@ -386,7 +449,17 @@ export const AiCatalogueAssist = (props: {
                  * the modal leaves the key sitting in localStorage. */
                 setSettings(next);
                 saveSettings(next);
+                /* An in-flight probe was testing the OLD configuration. */
+                cancelProbe();
+                probeIdRef.current += 1;
+                setProbing(false);
+                setProbeResult('');
               }}
+              onProbe={
+                settings.activeProvider === 'trimurti' ? probe : undefined
+              }
+              probing={probing}
+              probeResult={probeResult}
             />
             <Row justify="end" style={{ marginTop: 24 }}>
               <Button

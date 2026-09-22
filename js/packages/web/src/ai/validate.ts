@@ -433,7 +433,7 @@ export function auditRecord(r: CatalogueRecord): RecordWarning[] {
         'Untranslated: "' +
         untranslated +
         '". Do not publish this as a full translation. Try again with a ' +
-        'close-up photograph of the inscription, or with the other provider.',
+        'close-up photograph of the inscription, or with another provider.',
     );
   }
 

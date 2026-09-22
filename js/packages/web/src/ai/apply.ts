@@ -210,9 +210,9 @@ export function composeDescription(
  */
 export const MAX_NAME_BYTES = 32;
 
-/** UTF-8 byte length of `s` — the measure the program applies to a name. The
- *  review panel's counter and truncateUtf8Bytes both count with this, so the
- *  '{n} / 32 bytes' warning and the actual cut cannot drift apart. */
+/** UTF-8 byte length of `s` — the unit the on-chain name limit is measured
+ *  in. One definition, shared by the mint form's counter, the review panel's
+ *  counter and truncateUtf8Bytes, so the three can never disagree. */
 export function utf8ByteLength(s: string): number {
   let bytes = 0;
   for (let i = 0; i < s.length; i++) {

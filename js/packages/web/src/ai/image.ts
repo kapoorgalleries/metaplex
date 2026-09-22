@@ -22,7 +22,7 @@ const CHUNK_SIZE = 0x8000;
 
 const READ_FAILED =
   'Could not read the image from that URL (the host may not allow ' +
-  'cross-origin reads). Upload the file instead, or switch to OpenAI.';
+  'cross-origin reads). Upload the file instead.';
 
 export function isDataUrl(s: string): boolean {
   return DATA_URL_RE.test(s);
@@ -93,6 +93,10 @@ export function fileToDataUrl(file: File): Promise<string> {
 export function downscaleDataUrl(
   dataUrl: string,
   maxEdgePx: number,
+  /** Re-encode as JPEG even when the image already fits: the gallery's
+   *  gateway accepts nothing else, and a small PNG would otherwise pass
+   *  through untouched and be rejected there. */
+  forceJpeg: boolean = false,
 ): Promise<string> {
   return new Promise<string>(resolve => {
     let canvas: HTMLCanvasElement | null = null;
@@ -132,11 +136,15 @@ export function downscaleDataUrl(
           const w = img.naturalWidth || img.width;
           const h = img.naturalHeight || img.height;
           const longest = Math.max(w, h);
-          if (longest <= 0 || (longest <= maxEdgePx && !oversized)) {
+          const needsResize = longest > maxEdgePx;
+          const needsJpeg = forceJpeg && !/^data:image\/jpeg/i.test(dataUrl);
+          // `oversized`: a heavy PNG/GIF whose edge already fits is still
+          // re-encoded, otherwise inlinePart rejects it as too large.
+          if (longest <= 0 || (!needsResize && !needsJpeg && !oversized)) {
             resolve(dataUrl);
             return;
           }
-          const scale = Math.min(1, maxEdgePx / longest);
+          const scale = needsResize ? maxEdgePx / longest : 1;
           target.width = Math.max(1, Math.round(w * scale));
           target.height = Math.max(1, Math.round(h * scale));
           context.drawImage(img, 0, 0, target.width, target.height);
@@ -159,20 +167,25 @@ export function resolveImage(
   opts: {
     maxEdgePx: number;
     supportsRemoteImageUrl: boolean;
+    forceJpeg?: boolean;
     fetchImpl?: typeof fetch;
   },
 ): Promise<ImagePart> {
   if (typeof File !== 'undefined' && source instanceof File) {
     return fileToDataUrl(source)
-      .then(dataUrl => downscaleDataUrl(dataUrl, opts.maxEdgePx))
+      .then(dataUrl =>
+        downscaleDataUrl(dataUrl, opts.maxEdgePx, opts.forceJpeg === true),
+      )
       .then(resized => inlineFromDataUrl(resized, label));
   }
 
   if (typeof source === 'string') {
     if (isDataUrl(source)) {
-      return downscaleDataUrl(source, opts.maxEdgePx).then(resized =>
-        inlineFromDataUrl(resized, label),
-      );
+      return downscaleDataUrl(
+        source,
+        opts.maxEdgePx,
+        opts.forceJpeg === true,
+      ).then(resized => inlineFromDataUrl(resized, label));
     }
     if (isHttpUrl(source)) {
       if (opts.supportsRemoteImageUrl) {
@@ -181,7 +194,7 @@ export function resolveImage(
         const remote: ImagePart = { kind: 'remote', url: source, label };
         return Promise.resolve(remote);
       }
-      return fetchInline(source, label, opts.fetchImpl);
+      return fetchInline(source, label, opts);
     }
   }
 
@@ -219,12 +232,12 @@ function inlineFromDataUrl(dataUrl: string, label: string): InlineImagePart {
 function fetchInline(
   url: string,
   label: string,
-  fetchImpl?: typeof fetch,
+  opts: { maxEdgePx: number; forceJpeg?: boolean; fetchImpl?: typeof fetch },
 ): Promise<ImagePart> {
   return Promise.resolve()
     .then(() => {
       const doFetch =
-        fetchImpl ||
+        opts.fetchImpl ||
         (typeof window !== 'undefined' ? window.fetch.bind(window) : fetch);
       return doFetch(url);
     })
@@ -240,7 +253,14 @@ function fetchInline(
         // A host answering application/octet-stream (or nothing) would send
         // Gemini a mime type it rejects; only an image/* type is forwarded.
         const mimeType = /^image\//i.test(blob.type) ? blob.type : 'image/jpeg';
-        return inlinePart(mimeType, base64, label);
+        /* Fetched bytes go through the same downscale as an upload. They did
+         * not before, so an arweave original arrived at full size for every
+         * provider that cannot fetch a URL itself. */
+        return downscaleDataUrl(
+          'data:' + mimeType + ';base64,' + base64,
+          opts.maxEdgePx,
+          opts.forceJpeg === true,
+        ).then(resized => inlineFromDataUrl(resized, label));
       }),
     )
     .catch(e => {

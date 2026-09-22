@@ -14,7 +14,28 @@
  *    `export type { ... }`.
  */
 
-export type ProviderId = 'gemini' | 'openai';
+/**
+ * Six providers, one interface. Five of them speak the OpenAI
+ * chat/completions dialect and are built by one factory in providers.ts;
+ * Gemini has its own request and response shape.
+ *
+ * 'trimurti' is not a model vendor: it is the gallery's own trimurti-gateway,
+ * a Supabase Edge Function that holds the Anthropic, OpenAI, DeepSeek and
+ * Gemini keys server-side and speaks the OpenAI dialect to the browser. It is
+ * the one configuration in which no provider key exists in this browser.
+ *
+ * 'azure' is Microsoft's hosting of the OpenAI models (Azure OpenAI, sold
+ * inside Microsoft Foundry). 'github' is GitHub Models, which fronts several
+ * publishers' models — including Microsoft's own Phi family — behind one
+ * GitHub token.
+ */
+export type ProviderId =
+  | 'gemini'
+  | 'openai'
+  | 'deepseek'
+  | 'github'
+  | 'azure'
+  | 'trimurti';
 
 export type ConfidenceLevel = 'high' | 'medium' | 'low' | 'unable';
 
@@ -223,6 +244,57 @@ export interface AiProvider {
   modelSuggestions: string[];
   /** False for Gemini: it cannot fetch a remote image URL itself. */
   supportsRemoteImageUrl: boolean;
+  /** False for a text-only model family. This feature's whole input is a
+   *  photograph, so a provider that cannot see one must say so rather than
+   *  post images that are silently dropped or rejected. */
+  supportsImages: boolean;
+  /** True when buildRequest asks the endpoint to enforce the schema. False
+   *  means the shape is only requested in the prompt and checked here, which
+   *  the review panel must disclose. */
+  structuredOutput: boolean;
+  /** Models within an otherwise image-capable provider that cannot see a
+   *  photograph (DeepSeek's Pro/reasoner family; every DeepSeek slot on the
+   *  deployed gateway; the local Llama slots its unmerged successor adds).
+   *  Matched against the configured model id. */
+  textOnlyModels?: RegExp;
+  /** A hard cap the endpoint itself imposes on the longest image edge, in
+   *  pixels. The image pipeline takes the smaller of this and the dealer's
+   *  own setting. */
+  maxImageEdgePx?: number;
+  /** True when the endpoint accepts only JPEG data URLs, so every image must
+   *  be re-encoded even when it already fits. */
+  requiresJpeg?: boolean;
+  /** The path an OpenAI-dialect provider is posted to, appended to the Base
+   *  URL. '/chat/completions' everywhere except the gallery's gateway, whose
+   *  cataloguing route lives at '/catalogue/completions'. */
+  completionsPath?: string;
+  /** A floor on the request timeout, in milliseconds, for an endpoint that
+   *  abandons an upstream call on its own schedule. Giving up before it does
+   *  throws away its explanation and, on the gallery's gateway, the budget
+   *  reservation it already spent. client.ts raises a lower setting to this. */
+  minRequestTimeoutMs?: number;
+  /** A ceiling on reply length that the endpoint itself imposes and that no
+   *  request field can raise. The gateway ignores max_tokens and caps every
+   *  reply — at 8192 on the cataloguing route this layer posts to, 4096 on
+   *  its older chat route — so the truncation advice must not send the
+   *  dealer to a setting that does nothing there. */
+  outputTokenCap?: number;
+  /** False for a secret that must never be written to localStorage. The
+   *  gateway's own page keeps its access key session-only; this layer honours
+   *  the same policy for that provider rather than weakening it. */
+  persistKey: boolean;
+  /** What the provider calls the model field. Azure addresses a *deployment*
+   *  you named yourself, not a published model id, and mislabelling it sends
+   *  people hunting for a model list that will not help them. */
+  modelLabel: string;
+  /** What the provider calls the secret. GitHub Models takes a GitHub token,
+   *  not an API key, and the distinction decides where you go to mint one. */
+  keyLabel: string;
+  /** The request shape a self-hosted proxy for THIS provider must accept,
+   *  stated per provider because the five paths genuinely differ. */
+  baseUrlHelp: string;
+  /** A provider-specific caveat shown under the form. '' when there is none. */
+  note: string;
   /** Pure. */
   buildRequest(req: CatalogueRequest, cfg: ProviderSettings): HttpPlan;
   /** Pure. Same shape as buildRequest but without the structured-output
@@ -235,6 +307,28 @@ export interface AiProvider {
    *  the provider's 400 message, return an adapted body to retry once, or
    *  null to give up. */
   retryBody?(body: unknown, message: string): unknown | null;
+  /**
+   * Pure, optional. True when `baseUrl` still addresses the provider itself
+   * rather than a proxy the dealer runs. The default test is equality with
+   * defaultBaseUrl, which is wrong for Azure: every tenant has its own
+   * hostname, so its real endpoint never equals the default. Reading that as
+   * proxy mode would suppress the stored-key warning and accept a blank key
+   * on a request that goes straight to Microsoft.
+   */
+  isOwnEndpoint?(baseUrl: string): boolean;
+}
+
+/** What GET {base}/key on a trimurti-gateway reports: which provider keys
+ *  the gateway holds. Nothing here is a secret. */
+export interface GatewayProbe {
+  label: string;
+  providers: Record<string, boolean>;
+  /** Whether the gateway holds a key for the provider that serves the
+   *  configured model. 'missing' is the 503 a run would end in; 'unknown'
+   *  means the model's prefix is not one the probe can map. A probe that
+   *  said "Connected" while the chosen model had no key behind it was
+   *  answering a question nobody asked. */
+  keyForModel: 'present' | 'missing' | 'unknown';
 }
 
 /* ------------------------------------------------------------------ */
@@ -251,7 +345,10 @@ export interface ProviderSettings {
 
 export interface AiSettings {
   activeProvider: ProviderId;
-  providers: { gemini: ProviderSettings; openai: ProviderSettings };
+  /** One entry per ProviderId, always fully populated — settings.ts rebuilds
+   *  the record from PROVIDER_IDS on every load, so adding a provider can
+   *  never leave a stored blob with a missing key. */
+  providers: Record<ProviderId, ProviderSettings>;
   imageMaxEdgePx: number;
   maxOutputTokens: number;
   requestTimeoutMs: number;
@@ -324,12 +421,16 @@ export interface AiError {
   message: string;
   status: number | null;
   providerId: ProviderId | null;
+  /** The machine-readable `error.code` an endpoint supplied, when it did.
+   *  The gallery's gateway uses it to say which of its refusals happened
+   *  BEFORE it reserved usage — the only ones a retry may repeat for free. */
+  code: string | null;
 }
 
 export function aiError(
   kind: AiErrorKind,
   message: string,
-  opts: { status?: number; providerId?: ProviderId } = {},
+  opts: { status?: number; providerId?: ProviderId; code?: string } = {},
 ): AiError {
   return {
     __aiError: true,
@@ -337,6 +438,7 @@ export function aiError(
     message,
     status: opts.status === undefined ? null : opts.status,
     providerId: opts.providerId === undefined ? null : opts.providerId,
+    code: opts.code === undefined ? null : opts.code,
   };
 }
 
