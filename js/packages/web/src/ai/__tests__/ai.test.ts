@@ -37,6 +37,7 @@ import {
   base64ByteLength,
   bytesToBase64,
   isDataUrl,
+  resolveImage,
   splitDataUrl,
 } from '../image';
 import {
@@ -55,6 +56,8 @@ import {
   buildPatch,
   composeDescription,
   recordToTraits,
+  truncateUtf8Bytes,
+  utf8ByteLength,
 } from '../apply';
 
 /* ------------------------------------------------------------------ */
@@ -602,11 +605,23 @@ describe('validate', () => {
     });
   });
 
-  it('11. rejects completeness "complete" alongside untranslated portions', () => {
+  it('11. keeps completeness "complete" alongside untranslated portions and blocks it in audit', () => {
+    // Not a hard schema error any more: the identical incoherence with any
+    // other completeness value was always a soft block, and a filler like
+    // 'None.' would otherwise discard the whole run.
     const raw = rawFixture();
     child(raw, 'inscription').untranslatedPortions =
       'the reverse of the base is not legible';
-    expect(thrownAiError(() => parseCatalogueRecord(raw)).kind).toBe('schema');
+    const record = parseCatalogueRecord(raw);
+    expect(record.inscription.completeness).toBe('complete');
+
+    const warnings = auditRecord(record);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0].code).toBe('partial-translation');
+    expect(warnings[0].severity).toBe('block');
+    expect(warnings[0].message).toContain(
+      'the reverse of the base is not legible',
+    );
   });
 
   it('12. audits a structurally valid record', () => {
@@ -627,7 +642,9 @@ describe('validate', () => {
       w => w.code === 'unscaled-dimensions',
     );
     expect(unscaledWarnings).toHaveLength(1);
-    expect(unscaledWarnings[0].severity).toBe('block');
+    // Dimensions is withheld by formatDimensions in this case, so the warning
+    // informs rather than gates Apply.
+    expect(unscaledWarnings[0].severity).toBe('warn');
 
     const inverted = recordFixture();
     inverted.period.earliestYear = 1600;
@@ -889,32 +906,36 @@ describe('providers', () => {
     expect(statusKind(OPENAI, 500, cfg)).toBe('server');
   });
 
-  it('21. OpenAI retryBody adapts a drifted parameter exactly once', () => {
+  it('21. OpenAI retryBody drops a rejected temperature exactly once', () => {
     const retryBody = OPENAI.retryBody;
     if (!retryBody) {
       throw new Error('OPENAI.retryBody is required by client.ts');
     }
-    const drift =
-      "Unsupported parameter: 'max_tokens'. Use 'max_completion_tokens' instead.";
+    const rejected =
+      "Unsupported value: 'temperature' does not support 0.2 with this model. Only the default (1) value is supported.";
 
     const adapted = retryBody(
-      { model: 'gpt-5', temperature: 0.2, max_tokens: 4096, messages: [] },
-      drift,
+      {
+        model: 'gpt-5',
+        temperature: 0.2,
+        max_completion_tokens: 4096,
+        messages: [],
+      },
+      rejected,
     ) as RawNode;
-    expect(adapted.max_completion_tokens).toBe(4096);
-    expect('max_tokens' in adapted).toBe(false);
     expect('temperature' in adapted).toBe(false);
+    expect(adapted.max_completion_tokens).toBe(4096);
 
     expect(
       retryBody(
-        { model: 'gpt-4o', temperature: 0.2, max_tokens: 4096 },
+        { model: 'gpt-4o', temperature: 0.2, max_completion_tokens: 4096 },
         'Invalid image data in messages[0].',
       ),
     ).toBeNull();
 
     // Already adapted: retrying would loop forever.
     expect(
-      retryBody({ model: 'gpt-5', max_completion_tokens: 4096 }, drift),
+      retryBody({ model: 'gpt-5', max_completion_tokens: 4096 }, rejected),
     ).toBeNull();
   });
 });
@@ -1158,12 +1179,12 @@ describe('client', () => {
     expect(err.message).toContain('CORS');
   });
 
-  it('31. retries a drifted parameter exactly once', async () => {
+  it('31. retries a rejected temperature exactly once', async () => {
     const stub = stubFetch([
       {
         status: 400,
         body: providerError(
-          "Unsupported parameter: 'max_tokens'. Use 'max_completion_tokens' instead.",
+          "Unsupported value: 'temperature' does not support 0.2 with this model. Only the default (1) value is supported.",
         ),
       },
       { status: 200, body: openaiOk(JSON.stringify(recordFixture())) },
@@ -1177,6 +1198,15 @@ describe('client', () => {
     );
 
     expect(stub.calls).toHaveLength(2);
+    // The first request already carries the current parameter name, so the
+    // retry has nothing to rename: only the temperature goes.
+    const first = JSON.parse(
+      String(stub.calls[0].init.body),
+    ) as ParsedOpenAiBody;
+    expect(first.max_completion_tokens).toBe(4096);
+    expect('max_tokens' in first).toBe(false);
+    expect(first.temperature).toBe(0.2);
+
     const retried = JSON.parse(
       String(stub.calls[1].init.body),
     ) as ParsedOpenAiBody;
@@ -1484,21 +1514,20 @@ describe('apply', () => {
   });
 
   it('43. routes a parameter-drift 400 to retryBody, not the schema fallback', () => {
-    // OpenAI's real drift message contains "is not supported", which must no
-    // longer claim the structured-output branch — retryBody is written for
+    // OpenAI's real drift message contains "does not support", which must
+    // not claim the structured-output branch — retryBody is written for
     // exactly this message, and a reasoning-family model depends on it.
     const drift =
-      "Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead.";
+      "Unsupported value: 'temperature' does not support 0.2 with this model. Only the default (1) value is supported.";
     const next = OPENAI.retryBody
       ? OPENAI.retryBody(
-          { model: 'gpt-5', max_tokens: 4096, temperature: 0.2 },
+          { model: 'gpt-5', max_completion_tokens: 4096, temperature: 0.2 },
           drift,
         )
       : null;
     expect(next).not.toBe(null);
     const body = next as Record<string, unknown>;
     expect(body.max_completion_tokens).toBe(4096);
-    expect('max_tokens' in body).toBe(false);
     expect('temperature' in body).toBe(false);
   });
 
@@ -1525,5 +1554,298 @@ describe('apply', () => {
       { ...cfg, apiKey: 'k' },
     );
     expect(plan.url.indexOf('v1beta//')).toBe(-1);
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* Review regressions                                                  */
+/*                                                                     */
+/* One test per finding the pure suite can reach. downscaleDataUrl's   */
+/* re-encode of an oversized small image needs a canvas, and the       */
+/* SettingsPanel key input and the deleted TRAITS_BLOCKED_BY tables    */
+/* live in .tsx, so those three have no test here.                     */
+/* ------------------------------------------------------------------ */
+
+function withInscription(patch: RawNode): RawNode {
+  const raw = rawFixture();
+  const inscription = child(raw, 'inscription');
+  Object.keys(patch).forEach(key => {
+    inscription[key] = patch[key];
+  });
+  return raw;
+}
+
+function illegibleSegment(transcription: string): RawNode {
+  return {
+    location: 'reverse of the base',
+    script: 'Uchen',
+    language: 'Classical Tibetan',
+    transcription,
+    transliteration: '',
+    translation: '',
+    notes: 'Worn beyond reading.',
+  };
+}
+
+function traitValue(record: CatalogueRecord, key: TraitKey): string | null {
+  const hit = recordToTraits(record, META).filter(a => a.trait_type === key);
+  return hit.length === 0 ? null : hit[0].value;
+}
+
+interface StubBlobResponse {
+  ok: boolean;
+  status: number;
+  blob: () => Promise<{
+    type: string;
+    arrayBuffer: () => Promise<ArrayBuffer>;
+  }>;
+}
+
+/** A fetch that answers one body with the given Content-Type, as the host
+ *  reported it — the point under test is what happens to that type. */
+function blobFetch(type: string, bytes: Uint8Array): typeof fetch {
+  return () => {
+    const response: StubBlobResponse = {
+      ok: true,
+      status: 200,
+      blob: () =>
+        Promise.resolve({
+          type,
+          arrayBuffer: () => Promise.resolve(bytes.buffer as ArrayBuffer),
+        }),
+    };
+    return Promise.resolve(response as unknown as Response);
+  };
+}
+
+describe('review regressions', () => {
+  it('45. accepts an empty translation for an illegible inscription and blocks it in audit', () => {
+    // The exact shape the prompt asks for when writing is visible but
+    // unreadable: present 'possible', completeness 'illegible', a segment
+    // that is nothing but the marker. Before, parseSegment threw and the
+    // whole record was lost.
+    const illegible = withInscription({
+      present: 'possible',
+      completeness: 'illegible',
+      segments: [illegibleSegment('[illegible]')],
+      untranslatedPortions: 'The entire reverse register.',
+    });
+    const record = parseCatalogueRecord(illegible);
+    expect(record.inscription.segments).toHaveLength(1);
+    expect(record.inscription.segments[0].translation).toBe('');
+    const blocks = auditRecord(record).filter(
+      w => w.code === 'partial-translation',
+    );
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0].severity).toBe('block');
+
+    // A transcription made only of markers is fine whatever completeness
+    // says: there is nothing to translate.
+    const markersOnly = withInscription({
+      present: 'yes',
+      completeness: 'partial',
+      segments: [illegibleSegment('[illegible] [ Illegible ]')],
+      untranslatedPortions: 'All of it.',
+    });
+    expect(() => parseCatalogueRecord(markersOnly)).not.toThrow();
+
+    // But a legible transcription with no translation is still the schema
+    // error it always was, unless the block is declared illegible.
+    const legible = withInscription({
+      present: 'yes',
+      completeness: 'partial',
+      segments: [illegibleSegment('bkra shis [illegible] bde legs')],
+      untranslatedPortions: 'The middle syllables.',
+    });
+    const err = thrownAiError(() => parseCatalogueRecord(legible));
+    expect(err.kind).toBe('schema');
+    expect(err.message).toContain('translation');
+  });
+
+  it('46. surfaces a "None." filler under completeness "complete" as a block, not a parse failure', () => {
+    const raw = withInscription({ untranslatedPortions: 'None.' });
+    const record = parseCatalogueRecord(raw);
+
+    const partial = auditRecord(record).filter(
+      w => w.code === 'partial-translation',
+    );
+    expect(partial).toHaveLength(1);
+    expect(partial[0].severity).toBe('block');
+    expect(partial[0].message).toContain('None.');
+
+    // ...and the description chain treats it exactly like the
+    // 'not-applicable' incoherence test 41 covers.
+    expect(composeDescription(record, true)).toContain(
+      '[TRANSLATION INCOMPLETE',
+    );
+  });
+
+  it('47. discards segments when present is "no" so no inscription trait is minted', () => {
+    const raw = withInscription({
+      present: 'no',
+      completeness: 'not-applicable',
+    });
+    const record = parseCatalogueRecord(raw);
+
+    expect(record.inscription.present).toBe('no');
+    expect(record.inscription.segments).toEqual([]);
+    expect(traitValue(record, 'Inscription Script')).toBeNull();
+    expect(traitValue(record, 'Inscription Language')).toBeNull();
+    expect(composeDescription(record, true)).toBe(
+      record.catalogueDescription.trim(),
+    );
+
+    // The dealer is told, in the working notes, and the model's own checks
+    // are kept ahead of the note.
+    const checks = record.recommendedExpertChecks;
+    expect(checks[0]).toBe(recordFixture().recommendedExpertChecks[0]);
+    expect(checks).toHaveLength(2);
+    expect(checks[1]).toContain('no inscription');
+    expect(checks[1]).toContain('1 inscription segment,');
+
+    // A record that is coherent about having no inscription gains no note.
+    const clean = withInscription({
+      present: 'no',
+      segments: [],
+      completeness: 'not-applicable',
+    });
+    expect(parseCatalogueRecord(clean).recommendedExpertChecks).toEqual(
+      recordFixture().recommendedExpertChecks,
+    );
+  });
+
+  it('48. formats BCE years in the Date Range trait and audits negative bounds', () => {
+    const straddling = recordFixture();
+    straddling.period.earliestYear = -100;
+    straddling.period.latestYear = 100;
+    expect(traitValue(straddling, 'Date Range')).toBe('100 BCE – 100 CE');
+    expect(auditRecord(straddling).map(w => w.code)).not.toContain(
+      'inverted-date-range',
+    );
+    expect(auditRecord(straddling).map(w => w.code)).not.toContain(
+      'implausible-date-range',
+    );
+
+    const bce = recordFixture();
+    bce.period.earliestYear = -300;
+    bce.period.latestYear = -100;
+    expect(traitValue(bce, 'Date Range')).toBe('300–100 BCE');
+    expect(auditRecord(bce)).toEqual([]);
+
+    const ce = recordFixture();
+    ce.period.earliestYear = 1400;
+    ce.period.latestYear = 1500;
+    expect(traitValue(ce, 'Date Range')).toBe('1400–1500 CE');
+
+    // The audits used to require both bounds > 0, so BCE dating escaped them.
+    const inverted = recordFixture();
+    inverted.period.earliestYear = -100;
+    inverted.period.latestYear = -300;
+    expect(auditRecord(inverted).map(w => w.code)).toContain(
+      'inverted-date-range',
+    );
+
+    const wide = recordFixture();
+    wide.period.earliestYear = -900;
+    wide.period.latestYear = 900;
+    expect(auditRecord(wide).map(w => w.code)).toContain(
+      'implausible-date-range',
+    );
+
+    // 0 is still "not determined", never a year.
+    const half = recordFixture();
+    half.period.earliestYear = -300;
+    half.period.latestYear = 0;
+    expect(traitValue(half, 'Date Range')).toBeNull();
+    expect(auditRecord(half)).toEqual([]);
+  });
+
+  it('49. counts and cuts names with one shared UTF-8 byte measure', () => {
+    const samples = [
+      '',
+      'Phurba',
+      'Śākyamuni, gilt copper alloy, Newar',
+      'पद्मपाणि लोकेश्वर की गिल्ट ताम्र मूर्ति',
+      '🙏 Padmapani 🙏',
+    ];
+    samples.forEach(s => {
+      expect(utf8ByteLength(s)).toBe(Buffer.byteLength(s, 'utf8'));
+    });
+    // The four-byte case, which is where a surrogate-pair walk goes wrong.
+    expect(utf8ByteLength('🙏')).toBe(4);
+
+    // Whatever the counter says the cut must agree with, and never overrun.
+    samples.forEach(s => {
+      const cut = truncateUtf8Bytes(s, MAX_NAME_BYTES);
+      expect(utf8ByteLength(cut)).toBeLessThanOrEqual(MAX_NAME_BYTES);
+      expect(utf8ByteLength(cut)).toBe(Buffer.byteLength(cut, 'utf8'));
+      if (utf8ByteLength(s) <= MAX_NAME_BYTES) {
+        expect(cut).toBe(s.trim());
+      }
+    });
+
+    // A pair is kept or dropped whole: ten 4-byte emoji into 10 bytes is
+    // two of them, with no lone surrogate left behind.
+    const pairs = truncateUtf8Bytes('🙏🙏🙏🙏🙏🙏🙏🙏🙏🙏', 10);
+    expect(pairs).toBe('🙏🙏');
+    expect(pairs.indexOf('�')).toBe(-1);
+  });
+
+  it('50. OpenAI sends max_completion_tokens up front and no longer renames on a 400', () => {
+    const cfg = openaiCfg('sk-TESTKEY0123456789abcdefgh');
+    const structured = openaiBody(OPENAI.buildRequest(twoInlineImages(), cfg));
+    expect(structured.max_completion_tokens).toBe(4096);
+    expect('max_tokens' in structured).toBe(false);
+    expect(structured.temperature).toBe(0.2);
+
+    const fallback = openaiBody(
+      OPENAI.buildFallbackRequest(twoInlineImages(), cfg),
+    );
+    expect(fallback.max_completion_tokens).toBe(4096);
+    expect('max_tokens' in fallback).toBe(false);
+
+    // The old rename heuristic is gone, so its trigger message earns no
+    // retry — the request that would have caused it can no longer be sent.
+    const retryBody = OPENAI.retryBody;
+    if (!retryBody) {
+      throw new Error('OPENAI.retryBody is required by client.ts');
+    }
+    expect(
+      retryBody(
+        { model: 'gpt-5', temperature: 0.2, max_completion_tokens: 4096 },
+        "Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead.",
+      ),
+    ).toBeNull();
+  });
+
+  it('51. fetchInline forwards only an image/* Content-Type and falls back to JPEG otherwise', async () => {
+    const bytes = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10]);
+    const opts = (type: string) => ({
+      maxEdgePx: 1600,
+      supportsRemoteImageUrl: false,
+      fetchImpl: blobFetch(type, bytes),
+    });
+    const url = 'https://arweave.net/abc123';
+
+    const octet = await resolveImage(
+      url,
+      'front',
+      opts('application/octet-stream'),
+    );
+    if (octet.kind !== 'inline') {
+      throw new Error('expected an inline part, got ' + octet.kind);
+    }
+    expect(octet.mimeType).toBe('image/jpeg');
+    expect(octet.base64).toBe(bytesToBase64(bytes));
+    expect(octet.label).toBe('front');
+
+    const untyped = await resolveImage(url, 'front', opts(''));
+    expect(untyped.kind === 'inline' && untyped.mimeType).toBe('image/jpeg');
+
+    const png = await resolveImage(url, 'front', opts('image/png'));
+    expect(png.kind === 'inline' && png.mimeType).toBe('image/png');
+
+    const upper = await resolveImage(url, 'front', opts('IMAGE/WebP'));
+    expect(upper.kind === 'inline' && upper.mimeType).toBe('IMAGE/WebP');
   });
 });

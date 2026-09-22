@@ -66,8 +66,10 @@ export const SettingsPanel = (props: {
   const problem = configProblem(cfg, provider);
   const datalistId = 'ai-model-suggestions-' + activeId;
 
-  // Nothing to type a key into when a proxy holds it and none is stored.
-  const showKeyInput = !(proxyMode && cfg.apiKey === '');
+  // The key input stays visible in proxy mode too: a proxy may forward the
+  // caller's key rather than inject its own, and hiding the field would leave
+  // no way to supply one without first reverting the Base URL. The placeholder
+  // already says it is optional.
   const anyKeyStored =
     value.providers.gemini.apiKey !== '' ||
     value.providers.openai.apiKey !== '';
@@ -194,45 +196,31 @@ export const SettingsPanel = (props: {
         <span className="field-info">{BASE_URL_HELP}</span>
       </label>
 
-      {showKeyInput || anyKeyStored ? (
-        <div className="action-field">
-          {showKeyInput ? (
-            <React.Fragment>
-              <span className="field-title">API key</span>
-              <Input.Password
-                className="input"
-                placeholder={
-                  proxyMode
-                    ? 'Leave blank if the proxy supplies the key'
-                    : provider.label + ' API key'
-                }
-                value={cfg.apiKey}
-                onChange={info => editActive({ apiKey: info.target.value })}
-              />
-              <span className="field-info">
-                <a
-                  href={provider.keyUrl}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                >
-                  Where to get a {provider.label} key
-                </a>
-              </span>
-            </React.Fragment>
-          ) : null}
-          {anyKeyStored ? (
-            <div>
-              <Button
-                type="link"
-                style={{ paddingLeft: 0 }}
-                onClick={clearKeys}
-              >
-                Clear stored keys
-              </Button>
-            </div>
-          ) : null}
-        </div>
-      ) : null}
+      <div className="action-field">
+        <span className="field-title">API key</span>
+        <Input.Password
+          className="input"
+          placeholder={
+            proxyMode
+              ? 'Leave blank if the proxy supplies the key'
+              : provider.label + ' API key'
+          }
+          value={cfg.apiKey}
+          onChange={info => editActive({ apiKey: info.target.value })}
+        />
+        <span className="field-info">
+          <a href={provider.keyUrl} target="_blank" rel="noopener noreferrer">
+            Where to get a {provider.label} key
+          </a>
+        </span>
+        {anyKeyStored ? (
+          <div>
+            <Button type="link" style={{ paddingLeft: 0 }} onClick={clearKeys}>
+              Clear stored keys
+            </Button>
+          </div>
+        ) : null}
+      </div>
 
       <div className="ai-review-section">
         <span className="ai-review-label">Advanced</span>

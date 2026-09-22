@@ -82,8 +82,11 @@ export function fileToDataUrl(file: File): Promise<string> {
 }
 
 /**
- * Resize to fit maxEdgePx and re-encode as JPEG. Every failure path — no
- * canvas (jsdom), a decode error, a tainted canvas — resolves with the input
+ * Resize to fit maxEdgePx and re-encode as JPEG. The re-encode also runs when
+ * the edge already fits but the bytes exceed MAX_IMAGE_BYTES (a heavy PNG scan
+ * at modest dimensions), since inlinePart would otherwise reject the original
+ * as "still too large after downscaling". Every failure path — no canvas
+ * (jsdom), a decode error, a tainted canvas — resolves with the input
  * unchanged: a failed resize must degrade to sending the original bytes, never
  * to failing the run. This function never rejects.
  */
@@ -120,17 +123,20 @@ export function downscaleDataUrl(
     const target = canvas;
     const context = ctx;
     try {
+      const oversized =
+        isDataUrl(dataUrl) &&
+        base64ByteLength(splitDataUrl(dataUrl).base64) > MAX_IMAGE_BYTES;
       const img = new Image();
       img.onload = () => {
         try {
           const w = img.naturalWidth || img.width;
           const h = img.naturalHeight || img.height;
           const longest = Math.max(w, h);
-          if (longest <= 0 || longest <= maxEdgePx) {
+          if (longest <= 0 || (longest <= maxEdgePx && !oversized)) {
             resolve(dataUrl);
             return;
           }
-          const scale = maxEdgePx / longest;
+          const scale = Math.min(1, maxEdgePx / longest);
           target.width = Math.max(1, Math.round(w * scale));
           target.height = Math.max(1, Math.round(h * scale));
           context.drawImage(img, 0, 0, target.width, target.height);
@@ -231,7 +237,10 @@ function fetchInline(
     .then(blob =>
       blob.arrayBuffer().then(buf => {
         const base64 = bytesToBase64(new Uint8Array(buf));
-        return inlinePart(blob.type || 'image/jpeg', base64, label);
+        // A host answering application/octet-stream (or nothing) would send
+        // Gemini a mime type it rejects; only an image/* type is forwarded.
+        const mimeType = /^image\//i.test(blob.type) ? blob.type : 'image/jpeg';
+        return inlinePart(mimeType, base64, label);
       }),
     )
     .catch(e => {

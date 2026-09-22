@@ -16,6 +16,7 @@ import {
   TRAIT_VOCABULARY,
   composeDescription,
   recordToTraits,
+  utf8ByteLength,
 } from '../../ai/apply';
 import { ELISION_PATTERN } from '../../ai/validate';
 
@@ -39,20 +40,6 @@ const { TextArea } = Input;
  * limit; this counter is what warns before it silently shortens. */
 const TITLE_MAX_BYTES = MAX_NAME_BYTES;
 
-const utf8Length = (s: string): number => {
-  let bytes = 0;
-  for (let i = 0; i < s.length; i++) {
-    const code = s.codePointAt(i) as number;
-    if (code > 0xffff) {
-      i++;
-      bytes += 4;
-    } else {
-      bytes += code < 0x80 ? 1 : code < 0x800 ? 2 : 3;
-    }
-  }
-  return bytes;
-};
-
 const OVERRIDE_LABEL = 'I have checked this myself';
 
 const FALLBACK_NOTE =
@@ -75,11 +62,6 @@ const WORKING_NOTES_HEADING = 'Working notes — not written to the NFT.';
 
 const AMBER = '#f0c674';
 const RED = '#ff7875';
-
-/** Trait rows an un-overridden blocking warning makes unsafe to write. */
-const TRAITS_BLOCKED_BY: Partial<Record<WarningCode, TraitKey[]>> = {
-  'unscaled-dimensions': ['Dimensions'],
-};
 
 /** Traits computed from several record fields, or from the run itself. There
  *  is no single field to write an edit back to, so their cells are read-only;
@@ -251,17 +233,6 @@ export const ReviewPanel = (props: {
     result.warnings.filter(w => w.severity !== 'block'),
   );
 
-  const blockedTraits: TraitKey[] = [];
-  blockWarnings.forEach(w => {
-    if (isOverridden(w.code)) {
-      return;
-    }
-    const keys = TRAITS_BLOCKED_BY[w.code];
-    if (keys) {
-      keys.forEach(key => blockedTraits.push(key));
-    }
-  });
-
   /* --- inscription ---------------------------------------------------- */
 
   const inscription = record.inscription;
@@ -322,7 +293,7 @@ export const ReviewPanel = (props: {
   const descriptionLocked = selection.includeInscription;
   const composed = composeDescription(record, selection.includeInscription);
 
-  const titleLength = utf8Length(record.title);
+  const titleLength = utf8ByteLength(record.title);
   const titleOver = titleLength > TITLE_MAX_BYTES;
 
   return (
@@ -511,14 +482,12 @@ export const ReviewPanel = (props: {
           <table className="ai-trait-table">
             <tbody>
               {traitRows.map(key => {
-                const blocked = blockedTraits.indexOf(key) >= 0;
                 const derived = DERIVED_TRAITS.indexOf(key) >= 0;
                 return (
                   <tr className="ai-trait-row" key={key}>
                     <td style={{ width: 32 }}>
                       <Checkbox
                         checked={selection.traitKeys.indexOf(key) >= 0}
-                        disabled={blocked}
                         onChange={e => toggleTrait(key, e.target.checked)}
                       />
                     </td>

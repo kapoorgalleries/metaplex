@@ -390,7 +390,10 @@ function openaiPlan(
     body: JSON.stringify({
       model: cfg.model,
       temperature: req.temperature,
-      max_tokens: req.maxOutputTokens,
+      // max_completion_tokens is accepted by every current chat-completions
+      // model, gpt-4o included; max_tokens is rejected by the reasoning
+      // family, so sending the new name up front avoids a 400 + retry.
+      max_completion_tokens: req.maxOutputTokens,
       response_format: responseFormat,
       messages: [
         { role: 'system', content: systemPrompt },
@@ -413,9 +416,9 @@ export const OPENAI: AiProvider = {
   id: 'openai',
   label: 'OpenAI (ChatGPT)',
   keyUrl: 'https://platform.openai.com/api-keys',
-  // Not a gpt-5-family id on purpose: those reject a non-default temperature
-  // and reject max_tokens, so such a default would 400 on the first call.
-  // retryBody below is what lets one be typed into the settings field.
+  // Not a gpt-5-family id on purpose: those reject a non-default temperature,
+  // so such a default would 400 on the first call. retryBody below is what
+  // lets one be typed into the settings field.
   defaultModel: 'gpt-4o',
   defaultBaseUrl: 'https://api.openai.com/v1',
   modelSuggestions: ['gpt-4o', 'gpt-4o-mini', 'gpt-4.1', 'gpt-5'],
@@ -470,25 +473,26 @@ export const OPENAI: AiProvider = {
   },
 
   /**
-   * The one concession to parameter drift: reasoning-family models rename
-   * max_tokens and reject a non-default temperature. Applied at most once, on
-   * a 400 only, and never to a body that already carries the new name.
+   * The one concession to parameter drift: reasoning-family models reject a
+   * non-default temperature ("Unsupported value: 'temperature' does not
+   * support 0.2 with this model. Only the default (1) value is supported.").
+   * Applied at most once, on a 400 only, and never to a body that has already
+   * dropped temperature.
    */
   retryBody(body: unknown, message: string): unknown | null {
     const b = (body || {}) as Record<string, unknown>;
-    const drift =
-      /max_completion_tokens|Unsupported parameter|Unsupported value|does not support/i;
-    if (!drift.test(message)) {
+    const rejectsTemperature =
+      /temperature/i.test(message) &&
+      /Unsupported value|Unsupported parameter|does not support|Only the default/i.test(
+        message,
+      );
+    if (!rejectsTemperature) {
       return null;
     }
-    if ('max_completion_tokens' in b) {
+    if (!('temperature' in b)) {
       return null;
     }
     const next: Record<string, unknown> = { ...b };
-    if ('max_tokens' in next) {
-      next.max_completion_tokens = next.max_tokens;
-      delete next.max_tokens;
-    }
     delete next.temperature;
     return next;
   },
