@@ -50,6 +50,17 @@ Scope, in the order it should be done: discover the LAN → fix the mess → SSH
 
 `inventory.csv` columns: `name,ip,mac,os,user,role,ssh_port,trimurti,notes`. `os` is `windows`, `macos`, `linux`, `nas` or `other`; `role` is `admin`, `workstation`, `nas`, `new`, `router`, `printer` or `iot`. Rows with `role=router` are listed but never logged into.
 
+## MCP server (optional, recommended for the Cowork session)
+
+`mcp/` holds `trimurti-ops-mcp-server`, which exposes the kit to a Claude session as typed tools: list and update the inventory, scan the LAN, test key login with a diagnosis per failure, run a command on a host, push the bootstrap/update/disk-triage scripts to many hosts as background jobs, verify the end state, and check the NAS. The runbook, status sheet and checklists are resources. Build and register it once on the admin machine:
+
+```bash
+cd ops/network/mcp && npm install && npm run build && npm test
+claude mcp add --scope user trimurti-ops -- node "$PWD/dist/index.js"
+```
+
+See `mcp/README.md` for the tool list, the typical flow and the limits (it cannot push the admin key for the first time; `scripts/ssh-keys.sh` in a terminal does that).
+
 ## Windows: the one thing that cannot be done remotely
 
 `enable-ssh-server.ps1` is what makes a Windows PC reachable over SSH, so it has to be run on that PC once, from an elevated PowerShell (copy the file over on a USB stick or from the NAS share). Give it the admin public key at the same time and that machine is done in one visit:
