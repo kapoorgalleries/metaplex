@@ -1,8 +1,21 @@
 # Trimurti network kit
 
-Everything needed to run the network clean-up from a **Cowork session on a machine that is on the LAN** (the admin machine). None of this can run from a cloud session: it has no route to the router, the NAS, the PCs or the drives.
+Everything needed to run the network clean-up from an agent session (Codex, Claude Code or Cowork) **on a machine that is on the LAN** (the admin machine). None of this can run from a cloud session: it has no route to the router, the NAS, the PCs or the drives.
 
 Scope, in the order it should be done: discover the LAN → fix the mess → SSH working to every machine → Claude Code, Codex and Gemini CLI on every machine → NAS → Hulk drives → the two new computers into Trimurti → OS updates everywhere → router tuning → verified end state.
+
+## Hand it to Codex
+
+On the admin machine, from a clone of this branch:
+
+```bash
+cd ops/network && ./start-codex.sh                                   # macOS / Linux
+powershell -ExecutionPolicy Bypass -File ops\network\start-codex.ps1   # Windows
+```
+
+The launcher installs Codex if it is missing, signs it in, builds and registers the `trimurti-ops` MCP server with Codex, and starts Codex in this directory. Codex loads `AGENTS.md` here as its instructions: the job, the done criteria, the actions that always need Sanjay's yes, the questions to ask up front, and the order of work. It records progress in `status.md` and picks up from there next time (`codex resume --last` resumes the conversation itself). Add `--sandboxed` (`-Sandboxed` on Windows) to keep Codex's workspace sandbox with network allowed, at the cost of more approval prompts; `--dry-run` shows what it would do.
+
+Claude Code started in this directory follows the same `AGENTS.md` (through `CLAUDE.md`), so either agent can take over from the other using `status.md`.
 
 ## Before starting
 

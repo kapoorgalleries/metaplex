@@ -19,6 +19,12 @@ Register it with Claude Code (absolute path, since the client starts it from any
 claude mcp add --scope user trimurti-ops -- node "$PWD/dist/index.js"
 ```
 
+Codex (`../start-codex.sh` does this for you):
+
+```bash
+codex mcp add trimurti-ops --env "TRIMURTI_OPS_DIR=$(cd .. && pwd)" -- node "$PWD/dist/index.js"
+```
+
 Claude Desktop or Cowork (`claude_desktop_config.json`):
 
 ```json
