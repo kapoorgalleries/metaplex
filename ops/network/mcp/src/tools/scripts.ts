@@ -163,7 +163,7 @@ export function registerScriptTools(server: McpServer): void {
       description: `Push one of the kit's scripts to every selected inventory host and run it there, choosing the .sh or .ps1 variant per host OS (this is scripts/run-remote.sh). The run happens in the background: you get a job_id at once and poll it with trimurti_get_job, because installs and OS updates take minutes.
 
 Scripts:
-  - bootstrap-ai-clis: Node 20+, Claude Code, Codex CLI, Gemini CLI (args: --skip-claude/--skip-codex/--skip-gemini/--skip-node; Windows: -SkipClaude/-SkipCodex/-SkipGemini/-SkipNode/-WithGit)
+  - bootstrap-ai-clis: Node 20+, Claude Code, Codex CLI, Gemini CLI (args: --skip-claude/--skip-codex/--skip-gemini/--skip-node/--with-node; Windows: -SkipClaude/-SkipCodex/-SkipGemini/-SkipNode/-WithNode/-WithGit)
   - update-all: OS packages, Homebrew/winget, Windows Update (security and critical by default), the CLIs; never reboots, ends with REBOOT_REQUIRED=yes|no|unknown (args: --no-os/--no-clis; Windows -NoOS/-NoCLIs/-AllUpdates). --cleanup, --major-upgrade, -Drivers and -FeatureUpgrades are refused here: they need Sanjay's yes and a terminal
   - enable-ssh-server: sshd on + firewall (only useful once a host is already reachable, e.g. -Pwsh7 on Windows). --harden (password logins off) is refused here: it needs Sanjay's yes and a terminal
   - disk-triage: read-only disk and SMART report on that host (for the Hulk drives)
@@ -214,7 +214,7 @@ Needs key login to each host first (trimurti_test_ssh); a missing or locked admi
     'trimurti_get_job',
     {
       title: 'Get a script job',
-      description: `Status and log tail of a job started by trimurti_run_script. When finished, lists which hosts passed and failed and which need a reboot, read only from run-remote.sh's closing TRIMURTI_SUMMARY lines (a host needs a reboot when its own run printed REBOOT_REQUIRED=yes). summary_found is false when run-remote.sh stopped before its summary; then read the log tail.
+      description: `Status and log tail of a job started by trimurti_run_script. When finished, lists which hosts passed and failed and which need a reboot, read only from run-remote.sh's closing TRIMURTI_SUMMARY lines (a host needs a reboot when its own run printed REBOOT_REQUIRED=yes). run-remote.sh prints the summary even when it stops early; a non-zero exit with empty passed and failed lists means it stopped before any host ran (no host selected, no inventory, a locked admin key), and the log tail says why. summary_found is false only when the summary lines are missing altogether; then read the log tail.
 
 Args: job_id, tail_lines (1-500, default 80).
 Returns: { job, summary_found, passed[], failed[], reboot_required[], log_tail }.`,
@@ -316,7 +316,7 @@ Every inventory row except the router is listed; only computers (role admin, wor
           else if (row.ssh_key !== 'yes' && row.ssh_key !== 'n/a') bad.push(row.ssh_key || 'key login not tried');
           for (const k of ['claude', 'codex', 'gemini', 'node'] as const) {
             if (row[k] === 'missing' || row[k] === '-' || row[k] === '') bad.push(`${k} missing`);
-            else if (row[k].startsWith('error:')) bad.push(`${k} does not run`);
+            else if (row[k].startsWith('error:')) bad.push(`${k} does not run (${row[k].slice(6).trim()})`);
           }
           const major = /^v?(\d+)\./.exec(row.node)?.[1];
           if (major && Number(major) < 20) bad.push(`node ${row.node} is too old (need 20+)`);

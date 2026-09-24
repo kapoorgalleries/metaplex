@@ -246,7 +246,11 @@ done
 
 log "versions on $HOST ($OS):"
 for c in node claude codex gemini; do
-  if have "$c"; then printf '  %-7s %s\n' "$c" "$("$c" --version 2>&1 | head -1)"; else printf '  %-7s MISSING\n' "$c"; fi
+  skipped=0
+  case "$c" in node) skipped=$SKIP_NODE ;; claude) skipped=$SKIP_CLAUDE ;; codex) skipped=$SKIP_CODEX ;; gemini) skipped=$SKIP_GEMINI ;; esac
+  if have "$c"; then printf '  %-7s %s\n' "$c" "$("$c" --version 2>&1 | head -1)"
+  elif [ "$skipped" = 1 ]; then printf '  %-7s not installed (skipped)\n' "$c"
+  else printf '  %-7s MISSING\n' "$c"; fi
 done
 [ "$SKIP_CLAUDE$SKIP_CODEX$SKIP_GEMINI" = 111 ] || cat <<'EOF'
 

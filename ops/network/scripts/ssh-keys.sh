@@ -157,4 +157,6 @@ if [ "$TEMP_AGENT" = 1 ]; then
        the session starts. Start (or restart) it with launch.sh (launch.ps1 on Windows), which loads
        the key first$([ "$(local_os)" = macos ] && printf '; on macOS, ssh-add --apple-use-keychain in any terminal also works')."
 fi
-grep -q ' FAIL$' "$RESULTS" && exit 1 || exit 0
+grep -q ' FAIL$' "$RESULTS" && exit 1
+grep -q -v ' SKIP (' "$RESULTS" || { warn "no host was pushed to (every selected host was skipped, or none was selected)"; exit 1; }
+exit 0

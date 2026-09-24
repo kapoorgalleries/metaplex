@@ -26,7 +26,7 @@ OPS="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)"
 # shellcheck source=scripts/lib.sh
 . "$OPS/scripts/lib.sh"   # load_admin_key; the functions below replace its log, warn and have
 usage() { awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "$0"; }
-SANDBOXED=0; NO_MCP=0; DRY=0; EXTRA=""
+SANDBOXED=0; NO_MCP=0; DRY=0; EXTRA=""; MCP_ON=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --sandboxed) SANDBOXED=1 ;;
@@ -86,6 +86,7 @@ else
   log "registering trimurti-ops with Codex"
   if [ "$DRY" = 0 ]; then codex mcp remove trimurti-ops >/dev/null 2>&1 || true; fi
   run codex mcp add trimurti-ops --env "TRIMURTI_OPS_DIR=$OPS" -- node "$OPS/mcp/dist/index.js"
+  MCP_ON=1
 fi
 
 # 4. With real data these two map the gallery's network: keep them out of 'git commit -a'
@@ -105,6 +106,12 @@ if [ "$SANDBOXED" = 1 ]; then
 else
   set -- -C "$OPS" -s danger-full-access -a on-request
 fi
+# Codex starts an MCP server with a short list of variables, not SSH_AUTH_SOCK: name the
+# agent's for it, or its SSH tools cannot reach the key. Only for a server registered just
+# now: an override for a missing one stops Codex ('invalid transport'). Codex also keeps
+# variables named like *KEY* out of its shells, so a custom KEY_FILE is set explicitly.
+if [ "$MCP_ON" = 1 ]; then set -- "$@" -c "mcp_servers.trimurti-ops.env_vars=['SSH_AUTH_SOCK','SSH_AGENT_PID','KEY_FILE']"; fi
+if [ -n "${KEY_FILE:-}" ]; then set -- "$@" -c "shell_environment_policy.set.KEY_FILE='$KEY_FILE'"; fi
 log "starting Codex in $OPS (resume later with: codex resume --last)"
 if [ "$DRY" = 1 ]; then printf '  [dry-run] codex'; printf ' %q' "$@" "$PROMPT"; printf '\n'; exit 0; fi
 # An ssh-agent started by load_admin_key lives as long as Codex does.

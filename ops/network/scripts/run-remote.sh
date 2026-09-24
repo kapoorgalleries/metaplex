@@ -21,8 +21,15 @@ set -u
 . "$(dirname "$0")/lib.sh"
 SCRIPT_FLAGS="--tty"
 parse_filters "$@"
-# parse_filters joins the arguments with spaces: refuse one that would fall apart there
+# parse_filters joins the script arguments with spaces: refuse one that would fall
+# apart there. Filter values ("--host a, b") are split on commas and may hold spaces.
+skip=0
 for a in "$@"; do
+  if [ "$skip" = 1 ]; then skip=0; continue; fi
+  case "$a" in
+    --host|--hosts|--os|--role|--trimurti) skip=1; continue ;;
+    --host=*|--hosts=*|--os=*|--role=*|--trimurti=*) continue ;;
+  esac
   case "$a" in *[[:space:]]*) bad_usage "argument '$a' contains whitespace: arguments reach the script unquoted, so each must be one word" ;; esac
 done
 set -f
@@ -39,7 +46,7 @@ for a in "$@"; do
   case "$a" in *[!A-Za-z0-9._=:/,@+\\-]*) bad_usage "argument '$a': only letters, digits and . _ = : / , @ + \\ - are allowed" ;; esac
 done
 ARGS="$*"
-[ "$TTY" = 0 ] || [ -t 0 ] || bad_usage "--tty needs a terminal to type sudo passwords into; run it yourself in a terminal"
+[ "$TTY" = 0 ] || has_tty || bad_usage "--tty needs a terminal to type sudo passwords into; run it yourself in a terminal"
 
 PASSED=""; FAILED=""; REBOOT=""; RAN=0
 summary() {

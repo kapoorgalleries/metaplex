@@ -199,11 +199,11 @@ key_problem() {
   msg="key is passphrase-protected and no ssh-agent holds it: run ssh-add $k"
   [ "$(local_os)" = windows ] && launcher=launch.ps1
   if has_tty; then
-    if [ "$rc" = 2 ]; then echo "$msg (this shell has no ssh-agent: rerun $launcher, which loads the key into one, or eval \"\$(ssh-agent -s)\" first)"
+    if [ "$rc" = 2 ]; then echo "$msg (this terminal has no ssh-agent: run eval \"\$(ssh-agent -s)\" && ssh-add $k here, then rerun the command; for the AI agent's shells, rerun $launcher instead)"
     else echo "$msg"; fi
   elif [ "$(local_os)" = macos ]; then
     echo "$msg (this shell has no terminal for the passphrase: Sanjay runs ssh-add --apple-use-keychain $k in any terminal, or reruns $launcher)"
-  elif [ "$rc" != 2 ] && [ -n "${SSH_AUTH_SOCK:-}" ]; then
+  elif [ "$(local_os)" != windows ] && [ "$rc" != 2 ] && [ -n "${SSH_AUTH_SOCK:-}" ]; then
     echo "$msg (this shell has no terminal for the passphrase: Sanjay reruns $launcher, or adds it to this shell's agent from any terminal: SSH_AUTH_SOCK='$SSH_AUTH_SOCK' ssh-add $k)"
   else
     echo "$msg (this shell has no ssh-agent and no terminal for the passphrase: Sanjay reruns $launcher, which loads the key and starts the agent session with it)"
@@ -244,10 +244,12 @@ load_admin_key() {
     if ! eval "$(ssh-agent -s)" >/dev/null; then warn "could not start an ssh-agent: $kp"; return 0; fi
     # shellcheck disable=SC2034
     ADMIN_AGENT_STARTED=1
+    trap 'ssh-agent -k >/dev/null 2>&1; exit 130' INT TERM
   fi
   log "loading the admin key into the ssh-agent: type its passphrase (the agent session inherits it)"
   if [ "$(local_os)" = macos ]; then ssh-add --apple-use-keychain "$KEY_FILE" || ssh-add -K "$KEY_FILE" || true
   else ssh-add "$KEY_FILE" || true; fi
+  if [ "$ADMIN_AGENT_STARTED" = 1 ]; then trap - INT TERM; fi
   key_in_agent || warn "the admin key is not in the ssh-agent, so every SSH step will stop with 'no ssh-agent holds it'; rerun this launcher to try again"
 }
 

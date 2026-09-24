@@ -163,7 +163,9 @@ else { $argv = @('-C', $Ops, '-s', 'danger-full-access', '-a', 'on-request') }
 # Codex starts an MCP server with a short list of variables (PATH, USERPROFILE, TEMP, ...), not
 # SSH_AUTH_SOCK: name the agent's for it, or its SSH tools cannot reach the key. Only for a server
 # registered just now: an override for a missing one stops Codex ('invalid transport').
-if ($mcpOn) { $argv += @('-c', "mcp_servers.trimurti-ops.env_vars=['SSH_AUTH_SOCK','SSH_AGENT_PID']") }
+if ($mcpOn) { $argv += @('-c', "mcp_servers.trimurti-ops.env_vars=['SSH_AUTH_SOCK','SSH_AGENT_PID','KEY_FILE']") }
+# Codex keeps variables named like *KEY* out of its shells: set a custom KEY_FILE explicitly.
+if ($env:KEY_FILE) { $argv += @('-c', ("shell_environment_policy.set.KEY_FILE='{0}'" -f $env:KEY_FILE)) }
 Log "starting Codex in $Ops (resume later with: codex resume --last)"
 if ($DryRun) { Write-Host ("  [dry-run] codex {0} `"{1}`"" -f ($argv -join ' '), $prompt); exit 0 }
 $ErrorActionPreference = 'Continue'
