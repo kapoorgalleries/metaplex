@@ -76,7 +76,7 @@ while IFS=, read -r name ip mac os user role port trimurti notes <&3; do
     [ "$p" = yes ] || bad="$bad, no ping"
     case "$sshok" in yes|n/a) ;; NO) bad="$bad, key login fails" ;; *) bad="$bad, $sshok" ;; esac
     for c in "claude=$claude" "codex=$codex" "gemini=$gemini" "node=$node"; do
-      case "${c#*=}" in ""|missing|error:*) bad="$bad, ${c%%=*} missing" ;; esac
+      case "${c#*=}" in ""|missing) bad="$bad, ${c%%=*} missing" ;; error:*) bad="$bad, ${c%%=*} does not run" ;; esac
     done
     [ -z "$bad" ] || NOT_GREEN="$NOT_GREEN
   $name: ${bad#, }"

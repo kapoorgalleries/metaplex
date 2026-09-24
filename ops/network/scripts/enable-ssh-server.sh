@@ -92,7 +92,7 @@ restart_sshd() {
     $SUDO launchctl kickstart -k system/com.openssh.sshd 2>/dev/null || true
   elif systemd_up; then $SUDO systemctl restart "$SVC"
   elif have rc-service; then $SUDO rc-service sshd restart
-  elif pid="$(sshd_pid)"; then $SUDO kill -HUP "$pid"   # sshd re-reads its config on SIGHUP
+  elif pid="$(sshd_pid)"; then $SUDO sh -c 'kill -HUP "$1"' sh "$pid"   # sshd re-reads its config on SIGHUP
   else echo "could not find the running sshd: restart it by hand so the change takes effect"; return 1; fi
 }
 

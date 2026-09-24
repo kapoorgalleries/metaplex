@@ -65,7 +65,7 @@ apt_get() {
 # version is only listed unless --major-upgrade. REBOOT=yes only when an update
 # that needs a restart was installed by this run.
 macos_updates() {
-  local list items cur label title ver act major rc r
+  local list items cur label title ver act major name rc r
   log "macOS software update (on Apple silicon the OS update itself may need the owner's password: System Settings > General > Software Update)"
   list="$(softwareupdate -l 2>&1)" || { printf '%s\n' "$list" | tail -5; return 1; }
   items="$(printf '%s\n' "$list" | awk '
@@ -89,17 +89,18 @@ macos_updates() {
   REBOOT=no; rc=0; MAJOR_PENDING=""
   while IFS='|' read -r label title ver act; do
     [ -n "$label" ] || continue
-    major=""
+    major=""; name="$title"
+    case "$title" in *"$ver"*) ;; *) name="$title $ver" ;; esac
     case "$title" in macOS*) [ -n "$cur" ] && [ -n "$ver" ] && [ "${ver%%.*}" != "$cur" ] && major=yes ;; esac
-    if [ -n "$major" ] && [ "$MAJOR" = 0 ]; then MAJOR_PENDING="$MAJOR_PENDING${MAJOR_PENDING:+, }$title $ver"; continue; fi
-    log "installing $title $ver"
+    if [ -n "$major" ] && [ "$MAJOR" = 0 ]; then MAJOR_PENDING="$MAJOR_PENDING${MAJOR_PENDING:+, }$name"; continue; fi
+    log "installing $name"
     if [ -n "$major" ]; then
       $SUDO softwareupdate -i "$label" --agree-to-license --verbose 2>&1 | tail -5; r=${PIPESTATUS[0]}
     else
       $SUDO softwareupdate -i "$label" --verbose 2>&1 | tail -5; r=${PIPESTATUS[0]}
     fi
     if [ "$r" -eq 0 ]; then [ "$act" = yes ] && REBOOT=yes
-    else warn "softwareupdate could not install $title (pending until someone installs it in System Settings)"; rc=1; fi
+    else warn "softwareupdate could not install $name (pending until someone installs it in System Settings)"; rc=1; fi
   done <<EOF
 $items
 EOF
