@@ -73,8 +73,10 @@ export const SettingsPanel = (props: {
   const problem = configProblem(cfg, provider);
   const datalistId = 'ai-model-suggestions-' + activeId;
 
-  // Nothing to type a key into when a proxy holds it and none is stored.
-  const showKeyInput = !(proxyMode && cfg.apiKey === '');
+  // The key input stays visible in proxy mode too: a proxy may forward the
+  // caller's key rather than inject its own, and hiding the field would leave
+  // no way to supply one without first reverting the Base URL. The placeholder
+  // already says it is optional.
   // Only keys that actually reach localStorage count towards the warning.
   const anyKeyStored = PROVIDER_IDS.some(
     id => PROVIDERS[id].persistKey && value.providers[id].apiKey !== '',
@@ -218,49 +220,34 @@ export const SettingsPanel = (props: {
         </span>
       </label>
 
-      {showKeyInput || anyKeyStored ? (
-        <div className="action-field">
-          {showKeyInput ? (
-            <React.Fragment>
-              <span className="field-title">{provider.keyLabel}</span>
-              <Input.Password
-                className="input"
-                placeholder={
-                  proxyMode
-                    ? 'Leave blank if the proxy supplies the key'
-                    : provider.label + ' ' + provider.keyLabel.toLowerCase()
-                }
-                value={cfg.apiKey}
-                onChange={info => editActive({ apiKey: info.target.value })}
-              />
-              <span className="field-info">
-                <a
-                  href={provider.keyUrl}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                >
-                  Where to get a {provider.label}{' '}
-                  {provider.keyLabel.toLowerCase()}
-                </a>
-              </span>
-              {provider.persistKey ? null : (
-                <span className="field-info">{SESSION_KEY_NOTE}</span>
-              )}
-            </React.Fragment>
-          ) : null}
-          {anyKeyStored ? (
-            <div>
-              <Button
-                type="link"
-                style={{ paddingLeft: 0 }}
-                onClick={clearKeys}
-              >
-                Clear stored keys
-              </Button>
-            </div>
-          ) : null}
-        </div>
-      ) : null}
+      <div className="action-field">
+        <span className="field-title">{provider.keyLabel}</span>
+        <Input.Password
+          className="input"
+          placeholder={
+            proxyMode
+              ? 'Leave blank if the proxy supplies the key'
+              : provider.label + ' ' + provider.keyLabel.toLowerCase()
+          }
+          value={cfg.apiKey}
+          onChange={info => editActive({ apiKey: info.target.value })}
+        />
+        <span className="field-info">
+          <a href={provider.keyUrl} target="_blank" rel="noopener noreferrer">
+            Where to get a {provider.label} {provider.keyLabel.toLowerCase()}
+          </a>
+        </span>
+        {provider.persistKey ? null : (
+          <span className="field-info">{SESSION_KEY_NOTE}</span>
+        )}
+        {anyKeyStored ? (
+          <div>
+            <Button type="link" style={{ paddingLeft: 0 }} onClick={clearKeys}>
+              Clear stored keys
+            </Button>
+          </div>
+        ) : null}
+      </div>
 
       {/* Offered whenever the provider has a /key endpoint, including in
           proxy mode with a blank key — that is the one configuration the

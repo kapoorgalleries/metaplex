@@ -35,11 +35,11 @@ import { redactSecrets } from './settings';
  * that has never heard of json_schema) rather than rejecting our content.
  *
  * Every alternative must name a schema token. A bare `not supported` or
- * `Unknown name` would also match OpenAI's parameter-drift 400 ("'max_tokens'
- * is not supported with this model. Use 'max_completion_tokens'"), sending it
- * down this branch and leaving OPENAI.retryBody — written for exactly that
- * message — unreachable, so a reasoning-family model could never succeed.
- * Gemini's own rejection still matches here on `responseSchema`.
+ * `Unsupported value` would also match OpenAI's parameter-rejection 400
+ * ("Unsupported value: 'temperature' does not support 0.2 with this model"),
+ * sending it down this branch and leaving OPENAI.retryBody — written for
+ * exactly that message — unreachable, so a reasoning-family model could never
+ * succeed. Gemini's own rejection still matches here on `responseSchema`.
  */
 const STRUCTURED_OUTPUT_REJECTED =
   /response_format|json_schema|responseSchema|response_schema|structured output/i;

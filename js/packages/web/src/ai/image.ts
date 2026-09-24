@@ -82,8 +82,11 @@ export function fileToDataUrl(file: File): Promise<string> {
 }
 
 /**
- * Resize to fit maxEdgePx and re-encode as JPEG. Every failure path — no
- * canvas (jsdom), a decode error, a tainted canvas — resolves with the input
+ * Resize to fit maxEdgePx and re-encode as JPEG. The re-encode also runs when
+ * the edge already fits but the bytes exceed MAX_IMAGE_BYTES (a heavy PNG scan
+ * at modest dimensions), since inlinePart would otherwise reject the original
+ * as "still too large after downscaling". Every failure path — no canvas
+ * (jsdom), a decode error, a tainted canvas — resolves with the input
  * unchanged: a failed resize must degrade to sending the original bytes, never
  * to failing the run. This function never rejects.
  */
@@ -124,6 +127,9 @@ export function downscaleDataUrl(
     const target = canvas;
     const context = ctx;
     try {
+      const oversized =
+        isDataUrl(dataUrl) &&
+        base64ByteLength(splitDataUrl(dataUrl).base64) > MAX_IMAGE_BYTES;
       const img = new Image();
       img.onload = () => {
         try {
@@ -132,7 +138,9 @@ export function downscaleDataUrl(
           const longest = Math.max(w, h);
           const needsResize = longest > maxEdgePx;
           const needsJpeg = forceJpeg && !/^data:image\/jpeg/i.test(dataUrl);
-          if (longest <= 0 || (!needsResize && !needsJpeg)) {
+          // `oversized`: a heavy PNG/GIF whose edge already fits is still
+          // re-encoded, otherwise inlinePart rejects it as too large.
+          if (longest <= 0 || (!needsResize && !needsJpeg && !oversized)) {
             resolve(dataUrl);
             return;
           }
@@ -242,7 +250,9 @@ function fetchInline(
     .then(blob =>
       blob.arrayBuffer().then(buf => {
         const base64 = bytesToBase64(new Uint8Array(buf));
-        const mimeType = blob.type || 'image/jpeg';
+        // A host answering application/octet-stream (or nothing) would send
+        // Gemini a mime type it rejects; only an image/* type is forwarded.
+        const mimeType = /^image\//i.test(blob.type) ? blob.type : 'image/jpeg';
         /* Fetched bytes go through the same downscale as an upload. They did
          * not before, so an arweave original arrived at full size for every
          * provider that cannot fetch a URL itself. */

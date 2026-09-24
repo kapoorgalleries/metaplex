@@ -566,12 +566,21 @@ function openaiContent(req: CatalogueRequest): OpenAiContentPart[] {
   return content;
 }
 
+/** The name of the reply-ceiling field. OpenAI itself accepts the current
+ *  name on every chat-completions model, gpt-4o included, and its reasoning
+ *  family rejects the old one, so OpenAI proper sends the current name up
+ *  front and never pays the rename round-trip. The other dialects keep the
+ *  old name (DeepSeek documents only max_tokens; the gallery's gateway ignores
+ *  both) and rely on openaiRetryBody if a model of theirs renames it. */
+type TokenParam = 'max_tokens' | 'max_completion_tokens';
+
 function openaiPlan(
   req: CatalogueRequest,
   cfg: ProviderSettings,
   auth: AuthStyle,
   mode: ResponseFormatMode,
   completionsPath: string,
+  tokenParam: TokenParam,
 ): HttpPlan {
   /* Key order is deliberate: response_format is emitted before `messages` so
    * that a provider echoing the head of a rejected body in its 400 shows the
@@ -579,12 +588,12 @@ function openaiPlan(
   const body: Record<string, unknown> = {
     model: cfg.model,
     temperature: req.temperature,
-    max_tokens: req.maxOutputTokens,
-    /* Explicit, because the gallery's trimurti-gateway defaults to streaming
-     * when the field is absent and would answer with an SSE stream this
-     * driver cannot read. Every direct provider accepts it too. */
-    stream: false,
   };
+  body[tokenParam] = req.maxOutputTokens;
+  /* Explicit, because the gallery's trimurti-gateway defaults to streaming
+   * when the field is absent and would answer with an SSE stream this
+   * driver cannot read. Every direct provider accepts it too. */
+  body.stream = false;
 
   if (mode === 'schema') {
     body.response_format = {
@@ -636,8 +645,10 @@ interface OpenAiBody {
  * models rename max_tokens and reject a non-default temperature. OpenAI's
  * gpt-5 family, DeepSeek's reasoner and whatever either publisher ships next
  * behind GitHub Models or an Azure deployment all fail the same way, so they
- * all get the same single retry — at most once, on a 400 only, and never to a
- * body that already carries the new name.
+ * all get the same single retry — at most once, on a 400 only. A body that
+ * already carries the current name (OpenAI proper sends it up front) has
+ * nothing to rename, so only its temperature can go; once that is gone too
+ * there is nothing left to change and the answer is null, never a loop.
  */
 function openaiRetryBody(body: unknown, message: string): unknown | null {
   const b = (body || {}) as Record<string, unknown>;
@@ -646,7 +657,7 @@ function openaiRetryBody(body: unknown, message: string): unknown | null {
   if (!drift.test(message)) {
     return null;
   }
-  if ('max_completion_tokens' in b) {
+  if ('max_completion_tokens' in b && !('temperature' in b)) {
     return null;
   }
   const next: Record<string, unknown> = { ...b };
@@ -676,6 +687,8 @@ interface OpenAiCompatible {
   outputTokenCap?: number;
   /** Omit for the OpenAI dialect's own path, /chat/completions. */
   completionsPath?: string;
+  /** Omit to send max_tokens; see TokenParam. */
+  tokenParam?: TokenParam;
   /** A floor on the request timeout for an endpoint with a ceiling of its own. */
   minRequestTimeoutMs?: number;
   /** Omit to persist the key; false keeps it in memory for the session. */
@@ -695,6 +708,7 @@ function openAiCompatible(spec: OpenAiCompatible): AiProvider {
   const shortLabel = PROVIDER_LABELS[spec.id];
   const supportsImages = spec.supportsImages !== false;
   const completionsPath = spec.completionsPath || '/chat/completions';
+  const tokenParam: TokenParam = spec.tokenParam || 'max_tokens';
 
   /** A text-only model must refuse the photographs rather than post them:
    *  the gallery's trimurti-gateway flattens them to "[photo attached — not
@@ -745,7 +759,14 @@ function openAiCompatible(spec: OpenAiCompatible): AiProvider {
 
     buildRequest(req: CatalogueRequest, cfg: ProviderSettings): HttpPlan {
       requireImageSupport(req, cfg);
-      return openaiPlan(req, cfg, spec.auth, spec.primaryMode, completionsPath);
+      return openaiPlan(
+        req,
+        cfg,
+        spec.auth,
+        spec.primaryMode,
+        completionsPath,
+        tokenParam,
+      );
     },
 
     buildFallbackRequest(
@@ -759,6 +780,7 @@ function openAiCompatible(spec: OpenAiCompatible): AiProvider {
         spec.auth,
         spec.fallbackMode,
         completionsPath,
+        tokenParam,
       );
     },
 
@@ -852,9 +874,11 @@ export const OPENAI: AiProvider = openAiCompatible({
   // Ids taken from the model allowlist the gallery's own trimurti-gateway
   // runs against this API (sb1-vuxiwzek, supabase/functions/trimurti-gateway),
   // where gpt-4o and gpt-5 are recorded as legacy ALIASES of these. The
-  // reasoning family rejects a non-default temperature and renames
-  // max_tokens; openaiRetryBody is what absorbs that on the first 400.
+  // reasoning family rejects a non-default temperature; openaiRetryBody
+  // drops it on the first 400. Its rename of max_tokens never fires here
+  // because tokenParam sends the current name up front.
   defaultModel: 'gpt-5.6-terra',
+  tokenParam: 'max_completion_tokens',
   defaultBaseUrl: 'https://api.openai.com/v1',
   modelSuggestions: ['gpt-5.6-terra', 'gpt-5.6-sol', 'gpt-5.6-luna', 'gpt-4o'],
   supportsRemoteImageUrl: true,

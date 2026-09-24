@@ -63,11 +63,6 @@ const WORKING_NOTES_HEADING = 'Working notes — not written to the NFT.';
 const AMBER = '#f0c674';
 const RED = '#ff7875';
 
-/** Trait rows an un-overridden blocking warning makes unsafe to write. */
-const TRAITS_BLOCKED_BY: Partial<Record<WarningCode, TraitKey[]>> = {
-  'unscaled-dimensions': ['Dimensions'],
-};
-
 /** Traits computed from several record fields, or from the run itself. There
  *  is no single field to write an edit back to, so their cells are read-only;
  *  the row can still be unticked. */
@@ -237,17 +232,6 @@ export const ReviewPanel = (props: {
   const orderedWarnings: RecordWarning[] = blockWarnings.concat(
     result.warnings.filter(w => w.severity !== 'block'),
   );
-
-  const blockedTraits: TraitKey[] = [];
-  blockWarnings.forEach(w => {
-    if (isOverridden(w.code)) {
-      return;
-    }
-    const keys = TRAITS_BLOCKED_BY[w.code];
-    if (keys) {
-      keys.forEach(key => blockedTraits.push(key));
-    }
-  });
 
   /* --- inscription ---------------------------------------------------- */
 
@@ -498,14 +482,12 @@ export const ReviewPanel = (props: {
           <table className="ai-trait-table">
             <tbody>
               {traitRows.map(key => {
-                const blocked = blockedTraits.indexOf(key) >= 0;
                 const derived = DERIVED_TRAITS.indexOf(key) >= 0;
                 return (
                   <tr className="ai-trait-row" key={key}>
                     <td style={{ width: 32 }}>
                       <Checkbox
                         checked={selection.traitKeys.indexOf(key) >= 0}
-                        disabled={blocked}
                         onChange={e => toggleTrait(key, e.target.checked)}
                       />
                     </td>
