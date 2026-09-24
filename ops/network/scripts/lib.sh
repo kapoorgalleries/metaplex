@@ -124,7 +124,8 @@ ssh_skip_reason() {  # user port
   case "$2" in
     "")       echo "no ssh_port set" ;;
     *[!0-9]*) echo "ssh_port '$2' is not a number" ;;
-    *)        [ -n "$1" ] || echo "no user set" ;;
+    *)        if [ ${#2} -gt 5 ] || [ "$2" -lt 1 ] || [ "$2" -gt 65535 ]; then echo "ssh_port '$2' is not a port"
+              elif [ -z "$1" ]; then echo "no user set"; fi ;;
   esac
 }
 

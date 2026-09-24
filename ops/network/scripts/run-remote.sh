@@ -40,7 +40,7 @@ mkdir -p "$LOGS"
 check_inventory
 HOSTS="$(select_hosts)"; [ -n "$HOSTS" ] || die "no hosts selected from $INVENTORY"
 PASSED=""; FAILED=""; REBOOT=""; RAN=0
-ESC="$(printf '\033')"
+ESC="$(printf '\033')"; BEL="$(printf '\007')"
 
 summary() {
   printf 'TRIMURTI_SUMMARY passed=%s\n' "$PASSED"
@@ -68,7 +68,7 @@ while IFS=, read -r name ip mac os user role port trimurti notes <&3; do
   else src="$SCRIPTS/$BASE.sh"; remote="/tmp/trimurti-$BASE-$tag.sh"; fi
   if [ ! -f "$src" ]; then fail "$name: no ${src##*/} for a $os host"; FAILED="${FAILED:+$FAILED,}$name"; continue; fi
   log "$name: ${src##*/} -> $target (log: $logf)"
-  printf '# %s %s on %s (%s)\n' "$(date '+%F %T')" "${src##*/} $ARGS" "$name" "$target" > "$logf"
+  printf '# %s %s on %s (%s)\n' "$(date '+%F %T')" "${src##*/}${ARGS:+ $ARGS}" "$name" "$target" > "$logf"
   # shellcheck disable=SC2086
   if err="$(scp $SSH_OPTS "${KEY_OPTS[@]}" -P "$port" "$src" "$target:$remote" </dev/null 2>&1)"; then
     if [ "$(lower "$os")" = "windows" ]; then
@@ -89,12 +89,14 @@ while IFS=, read -r name ip mac os user role port trimurti notes <&3; do
     fi
   else
     printf '%s\n' "$err" | tee -a "$logf" >&2
-    fail "$name: could not copy ${src##*/} to $target"
+    rc="copy failed"
   fi
   # the log without terminal colours and CRs (ssh -t and Windows add them)
-  tr -d '\r' < "$logf" | LC_ALL=C sed "s/$ESC\[[0-9;?]*[A-Za-z]//g" > "$logf.tmp" && mv "$logf.tmp" "$logf"
+  tr -d '\r' < "$logf" | LC_ALL=C sed -e "s/$ESC\[[0-9;?]*[A-Za-z]//g" -e "s/$ESC][^$ESC$BEL]*$ESC\\\\//g" -e "s/$ESC][^$BEL]*$BEL//g" \
+    > "$logf.tmp" && mv "$logf.tmp" "$logf"
   grep -q '^REBOOT_REQUIRED=yes' "$logf" && REBOOT="${REBOOT:+$REBOOT,}$name"
-  if [ "$rc" -eq 0 ]; then ok "$name: exit 0"; PASSED="${PASSED:+$PASSED,}$name"
+  if [ "$rc" = 0 ]; then ok "$name: exit 0"; PASSED="${PASSED:+$PASSED,}$name"
+  elif [ "$rc" = "copy failed" ]; then fail "$name: could not copy ${src##*/} to $target"; FAILED="${FAILED:+$FAILED,}$name"
   else fail "$name: exit $rc"; FAILED="${FAILED:+$FAILED,}$name"; fi
 done 3<<< "$HOSTS"
 
