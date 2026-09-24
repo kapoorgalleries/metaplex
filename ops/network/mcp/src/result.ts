@@ -18,8 +18,12 @@ export function clip(text: string, limit = CHARACTER_LIMIT): string {
   return `${text.slice(0, limit)}\n\n[truncated: ${text.length - limit} more characters. Narrow the request (a filter, a host, fewer tail lines) to see the rest.]`;
 }
 
-export function clipStream(text: string): string {
-  return clip(text, STREAM_LIMIT);
+/** Keep the head and the tail of a long stream (errors and summaries are usually at the end). */
+export function clipStream(text: string, limit = STREAM_LIMIT): string {
+  if (text.length <= limit) return text;
+  const head = Math.floor(limit * 0.3);
+  const tail = limit - head;
+  return `${text.slice(0, head)}\n\n[... ${text.length - limit} characters cut from the middle ...]\n\n${text.slice(-tail)}`;
 }
 
 export function ok(text: string, structured: Record<string, unknown>): ToolResult {
@@ -87,11 +91,15 @@ export function parseMdTable(text: string): Record<string, string>[] {
     .map((l) => Object.fromEntries(header.map((h, i) => [h, cells(l)[i] ?? ''])));
 }
 
+function mdCell(v: unknown): string {
+  return String(v ?? '').replace(/\r?\n/g, ' ').replace(/\|/g, '\\|');
+}
+
 export function mdTable(rows: ReadonlyArray<object>, columns: string[]): string {
   if (!rows.length) return '(none)';
   const head = `| ${columns.join(' | ')} |\n|${columns.map(() => '---').join('|')}|`;
   const body = rows
-    .map((r) => `| ${columns.map((c) => String((r as Record<string, unknown>)[c] ?? '')).join(' | ')} |`)
+    .map((r) => `| ${columns.map((c) => mdCell((r as Record<string, unknown>)[c])).join(' | ')} |`)
     .join('\n');
   return `${head}\n${body}`;
 }

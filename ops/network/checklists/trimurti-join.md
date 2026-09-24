@@ -34,9 +34,11 @@ Then in the Tailscale admin console: approve the machine if device approval is o
 
 ## Case B: Convention only
 
-Nothing to install. The onboarding list below *is* the join. When it is complete, set `trimurti=yes` on the row.
+Nothing to install. The onboarding list below *is* the join. When it is complete, set `trimurti=yes` on the row (`trimurti` means "in Trimurti now", so a new PC stays `no` until then).
 
 ## Case C: Windows workgroup / domain
+
+**ASK** first: both commands restart the PC.
 
 ```powershell
 # workgroup (elevated)
@@ -55,16 +57,17 @@ Add it to `inventory.csv` as its own row. On each new PC: DHCP reservation, `ssh
 
 `trimurti-gateway` is a Supabase Edge Function at `https://lbiabcdeojolvxezytkw.supabase.co/functions/v1/trimurti-gateway`. Its source is `supabase/functions/trimurti-gateway` in `kapoorgalleries/sb1-vuxiwzek`, with notes in that repo's `TRIMURTI.md`. It holds the Anthropic, OpenAI, DeepSeek and Gemini keys server-side and admits callers that present one access key. Nothing gets installed; a machine is "in" once it can reach the gateway and the key works from it.
 
-On each new machine, check reach and key with `GET /key`. It calls no provider and spends no budget. Sanjay types the key at the prompt; it never goes on a command line, into history, or into a file.
+On each new machine, check reach and key with `GET /key`. It calls no provider and spends no budget. Sanjay runs it in a terminal at that machine and types the key at the prompt; it never goes on a command line, into history, or into a file. Not through the agent or `trimurti_ssh_run`: there the prompt reads an empty key and the gateway answers 401.
 
 ```bash
-read -rs -p 'Trimurti access key: ' K; echo
+printf 'Trimurti access key: '; read -rs K; echo    # bash and zsh (zsh's read -p means something else)
 printf 'Authorization: Bearer %s\n' "$K" | curl -sS -w '\nHTTP %{http_code}\n' -H @- \
   https://lbiabcdeojolvxezytkw.supabase.co/functions/v1/trimurti-gateway/key
 unset K
 ```
 
 ```powershell
+[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 $s = Read-Host 'Trimurti access key' -AsSecureString
 $k = [Net.NetworkCredential]::new('', $s).Password
 Invoke-RestMethod -Uri https://lbiabcdeojolvxezytkw.supabase.co/functions/v1/trimurti-gateway/key -Headers @{ Authorization = "Bearer $k" } | ConvertTo-Json
@@ -77,7 +80,7 @@ Remove-Variable k, s
 
 Two things to tell Sanjay:
 
-- The storefront code records a gateway cap of 100,000 tokens per day **per address**. Every machine behind the gallery router shares one public address, so adding machines adds no budget, and one heavy user uses up everyone's allowance.
+- The storefront code records a gateway cap of 100,000 tokens per day **per address**, and each cataloguing run reserves about 46,000 of them: about two runs a day for the whole gallery. Every machine behind the gallery router shares one public address, so adding machines adds no budget, and one heavy user uses up everyone's allowance.
 - Claude, Codex and Gemini sign in to their own vendors (onboarding step 8) and do not go through the gateway. The gateway speaks the OpenAI chat-completions dialect with publisher-prefixed model ids (`openai/…`, `anthropic/…`, `google/…`), which Claude Code and Gemini CLI do not speak. Routing any CLI through it is his decision; don't set it up unasked.
 
 ## Per-machine onboarding (both new computers)
@@ -85,16 +88,16 @@ Two things to tell Sanjay:
 Do these in order; each has a script or a checklist item.
 
 1. **Physical**: wired if it stays put. Note the MAC (`netscan` finds it once it is on).
-2. **Hostname** that matches the inventory name:
+2. **ASK** **Hostname** that matches the inventory name (renames need Sanjay's yes; on Windows it restarts the PC):
    - Windows: `Rename-Computer -NewName new-pc-1 -Restart`
    - macOS: `sudo scutil --set HostName new-pc-1 && sudo scutil --set LocalHostName new-pc-1 && sudo scutil --set ComputerName new-pc-1`
    - Linux: `sudo hostnamectl set-hostname new-pc-1`
-3. **DHCP reservation** on the router (router-tuning.md §2). Renew the lease. Fill `ip` and `mac` in `inventory.csv`.
-4. **OS updates** now, before anything else: `update-all.ps1` / `update-all.sh` locally (first time), reboot.
-5. **SSH server on**: `enable-ssh-server.ps1` (elevated) or `enable-ssh-server.sh`, run locally this first time. Windows: the script also flips the network profile to Private.
-6. **Admin key**: from the admin machine, `scripts/ssh-keys.sh --host new-pc-1`. Must print `PASS`.
+3. **ASK** **DHCP reservation** on the router (a router change; router-tuning.md §2). Renew the lease. Fill `ip` and `mac` in `inventory.csv`.
+4. **OS updates** now, before anything else: `update-all.ps1` (elevated) or `update-all.sh` locally this first time. Windows installs security and critical updates unless `-AllUpdates`; `-Drivers`, `-FeatureUpgrades`, `--cleanup` and `--major-upgrade` need Sanjay's yes. **ASK** before the reboot it asks for (`REBOOT_REQUIRED=yes`).
+5. **SSH server on**, run locally this first time: `enable-ssh-server.ps1` (elevated, with `-PublicKey`; see README "Windows") or `enable-ssh-server.sh` as the login user without sudo (it calls sudo itself). On Windows the script also switches the LAN interface (the one with the default route) to Private and allows SSH from the local subnet only. `ssh_port` 22 on the row.
+6. **Admin key**: Sanjay, in a terminal on the admin machine (Git Bash on Windows): `scripts/ssh-keys.sh --host new-pc-1`. It asks for that machine's password once, unless the key already works (`enable-ssh-server.ps1 -PublicKey`). Must print `PASS`.
 7. **`ssh new-pc-1` works**: `scripts/ssh-config-gen.sh`, then try it.
-8. **AI CLIs**: `scripts/run-remote.sh --host new-pc-1 bootstrap-ai-clis`. Then sign in to each of the three on that machine (the bootstrap output says how, including the no-browser routes).
+8. **AI CLIs**: `scripts/run-remote.sh --host new-pc-1 bootstrap-ai-clis`; add `--tty` (Sanjay's terminal) when that machine's sudo asks for a password. It must end `INSTALL OK on <host>`. Then sign in to each of the three on that machine (the bootstrap output says how, including the no-browser routes).
 9. **NAS share** mounted with a named user (nas.md).
 10. **Trimurti join step** for the case ticked above.
-11. **Verify**: `scripts/verify.sh --host new-pc-1` all green; set `trimurti=yes`; paste the row into `status.md`.
+11. **Verify**: `scripts/verify.sh --host new-pc-1` exits 0 (green); set `trimurti=yes`; paste the row into `status.md`.

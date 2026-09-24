@@ -1,0 +1,19 @@
+#!/bin/sh
+# lab-user-setup GROUP nopasswd|password
+# Creates the test user "gallery" (password lab-pass-1: a lab-only credential) in GROUP
+# (sudo or wheel) and sets how sudo behaves for it. sudo keeps the proxy variables so
+# package managers reach the internet through the lab's proxy.
+set -eu
+group="$1"; mode="$2"
+id gallery >/dev/null 2>&1 || useradd -m -s /bin/bash -G "$group" gallery
+echo 'gallery:lab-pass-1' | chpasswd
+mkdir -p /etc/sudoers.d
+printf '%s\n' 'Defaults env_keep += "https_proxy HTTPS_PROXY no_proxy NO_PROXY NODE_EXTRA_CA_CERTS"' \
+  > /etc/sudoers.d/05-lab-proxy
+case "$mode" in
+  nopasswd) echo 'gallery ALL=(ALL:ALL) NOPASSWD: ALL' > /etc/sudoers.d/90-lab-gallery ;;
+  password) echo "%$group ALL=(ALL:ALL) ALL" > "/etc/sudoers.d/10-lab-$group" ;;
+  *) echo "lab-user-setup: mode must be nopasswd or password" >&2; exit 2 ;;
+esac
+chmod 0440 /etc/sudoers.d/*
+if command -v visudo >/dev/null 2>&1; then visudo -c >/dev/null; fi

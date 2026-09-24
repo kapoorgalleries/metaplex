@@ -12,7 +12,7 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "dev": "tsx src/index.ts",
-    "test": "npm run build && node test/smoke.mjs",
+    "test": "npm run build && node test/unit.mjs && node test/smoke.mjs",
     "clean": "rm -rf dist"
   },
   "engines": {
