@@ -15,7 +15,7 @@ cd ops/network/test/lab
 ```
 
 - `exec <name> <host> [-u USER] [cmd...]` wraps `docker exec -i` (adds `-t` on a terminal) and runs `bash -l` when no command is given. It reads stdin, so a kit script can be run on a host as a local user would run it: `./lab.sh exec smoke new-pc-2 -u gallery bash -s < state/smoke/kit/scripts/enable-ssh-server.sh`.
-- `up` is idempotent: it keeps running containers and the existing kit copy. `down` works on a half-built lab and on one that does not exist. Several labs can run at once on different octets.
+- `up` is idempotent: it keeps running containers and the existing kit copy, so after editing the kit copy the changed files into `state/<name>/kit/` (or `down` and `up` again). `down` works on a half-built lab and on one that does not exist. Several labs can run at once on different octets.
 - Needs Docker, python3 and curl on the host. `LAB_UPSTREAM_PROXY` (default: taken from `HTTPS_PROXY`) and `LAB_CA_FILE` (default `/root/.ccr/ca-bundle.crt`) point at the HTTPS proxy and its CA.
 - State lives in `state/<name>/`, which git ignores: `lab.env`, `kit/` (mounted at `/kit` in admin, owned by gallery), `router-tripwire.log`, and the forwarder and tripwire pid and log files. Build logs are in `state/.cache/`.
 
@@ -41,7 +41,7 @@ Every host has `https_proxy`, `no_proxy` (the lab subnet) and `NODE_EXTRA_CA_CER
 ## Limitations
 
 - **Package mirrors.** This environment's egress policy denies the Debian, Fedora and Arch mirrors (and deb.nodesource.com) with 403. So debian-pc, fedora-pc and arch-pc are built from their official base images plus OpenSSH 9.6p1 built from source, and on Debian sudo 1.9.15p5 too. Those sources are the pristine upstream tarballs, fetched from the Ubuntu archive and checked against pinned SHA-256 sums. On those three hosts, `apt`/`dnf`/`pacman` fail with the proxy's 403. Only the Ubuntu hosts can install packages. `lab.sh` probes the mirrors (the result is cached for 12 h) and builds the `*-native` Dockerfile targets where the mirrors are reachable. Those targets could not be tested here. `LAB_DISTRO_MODE=native|fallback` forces a choice.
-- **No systemd on debian-pc and fedora-pc**, because systemd cannot be installed there without the mirrors. `systemctl` and `journalctl` are missing, so `enable-ssh-server.sh` and `--harden` stop at `systemctl` on those two hosts.
+- **No systemd on debian-pc and fedora-pc**, because systemd cannot be installed there without the mirrors. `systemctl` and `journalctl` are missing. `enable-ssh-server.sh` accepts the sshd already running there (and says to start it at boot), and `--harden` reloads it with SIGHUP.
 - **Containers, not machines.** Every container shares the host kernel, so `uname -r` is the host's, and on Arch `update-all.sh` therefore always reports a reboot as needed. Other gaps:
   - rebooting stops the container;
   - no disks or SMART, so no Hulk drives;

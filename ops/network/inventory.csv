@@ -1,13 +1,21 @@
-# Trimurti network inventory. One row per device. No commas inside a field.
+# Trimurti network inventory. One row per device. No commas inside a field. Keep the header
+# row as it is; Excel's "CSV UTF-8" format is fine.
+# name:     letters, digits, '.', '_' and '-'. The MCP tools match names in any case and
+#           store new ones lowercase.
 # os:       windows | macos | linux | nas | other
-# role:     admin | workstation | nas | new | router | printer | iot
-# trimurti: yes | no   (should this machine be a member of Trimurti)
-# Replace the example rows with the real machines. Leave ip and mac blank until
-# netscan fills them in, then set DHCP reservations on the router for every named row.
+# role:     admin | workstation | new are the computers the kit sets up. nas | printer | iot
+#           are touched only when named (--host or --role). router is never touched, and
+#           neither is any row whose ip is this machine's default gateway.
+# ssh_port: 22 (or the real port) for a machine running sshd; blank = no SSH on this device
+#           (the router, a NAS before its SSH is on). Blank never means 22.
+# trimurti: yes = in Trimurti now; no = not (yet). A new PC becomes yes at the end of
+#           checklists/trimurti-join.md.
+# Replace the example rows with the real machines. Leave ip and mac blank until netscan
+# finds them, then set a DHCP reservation on the router for every named row.
 name,ip,mac,os,user,role,ssh_port,trimurti,notes
-router,192.168.1.1,,other,admin,router,,no,fill in make and model
-gallery-desk,192.168.1.10,,windows,sanjay,admin,22,yes,the machine Cowork runs on
-studio-mac,192.168.1.11,,macos,sanjay,workstation,22,yes,
-nas,192.168.1.20,,nas,admin,nas,22,no,fill in vendor - Synology / QNAP / TrueNAS / other
-new-pc-1,,,windows,sanjay,new,22,yes,first of the two new machines
-new-pc-2,,,linux,sanjay,new,22,yes,second of the two new machines
+router,,,other,,router,,no,fill in make and model - never logged into
+gallery-desk,,,windows,sanjay,admin,22,yes,the admin machine the agent runs on
+studio-mac,,,macos,sanjay,workstation,22,yes,
+nas,,,nas,admin,nas,,no,fill in vendor - Synology / QNAP / TrueNAS / other; ssh_port 22 once SSH is on (nas.md)
+new-pc-1,,,windows,sanjay,new,22,no,first of the two new machines
+new-pc-2,,,linux,sanjay,new,22,no,second of the two new machines
