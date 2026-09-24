@@ -4,6 +4,26 @@ Everything needed to run the network clean-up from an agent session (Codex, Clau
 
 Scope, in the order it should be done: discover the LAN → fix the mess → SSH working to every machine → Claude Code, Codex and Gemini CLI on every machine → NAS → Hulk drives → the two new computers into Trimurti → OS updates everywhere → router tuning → verified end state.
 
+## Start here: one command
+
+On the admin machine at the gallery (the one that is always on the LAN), in a terminal:
+
+```bash
+# macOS / Linux
+git clone --filter=blob:none --sparse -b claude/beautiful-turing-abqvwm https://github.com/kapoorgalleries/metaplex.git ~/trimurti-network
+git -C ~/trimurti-network sparse-checkout set ops/network reports
+~/trimurti-network/ops/network/launch.sh
+```
+
+```powershell
+# Windows (PowerShell; needs Git for Windows: winget install --id Git.Git -e)
+git clone --filter=blob:none --sparse -b claude/beautiful-turing-abqvwm https://github.com/kapoorgalleries/metaplex.git $HOME\trimurti-network
+git -C $HOME\trimurti-network sparse-checkout set ops/network reports
+powershell -ExecutionPolicy Bypass -File $HOME\trimurti-network\ops\network\launch.ps1
+```
+
+`launch` backs up `inventory.csv` and `status.md` to `out/`, updates the kit (keeping your copies of those two), installs Claude Code if it is missing, registers the `trimurti-ops` MCP server when Node 20+ is present, and starts Claude Code here with Remote Control on, so the session also appears in the Claude app as **trimurti-network**. `--codex` (`-Codex`) hands the job to Codex through `start-codex` instead; `--local` (`-Local`) skips Remote Control; `--dry-run` (`-DryRun`) shows the steps. Run it again any time to update and resume: one agent owns the job at a time, and `status.md` carries it over.
+
 ## Hand it to Codex
 
 On the admin machine, from a clone of this branch:
