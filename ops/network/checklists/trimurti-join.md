@@ -1,7 +1,8 @@
 # Joining the two new computers to Trimurti
 
-First, pin down what "Trimurti" is on the network. In this repo the name belongs to the gallery's AI gateway (a Supabase function), which has nothing to join. On the LAN it is one of these; tick the one that applies and record it in `status.md`:
+First, pin down what "Trimurti" means here. The storefront code in this repo uses the name for the gallery's AI gateway; on the LAN it may mean something else. Tick the one that applies and record it in `status.md`:
 
+- [ ] **The gallery's AI gateway**, `trimurti-gateway`, the Supabase function the storefront's cataloguing already calls. Machines don't join it: they need to reach it, and their users need the access key.
 - [ ] **A Tailscale tailnet** named Trimurti (or another overlay VPN). Machines join by logging in; they get a stable name and are reachable from anywhere.
 - [ ] **A naming and access convention**: the machines that are "in Trimurti" are the ones with a fixed IP, a hostname, an inventory row, SSH from the admin key, and the AI CLIs. Nothing to join beyond doing this checklist.
 - [ ] **A Windows workgroup or domain** called TRIMURTI that the PCs must be members of for file sharing.
@@ -49,6 +50,35 @@ macOS and Linux do not join workgroups; they only need the SMB user on the NAS/s
 ## Case D: A server named Trimurti
 
 Add it to `inventory.csv` as its own row. On each new PC: DHCP reservation, `ssh trimurti` via `ssh-config-gen.sh`, and map whatever share it exports (see `nas.md`, "Reachable but shares will not mount", for the mount commands).
+
+## Case E: The gallery's AI gateway
+
+`trimurti-gateway` is a Supabase Edge Function at `https://lbiabcdeojolvxezytkw.supabase.co/functions/v1/trimurti-gateway`. Its source is `supabase/functions/trimurti-gateway` in `kapoorgalleries/sb1-vuxiwzek`, with notes in that repo's `TRIMURTI.md`. It holds the Anthropic, OpenAI, DeepSeek and Gemini keys server-side and admits callers that present one access key. Nothing gets installed; a machine is "in" once it can reach the gateway and the key works from it.
+
+On each new machine, check reach and key with `GET /key`. It calls no provider and spends no budget. Sanjay types the key at the prompt; it never goes on a command line, into history, or into a file.
+
+```bash
+read -rs -p 'Trimurti access key: ' K; echo
+printf 'Authorization: Bearer %s\n' "$K" | curl -sS -w '\nHTTP %{http_code}\n' -H @- \
+  https://lbiabcdeojolvxezytkw.supabase.co/functions/v1/trimurti-gateway/key
+unset K
+```
+
+```powershell
+$s = Read-Host 'Trimurti access key' -AsSecureString
+$k = [Net.NetworkCredential]::new('', $s).Password
+Invoke-RestMethod -Uri https://lbiabcdeojolvxezytkw.supabase.co/functions/v1/trimurti-gateway/key -Headers @{ Authorization = "Bearer $k" } | ConvertTo-Json
+Remove-Variable k, s
+```
+
+- A JSON reply naming which provider keys the gateway holds: the machine is in. Note any provider reported without a key.
+- An auth error (401/403): wrong key, or the gateway refused this caller. That is a gateway setting, not the LAN.
+- DNS failure or timeout: this machine's DNS or internet path. Back to `network-triage.md`.
+
+Two things to tell Sanjay:
+
+- The storefront code records a gateway cap of 100,000 tokens per day **per address**. Every machine behind the gallery router shares one public address, so adding machines adds no budget, and one heavy user uses up everyone's allowance.
+- Claude, Codex and Gemini sign in to their own vendors (onboarding step 8) and do not go through the gateway. The gateway speaks the OpenAI chat-completions dialect with publisher-prefixed model ids (`openai/…`, `anthropic/…`, `google/…`), which Claude Code and Gemini CLI do not speak. Routing any CLI through it is his decision; don't set it up unasked.
 
 ## Per-machine onboarding (both new computers)
 

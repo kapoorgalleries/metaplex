@@ -47,7 +47,7 @@ Work read-only first. `netscan`, `nas-check`, `disk-triage` and `verify` change 
 
 1. Which machine is this, and which machines exist (names, rough location, OS)?
 2. Which two computers are the new ones, and are they powered on and plugged in?
-3. What is "Trimurti": a Tailscale tailnet, a naming convention, a Windows workgroup or domain, or a specific server? (`checklists/trimurti-join.md` explains each case.)
+3. What is "Trimurti": the gallery's AI gateway (`trimurti-gateway`, which the storefront code in this repo already uses), a Tailscale tailnet, a naming convention, a Windows workgroup or domain, or a specific server? (`checklists/trimurti-join.md` explains each case.)
 4. Router make and model, and whether he will make router changes in its web page himself while you guide, or give you SSH access to it (ASUS Merlin, UniFi and OpenWrt have SSH).
 5. NAS make and model, and what "fix the NAS" means: unreachable, shares won't mount, degraded, slow?
 6. Where the Hulk drives are plugged in, and what should be on them.
