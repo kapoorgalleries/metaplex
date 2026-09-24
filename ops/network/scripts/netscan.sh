@@ -1,13 +1,26 @@
 #!/usr/bin/env bash
 # LAN discovery from a macOS or Linux machine that is on the network.
 # Read-only: pings, reads the ARP table, resolves names, probes a few TCP
-# ports, and checks for double NAT. Nothing is changed anywhere.
+# ports, and checks for double NAT. Nothing is changed anywhere. The router
+# (this machine's default gateway, or a role=router row in the inventory) is
+# pinged but never port-probed.
 #
 # Usage:  scripts/netscan.sh [SUBNET]      SUBNET = first three octets, e.g. 192.168.1
-# Output: out/scan-<timestamp>.csv (ip,mac,hostname,ssh,smb,http,https,dsm,qnap,hint)
+# Output: out/scan-<timestamp>.csv (ip,mac,hostname,ssh22,smb445,http80,https443,dsm5000,qnap8080,hint)
 set -u
 # shellcheck source=lib.sh
 . "$(dirname "$0")/lib.sh"
+
+for a in "$@"; do
+  case "$a" in
+    -h|--help) usage 0 ;;
+    -*) bad_usage "unknown flag: $a" ;;
+  esac
+done
+[ $# -le 1 ] || bad_usage "one SUBNET at most"
+if [ -n "${1:-}" ]; then
+  printf '%s' "$1" | grep -qE '^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$' || bad_usage "SUBNET is the first three octets, e.g. 192.168.1, not '$1'"
+fi
 
 OS="$(uname -s)"
 STAMP="$(date +%Y%m%d-%H%M%S)"
@@ -18,7 +31,10 @@ if [ "$OS" = "Darwin" ]; then
   GW="$(route -n get default 2>/dev/null | awk '/gateway:/ {print $2}')"
   IFACE="$(route -n get default 2>/dev/null | awk '/interface:/ {print $2}')"
   MYIP="$(ipconfig getifaddr "$IFACE" 2>/dev/null)"
-  MASK="$(ipconfig getoption "$IFACE" subnet_mask 2>/dev/null)"
+  # dotted mask -> /prefix, as on Linux
+  MASK="$(ipconfig getoption "$IFACE" subnet_mask 2>/dev/null | awk -F. 'NF == 4 {
+    n = 0; for (i = 1; i <= 4; i++) for (b = 128; b >= 1; b /= 2) if ($i >= b) { n++; $i -= b }
+    print "/" n }')"
   DNS="$(scutil --dns 2>/dev/null | awk '/nameserver\[/ {print $3}' | sort -u | tr '\n' ' ')"
   LINK="$(networksetup -getmedia "$IFACE" 2>/dev/null | awk -F': ' '/Active/ {print $2}')"
   PING_W="-W 1000"      # macOS ping: milliseconds
@@ -57,22 +73,48 @@ is_cgnat() {  # 100.64/10 (RFC 6598): the ISP's carrier-grade NAT, nothing on th
     *) return 1 ;;
   esac
 }
+TO=""; have timeout && TO="timeout 20"
+# First four hops towards 1.1.1.1, one per line ("*" = no answer). Hop lines only:
+# BSD traceroute prints its header on stderr, Linux on stdout.
 if have traceroute; then
-  HOPS="$(traceroute -n -m 4 -w 1 -q 1 1.1.1.1 2>/dev/null | awk 'NR>1 {print $2}' | tr '\n' ' ')"
-  PRIV=0; CG=0
+  # shellcheck disable=SC2086
+  HOPS="$($TO traceroute -n -m 4 -w 1 -q 1 1.1.1.1 2>/dev/null | awk '$1 ~ /^[0-9]+$/ {print $2}' | tr '\n' ' ')"
+elif have tracepath; then
+  # the last address given for each hop number (a "pmtu" line repeats the hop before)
+  # shellcheck disable=SC2086
+  HOPS="$($TO tracepath -n -m 4 1.1.1.1 2>/dev/null | awk '$1 ~ /^[0-9]+:$/ { n = $1 + 0
+      if ($2 ~ /^[0-9.]+$/) h[n] = $2; else if (!(n in h)) h[n] = "*"; if (n > m) m = n }
+    END { for (i = 1; i <= m; i++) print ((i in h) ? h[i] : "*") }' | tr '\n' ' ')"
+else
+  HOPS="none"
+fi
+if [ "$HOPS" = none ]; then
+  warn "neither traceroute nor tracepath is installed; skipping the double-NAT check (Debian/Ubuntu: sudo apt install traceroute)"
+else
+  # Private hops in a row from hop 1 (the router). Two means the router's upstream is
+  # a private address too: a second NAT box, or an ISP that numbers its own network privately.
+  PRIV=0; CG=0; run=1; HOP2=""; ANS=0
+  set -f   # a hop can be "*"
   for h in $HOPS; do
-    is_rfc1918 "$h" && PRIV=$((PRIV+1))
+    [ "$h" = "*" ] && continue
+    ANS=$((ANS+1))
+    if [ "$run" = 1 ] && is_rfc1918 "$h"; then PRIV=$((PRIV+1)); [ "$PRIV" = 2 ] && HOP2="$h"; else run=0; fi
     is_cgnat "$h" && CG=$((CG+1))
   done
-  if [ "$PRIV" -ge 2 ]; then
-    warn "DOUBLE NAT: $PRIV of the first hops are private LAN addresses ($HOPS), so a second NAT box sits between this LAN and the internet. Confirm on the router's status page: a WAN IP in 10/8, 172.16/12 or 192.168/16 proves it. See checklists/network-triage.md, 'Double NAT'."
+  set +f
+  CONFIRM="Confirm on the router's status page: a WAN IP in 10/8, 172.16/12 or 192.168/16 proves double NAT; a public WAN IP means single NAT. See checklists/network-triage.md, 'Double NAT'."
+  if [ "$ANS" = 0 ]; then
+    warn "double-NAT check inconclusive: no hop towards 1.1.1.1 answered (${HOPS:-none})"
+  elif [ "$PRIV" -ge 2 ]; then
+    case "$HOP2" in
+      192.168.*) warn "DOUBLE NAT likely: the router's upstream hop $HOP2 is a home-router address ($HOPS), so a second NAT box (the ISP modem in router mode) sits between this LAN and the internet. $CONFIRM" ;;
+      *) warn "possible double NAT: the router's upstream hop $HOP2 is private ($HOPS). That is either a second NAT box or an ISP that uses private addresses inside its own network. $CONFIRM" ;;
+    esac
   elif [ "$CG" -ge 1 ]; then
     warn "ISP CGNAT: a hop is in 100.64.0.0/10 ($HOPS). That is the carrier's NAT, not a box on this LAN. Inbound port forwards and some VPNs will not work, and only the ISP can change it (ask for a public IP). Nothing to fix on the router."
   else
     ok "single NAT (first hops: ${HOPS:-none})"
   fi
-else
-  warn "traceroute not installed; skipping the double-NAT check (Debian/Ubuntu: sudo apt install traceroute)"
 fi
 
 # ---------------------------------------------------------------- 3. sweep
@@ -89,9 +131,25 @@ if [ "$OS" = "Darwin" ]; then
   PAIRS="$(arp -an 2>/dev/null | awk -v s="($SUBNET." 'index($2, s)==1 && $4 != "(incomplete)" {gsub(/[()]/, "", $2); print $2, $4}')"
 else
   MYMAC="$(cat "/sys/class/net/$IFACE/address" 2>/dev/null)"
-  PAIRS="$(ip neigh show 2>/dev/null | awk -v s="$SUBNET." 'index($1, s)==1 && $3 == "lladdr" {print $1, $4}')"
+  # "IP dev IF [router] lladdr MAC STATE": find lladdr rather than trusting a column
+  PAIRS="$(ip neigh show 2>/dev/null | awk -v s="$SUBNET." 'index($1, s)==1 { for (i = 2; i < NF; i++) if ($i == "lladdr") { print $1, $(i+1); break } }')"
 fi
-PAIRS="$(printf '%s\n%s %s\n' "$PAIRS" "$MYIP" "${MYMAC:-?}" | awk 'NF == 2 && !seen[$1]++')"
+# Only this subnet, no network or broadcast address; MACs lowercase and zero-padded
+# (macOS arp prints 2:42:c0:a8:58:b), without the broadcast MAC.
+PAIRS="$(printf '%s\n%s %s\n' "$PAIRS" "$MYIP" "${MYMAC:-?}" | awk -v s="$SUBNET." '
+  NF == 2 && index($1, s) == 1 && !seen[$1]++ {
+    o = substr($1, length(s) + 1); if (o == "0" || o == "255") next
+    m = tolower($2)
+    if (m != "?") {
+      if (split(m, p, /[:-]/) != 6) next
+      m = ""; for (i = 1; i <= 6; i++) m = m (i > 1 ? ":" : "") (length(p[i]) == 1 ? "0" : "") p[i]
+    }
+    if (m == "ff:ff:ff:ff:ff:ff" || m == "00:00:00:00:00:00") next
+    print $1, m }')"
+
+# The router: never port-probed (C2). The gateway, plus any role=router row in the inventory.
+ROUTERS=" $GW "
+[ -f "$INVENTORY" ] && ROUTERS="$ROUTERS$(inventory_rows 2>/dev/null | awk -F, 'tolower($6) == "router" && $2 != "" {printf "%s ", $2}')"
 
 # ---------------------------------------------------------------- 4. per host
 resolve() {
@@ -117,23 +175,32 @@ printf 'ip,mac,hostname,ssh22,smb445,http80,https443,dsm5000,qnap8080,hint\n' > 
 printf '%s\n' "$PAIRS" | sort -t. -k4,4n | while read -r ip mac; do
   [ -n "$ip" ] || continue
   name="$(resolve "$ip")"
-  s22="$(probe "$ip" 22)"; s445="$(probe "$ip" 445)"; s80="$(probe "$ip" 80)"
-  s443="$(probe "$ip" 443)"; s5000="$(probe "$ip" 5000)"; s8080="$(probe "$ip" 8080)"
-  hint=""
-  [ "$ip" = "$GW" ] && hint="gateway/router"
-  [ "$ip" = "$MYIP" ] && hint="this machine"
-  [ -n "$s5000" ] && hint="${hint:+$hint; }Synology DSM?"
-  [ -n "$s8080" ] && [ -n "$s445" ] && hint="${hint:+$hint; }QNAP?"
-  [ -n "$s445" ] && [ -z "$hint" ] && hint="SMB host (PC or NAS)"
-  [ -n "$s22" ] && hint="${hint:+$hint; }ssh open"
-  [ -z "$hint" ] && [ -n "$s80" ] && hint="web only (printer/IoT/AP?)"
+  s22=""; s445=""; s80=""; s443=""; s5000=""; s8080=""
+  case "$ROUTERS" in
+    *" $ip "*)
+      if [ "$ip" = "$GW" ]; then hint="gateway/router: not probed; never log in"
+      else hint="router (inventory role=router): not probed; never log in"; fi ;;
+    *)
+      s22="$(probe "$ip" 22)"; s445="$(probe "$ip" 445)"; s80="$(probe "$ip" 80)"
+      s443="$(probe "$ip" 443)"; s5000="$(probe "$ip" 5000)"; s8080="$(probe "$ip" 8080)"
+      hint=""
+      [ "$ip" = "$MYIP" ] && hint="this machine"
+      [ -n "$s5000" ] && hint="${hint:+$hint; }Synology DSM?"
+      [ -n "$s8080" ] && [ -n "$s445" ] && hint="${hint:+$hint; }QNAP?"
+      [ -n "$s445" ] && [ -z "$hint" ] && hint="SMB host (PC or NAS)"
+      [ -n "$s22" ] && hint="${hint:+$hint; }ssh open"
+      [ -z "$hint" ] && [ -n "$s80" ] && hint="web only (printer/IoT/AP?)" ;;
+  esac
   printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' "$ip" "$mac" "$name" "$s22" "$s445" "$s80" "$s443" "$s5000" "$s8080" "$hint" >> "$CSV"
 done
 
 # ---------------------------------------------------------------- 5. report
 N="$(($(wc -l < "$CSV") - 1))"
 log "$N hosts answered. Table (y = port open):"
-if have column; then column -t -s, "$CSV"; else cat "$CSV"; fi
+# awk, not column: BSD column (macOS) merges empty cells and shifts the rest left
+awk -F, '{ for (i = 1; i <= NF; i++) { c[NR, i] = $i; if (length($i) > w[i]) w[i] = length($i) } if (NF > n) n = NF }
+  END { for (r = 1; r <= NR; r++) { l = ""; for (i = 1; i <= n; i++) l = l sprintf("%-" w[i] "s  ", c[r, i]); sub(/ +$/, "", l); print l } }' "$CSV"
 log "saved: $CSV"
 log "next: copy the real machines into inventory.csv (name,ip,mac,os,user,role,ssh_port,trimurti,notes),"
+log "      the router as role=router with a blank ssh_port,"
 log "      then set a DHCP reservation on the router for each one (checklists/router-tuning.md, DHCP)."

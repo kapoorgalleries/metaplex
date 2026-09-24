@@ -119,7 +119,7 @@ brew_updates() {
 }
 
 linux_packages() {
-  local n
+  local n r
   if have apt-get; then
     log "apt"
     if [ "$CLEANUP" = 1 ]; then
@@ -135,8 +135,9 @@ linux_packages() {
   elif have pacman; then
     log "pacman"; $SUDO pacman -Syu --noconfirm || failed pacman
   elif have zypper; then
-    log "zypper"; $SUDO zypper -n update
-    case $? in 0) ;; 102) REBOOT=yes ;; 103) $SUDO zypper -n update || failed zypper ;; *) failed zypper ;; esac
+    log "zypper"; $SUDO zypper -n update; r=$?
+    if [ "$r" = 103 ]; then $SUDO zypper -n update; r=$?; fi   # 103: zypper updated itself; run it again
+    case "$r" in 0) ;; 102) REBOOT=yes ;; *) failed zypper ;; esac
   elif have apk; then
     log "apk"; { $SUDO apk update && $SUDO apk upgrade; } || failed apk
   else
@@ -157,8 +158,8 @@ linux_reboot() {
       *"Reboot is required"*) echo yes; return ;;
       *"should not be necessary"*) echo no; return ;;
     esac
-    newest="$(rpm -q --last kernel-core 2>/dev/null | awk 'NR == 1 {print $1}')"
-    newest="${newest#kernel-core-}"
+    newest="$(rpm -q --last kernel-core 2>/dev/null)" || newest=""
+    newest="$(printf '%s\n' "$newest" | awk 'NR == 1 {print $1}')"; newest="${newest#kernel-core-}"
     if [ -z "$newest" ]; then echo unknown; elif [ "$newest" = "$(uname -r)" ]; then echo no; else echo yes; fi
   elif have pacman || have apk; then
     if [ -d "/usr/lib/modules/$(uname -r)" ] || [ -d "/lib/modules/$(uname -r)" ]; then echo no; else echo yes; fi

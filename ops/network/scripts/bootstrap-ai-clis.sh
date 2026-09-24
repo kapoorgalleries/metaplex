@@ -52,7 +52,8 @@ SUDO=""; [ "$(id -u)" -ne 0 ] && have sudo && SUDO="sudo"
 FAILED=""
 failed() { FAILED="$FAILED $1"; }
 # An ssh command starts with a bare PATH: look where earlier runs, npm and Homebrew put things.
-export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+[ "$OS" = "Darwin" ] && PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$PATH"
 if have npm; then
   p="$(npm prefix -g 2>/dev/null)/bin"
   case ":$PATH:" in *":$p:"*) ;; *) PATH="$PATH:$p" ;; esac

@@ -69,11 +69,12 @@ if [ -e "$H/.ssh" ] && [ "$(ls -ldn "$H/.ssh" | awk '{print $3}')" != "$(id -u "
 fi
 if [ "$U" = "$(id -un)" ]; then
   mkdir -p "$H/.ssh"; touch "$H/.ssh/authorized_keys"
+  chmod 700 "$H/.ssh"; chmod 600 "$H/.ssh/authorized_keys"
 else
   $SUDO mkdir -p "$H/.ssh"; $SUDO touch "$H/.ssh/authorized_keys"
   $SUDO chown "$U:$G" "$H/.ssh" "$H/.ssh/authorized_keys"
+  $SUDO chmod 700 "$H/.ssh"; $SUDO chmod 600 "$H/.ssh/authorized_keys"
 fi
-$SUDO chmod 700 "$H/.ssh"; $SUDO chmod 600 "$H/.ssh/authorized_keys"
 
 # pid of the listening sshd, for systems without systemd or OpenRC
 sshd_pid() {
