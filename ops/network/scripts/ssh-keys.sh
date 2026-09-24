@@ -78,15 +78,15 @@ test_login() {  # user host port
 
 push_unix() {  # user host port
   if have ssh-copy-id; then
-    ssh-copy-id -i "$PUB" -o ConnectTimeout=8 -o StrictHostKeyChecking=accept-new -p "$3" "$1@$2" </dev/null 2>&1 >/dev/null
+    ssh-copy-id -i "$PUB" -o ConnectTimeout=8 -o StrictHostKeyChecking=accept-new -p "$3" "$1@$2" </dev/null >/dev/null
   else
     ssh -o ConnectTimeout=8 -o StrictHostKeyChecking=accept-new -p "$3" "$1@$2" \
-      "umask 077; mkdir -p ~/.ssh; touch ~/.ssh/authorized_keys; grep -qF '$PUBKEY' ~/.ssh/authorized_keys || echo '$PUBKEY' >> ~/.ssh/authorized_keys" </dev/null 2>&1 >/dev/null
+      "umask 077; mkdir -p ~/.ssh; touch ~/.ssh/authorized_keys; grep -qF '$PUBKEY' ~/.ssh/authorized_keys || echo '$PUBKEY' >> ~/.ssh/authorized_keys" </dev/null >/dev/null
   fi
 }
 
 push_windows() {  # user host port  -- the PowerShell below is fed over stdin, so it works whether the login shell is cmd or powershell
-  cat <<EOF | ssh -o ConnectTimeout=8 -o StrictHostKeyChecking=accept-new -p "$3" "$1@$2" "powershell -NoProfile -ExecutionPolicy Bypass -Command -" 2>&1 >/dev/null
+  cat <<EOF | ssh -o ConnectTimeout=8 -o StrictHostKeyChecking=accept-new -p "$3" "$1@$2" "powershell -NoProfile -ExecutionPolicy Bypass -Command -" >/dev/null
 \$k = '$PUBKEY'
 \$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 if (\$isAdmin) { \$f = 'C:\ProgramData\ssh\administrators_authorized_keys' } else { \$f = Join-Path \$env:USERPROFILE '.ssh\authorized_keys' }
@@ -112,8 +112,8 @@ while IFS=, read -r name ip mac os user role port trimurti notes <&3; do
     fail "$name: key login fails ($LOGIN_ERR); pushing the key needs $user@$host's password: run ssh-keys.sh in a terminal"
     echo "$name FAIL" >> "$RESULTS"; continue
   fi
-  if [ "$(lower "$os")" = "windows" ]; then push_err="$(push_windows "$user" "$host" "$port")"
-  else push_err="$(push_unix "$user" "$host" "$port")"; fi
+  if [ "$(lower "$os")" = "windows" ]; then push_err="$(push_windows "$user" "$host" "$port" 2>&1)"
+  else push_err="$(push_unix "$user" "$host" "$port" 2>&1)"; fi
   if test_login "$user" "$host" "$port"; then
     ok "$name: key login PASS"; echo "$name PASS" >> "$RESULTS"
   else
