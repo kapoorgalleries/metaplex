@@ -71,6 +71,11 @@ export function gatewaysFromProcRoute(text: string): string[] {
   return out;
 }
 
+/** `netstat -rn -f inet` (macOS: "default  192.168.1.1  UGScg  en0") or `netstat -rn` (Windows: "0.0.0.0  0.0.0.0  192.168.1.1  ..."). */
+export function gatewaysFromNetstat(text: string): string[] {
+  return [...text.matchAll(/^(?:default|\s*0\.0\.0\.0\s+0\.0\.0\.0)\s+(\d+\.\d+\.\d+\.\d+)\s/gm)].map((m) => m[1] ?? '');
+}
+
 /** Every default gateway of this machine, detected now. Each one is the router, whatever the inventory says. */
 export function defaultGateways(): string[] {
   const found: string[] = [];
@@ -78,11 +83,9 @@ export function defaultGateways(): string[] {
     if (process.platform === 'linux') {
       found.push(...gatewaysFromProcRoute(fs.readFileSync('/proc/net/route', 'utf8')));
     } else if (process.platform === 'darwin') {
-      const t = execFileSync('netstat', ['-rn', '-f', 'inet'], { encoding: 'utf8', timeout: 5000 });
-      for (const m of t.matchAll(/^default\s+(\d+\.\d+\.\d+\.\d+)\s/gm)) found.push(m[1] ?? '');
+      found.push(...gatewaysFromNetstat(execFileSync('netstat', ['-rn', '-f', 'inet'], { encoding: 'utf8', timeout: 5000 })));
     } else if (IS_WINDOWS) {
-      const t = execFileSync('netstat', ['-rn'], { encoding: 'utf8', timeout: 5000, windowsHide: true });
-      for (const m of t.matchAll(/^\s*0\.0\.0\.0\s+0\.0\.0\.0\s+(\d+\.\d+\.\d+\.\d+)\s/gm)) found.push(m[1] ?? '');
+      found.push(...gatewaysFromNetstat(execFileSync('netstat', ['-rn'], { encoding: 'utf8', timeout: 5000, windowsHide: true })));
     }
   } catch {
     // no route table readable: the role=router rows still guard
@@ -123,7 +126,8 @@ export async function keyProblem(): Promise<string> {
     if (!/passphrase/i.test(err)) {
       const lines = err.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
       const why = lines.find((l) => /Load key|bad permissions|too open|invalid format/i.test(l)) ?? lines.at(-1) ?? `ssh-keygen exit ${r.code}`;
-      return `admin key ${k} is unusable: ${why}`;
+      const fix = /too open|bad permissions/i.test(err) ? (IS_WINDOWS ? ' (only your user may read it)' : ` (chmod 600 ${k})`) : '';
+      return `admin key ${k} is unusable: ${why}${fix}`;
     }
     if (await keyInAgent()) return '';
     if (process.platform === 'darwin') {

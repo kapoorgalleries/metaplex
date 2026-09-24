@@ -158,8 +158,10 @@ Needs key login to each host first (trimurti_test_ssh); a missing or locked admi
           return !why;
         });
         if (!hosts.length) {
-          const why = skipped.length ? skipped.join('; ') : 'no inventory host matches those filters';
-          return fail(`${why}. Nothing started (routers are never selected; without name or role only computers are).`);
+          const why = skipped.length
+            ? `${skipped.join('; ')}${sel.skipped.length ? ' (routers are never selected)' : ''}`
+            : `no inventory host matches those filters${sel.matched ? ' (without name or role only computers are selected: admin, workstation, new)' : ''}`;
+          return fail(`${why}. Nothing started.`);
         }
         const kp = await keyProblem();
         if (kp) return fail(`${kp}. Nothing started.`);
@@ -248,8 +250,11 @@ Every inventory row except the router is listed; only computers (role admin, wor
         const name = await rowName(p.name);
         const sel = await selectHosts({ name, os: p.os, role: p.role, trimurti: p.trimurti }, { devices: true });
         if (!sel.hosts.length) {
-          const why = sel.skipped.length ? sel.skipped.map((s) => `${s.name}: skipped, ${s.reason}`).join('; ') : 'no inventory host matches those filters';
-          return fail(`${why} (routers are never selected).`);
+          return fail(
+            sel.skipped.length
+              ? `${sel.skipped.map((s) => `${s.name}: skipped, ${s.reason}`).join('; ')} (routers are never selected).`
+              : 'no inventory host matches those filters.',
+          );
         }
         const kp = await keyProblem();
         const args = [path.join(SCRIPTS_DIR, 'verify.sh'), ...filterArgs({ name, os: p.os, role: p.role, trimurti: p.trimurti })];

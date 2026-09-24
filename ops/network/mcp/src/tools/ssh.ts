@@ -81,8 +81,9 @@ async function sshExec(
   command: string[],
   opts: { stdin?: string; timeoutMs: number },
 ): Promise<Awaited<ReturnType<typeof run>>> {
+  if (host.ssh_port === null) throw new Error(`${host.name}: no ssh_port set`); // never a silent 22
   // '--' so a user or host that starts with '-' can never become an ssh option
-  const args = [...SSH_BASE_OPTS, '-o', 'ConnectTimeout=8', '-p', String(host.ssh_port ?? 22), '--', sshTarget(host), ...command];
+  const args = [...SSH_BASE_OPTS, '-o', 'ConnectTimeout=8', '-p', String(host.ssh_port), '--', sshTarget(host), ...command];
   const runOpts: Parameters<typeof run>[2] = { timeoutMs: opts.timeoutMs };
   if (opts.stdin !== undefined) runOpts.stdin = opts.stdin;
   return run('ssh', args, runOpts);
@@ -159,8 +160,11 @@ Returns: { key_file, key_problem, all_ok (every host that was tried logged in), 
       try {
         const sel = await selectHosts({ name: p.name, os: p.os, role: p.role, trimurti: p.trimurti });
         if (!sel.hosts.length) {
-          const why = sel.skipped.length ? routerNote(sel.skipped) : 'no inventory host matches those filters';
-          return fail(`${why} (routers are never tested; without name or role only computers are).`);
+          return fail(
+            sel.skipped.length
+              ? `${routerNote(sel.skipped)} (routers are never tested).`
+              : `no inventory host matches those filters${sel.matched ? ' (without name or role only computers are tested: admin, workstation, new)' : ''}.`,
+          );
         }
         const kp = await keyProblem();
         const local = localIps();

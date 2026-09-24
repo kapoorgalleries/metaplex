@@ -82,7 +82,7 @@ function Invoke-Bootstrap([string[]]$Flags) {
   $b = Join-Path $Ops 'scripts\bootstrap-ai-clis.ps1'
   if ($DryRun) { Write-Host "  [dry-run] scripts\bootstrap-ai-clis.ps1 $($Flags -join ' ')"; return $true }
   $ErrorActionPreference = 'Continue'
-  & $PsExe -NoProfile -ExecutionPolicy Bypass -File $b @Flags
+  & $PsExe -NoProfile -ExecutionPolicy Bypass -File $b @Flags | Out-Host
   $ok = ($LASTEXITCODE -eq 0)
   Refresh-Path; Add-KnownPaths
   return $ok

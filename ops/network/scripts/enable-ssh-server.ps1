@@ -80,6 +80,14 @@ function Merge-AuthorizedKey([string[]]$Lines, [string]$Key) {
   if (@($keys | Where-Object { (($_ -split '\s+')[0..1] -join ' ') -eq $body }).Count -eq 0) { $keys += $Key }
   return , $keys
 }
+# Add the key to an authorized_keys file, rebuilt rather than appended (a last line without a newline
+# would swallow the new key into its comment): UTF-8 without a BOM, one key per LF-ended line. Returns the count.
+function Set-AuthorizedKey([string]$Path, [string]$Key) {
+  $old = @(); if (Test-Path -LiteralPath $Path) { $old = Read-TextLines $Path }
+  $keys = Merge-AuthorizedKey $old $Key
+  [IO.File]::WriteAllText($Path, (($keys -join "`n") + "`n"), (New-Object Text.UTF8Encoding $false))
+  return $keys.Count
+}
 # sshd's own rule (Win32-OpenSSH): owned by Administrators or SYSTEM, nobody else may write to it.
 function Test-AdminKeysAcl([string]$Path) {
   $acl = Get-Acl -LiteralPath $Path
@@ -123,10 +131,7 @@ New-ItemProperty -Path 'HKLM:\SOFTWARE\OpenSSH' -Name DefaultShell -Value $shell
 if ($PublicKey) {
   $adminKeys = Join-Path $env:ProgramData 'ssh\administrators_authorized_keys'
   try {
-    $old = @(); if (Test-Path -LiteralPath $adminKeys) { $old = Read-TextLines $adminKeys }
-    $keys = Merge-AuthorizedKey $old $PublicKey
-    # Rebuilt, not appended: a last line without a newline would swallow the new key into its comment.
-    [IO.File]::WriteAllText($adminKeys, (($keys -join "`r`n") + "`r`n"), (New-Object Text.UTF8Encoding $false))
+    $n = Set-AuthorizedKey $adminKeys $PublicKey
     # SIDs rather than names so this also works on non-English Windows (Administratoren, Administrateurs ...)
     $icacls = "$env:SystemRoot\System32\icacls.exe"
     foreach ($acl in @(@($adminKeys, '/reset'), @($adminKeys, '/setowner', '*S-1-5-32-544'),
@@ -136,7 +141,7 @@ if ($PublicKey) {
     }
     $bad = Test-AdminKeysAcl $adminKeys
     if ($bad) { throw "sshd would refuse $adminKeys ($bad)" }
-    Write-Host "admin key installed in $adminKeys ($($keys.Count) key(s); owner Administrators, access Administrators + SYSTEM only)"
+    Write-Host "admin key installed in $adminKeys ($n key(s); owner Administrators, access Administrators + SYSTEM only)"
   } catch { Add-Failure 'admin-key' "admin key NOT installed: $($_.Exception.Message)" }
 }
 

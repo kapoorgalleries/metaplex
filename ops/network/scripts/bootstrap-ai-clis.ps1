@@ -99,8 +99,7 @@ function Npm-Global($pkg) { return ((Invoke-Native 'npm' @('install', '-g', '--n
 # A vendor's install.ps1 in a child PowerShell: an 'exit' or Set-StrictMode in it stays there. Returns its exit code.
 function Invoke-Installer([string]$Url) {
   $cmd = "if ([int][Net.ServicePointManager]::SecurityProtocol -ne 0) { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 }; Invoke-RestMethod -Uri '$Url' | Invoke-Expression"
-  $enc = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($cmd))
-  return (Invoke-Native $PsExe @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $enc))
+  return (Invoke-Native $PsExe @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', $cmd))
 }
 # Put a directory on the user's persistent PATH (and this session's) once.
 function Add-UserPath($dir) {

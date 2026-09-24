@@ -22,6 +22,18 @@ export const NETSCAN_PS_COMMAND =
   "& $env:TRIMURTI_NETSCAN @a 3>&1 | ForEach-Object { if ($_ -is [System.Management.Automation.WarningRecord]) { 'WARN: ' + $_.Message } else { $_ } }; " +
   'exit $LASTEXITCODE';
 
+/** The CSV path (the whole rest of the "saved:" line: a Windows profile path has spaces), warnings and context lines. */
+export function parseNetscanOutput(text: string): { csv: string | undefined; warnings: string[]; context: string[] } {
+  const lines = text.split(/\r?\n/);
+  return {
+    csv: /saved:\s+(.+?\.csv)\s*$/m.exec(text)?.[1],
+    warnings: lines.filter((l) => /^\s*(WARN\b|WARNING:)/.test(l)).map((l) => l.replace(/^\s*WARN(ING)?:?\s*/, '').trim()),
+    context: lines
+      .filter((l) => /interface=|adapter=|dns servers:|single NAT|DOUBLE NAT/i.test(l))
+      .map((l) => l.replace(/^\[\d\d:\d\d:\d\d\]\s*/, '').trim()),
+  };
+}
+
 const ScanInput = z
   .object({
     subnet: z
@@ -116,8 +128,7 @@ Use the rows to fill the inventory with trimurti_upsert_host (mac is what the ro
           : await run(bashCommand(), [path.join(SCRIPTS_DIR, 'netscan.sh'), ...(p.subnet ? [p.subnet] : [])], { timeoutMs: p.timeout_seconds * 1000 });
         const text = stripAnsi(r.stdout + '\n' + r.stderr);
         if (r.timedOut) return fail(`netscan did not finish in ${p.timeout_seconds}s. Pass subnet explicitly or raise timeout_seconds.`);
-        // the whole rest of the line: a Windows profile path has spaces
-        const csv = /saved:\s+(.+?\.csv)\s*$/m.exec(text)?.[1];
+        const { csv, warnings, context } = parseNetscanOutput(text);
         if (!csv || r.code !== 0) {
           return fail(`netscan exited ${r.code} without a CSV. Output:\n${clipStream(text)}`);
         }
@@ -135,11 +146,6 @@ Use the rows to fill the inventory with trimurti_upsert_host (mac is what the ro
           qnap8080: yes(r0.qnap8080),
           hint: r0.hint ?? '',
         }));
-        const lines = text.split(/\r?\n/);
-        const warnings = lines.filter((l) => /^\s*(WARN\b|WARNING:)/.test(l)).map((l) => l.replace(/^\s*WARN(ING)?:?\s*/, '').trim());
-        const context = lines
-          .filter((l) => /interface=|adapter=|dns servers:|single NAT|DOUBLE NAT/i.test(l))
-          .map((l) => l.replace(/^\[\d\d:\d\d:\d\d\]\s*/, '').trim());
         const out = { csv_file: csv, host_count: hosts.length, warnings, context, hosts };
         const md = [
           `${hosts.length} host(s) answered. CSV: ${csv}`,
