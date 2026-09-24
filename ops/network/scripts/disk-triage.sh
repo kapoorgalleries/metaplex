@@ -167,9 +167,21 @@ triage() {  # device
   fi
 }
 
+# Whole disks. Compressed RAM, ramdisks, loop, network, optical and device-mapper/RAID
+# devices are not drives. Minimal Fedora has no lsblk: read /sys/block then.
+linux_disks() {
+  if have lsblk; then lsblk -dno NAME,TYPE 2>/dev/null | awk '$2 == "disk" {print $1}'
+  else ls /sys/block 2>/dev/null; fi | awk '$1 !~ /^(zram|ram|loop|nbd|dm-|md|sr)/ {print "/dev/" $1}'
+}
+linux_model() {  # /dev/name -> model and size
+  if have lsblk; then lsblk -dno MODEL,SIZE "$1" 2>/dev/null | tr -s ' '
+  else printf '%s %sG' "$(cat "/sys/block/${1#/dev/}/device/model" 2>/dev/null)" "$(( $(cat "/sys/block/${1#/dev/}/size" 2>/dev/null || echo 0) / 2097152 ))"; fi
+}
+
 if [ "$OS" = "Linux" ]; then
   echo; echo "== block devices =="
-  lsblk -o NAME,SIZE,TYPE,TRAN,ROTA,MODEL,SERIAL,FSTYPE,LABEL,MOUNTPOINT 2>/dev/null || lsblk
+  if have lsblk; then lsblk -o NAME,SIZE,TYPE,TRAN,ROTA,MODEL,SERIAL,FSTYPE,LABEL,MOUNTPOINT 2>/dev/null || lsblk
+  else cat /proc/partitions; fi
   echo; echo "== filesystems =="
   df -hT -x tmpfs -x devtmpfs -x squashfs -x overlay 2>/dev/null || df -h
   [ -r /proc/mdstat ] && { echo; echo "== mdadm =="; cat /proc/mdstat; }
@@ -177,9 +189,10 @@ if [ "$OS" = "Linux" ]; then
   have btrfs && { echo; echo "== btrfs =="; $SUDO btrfs filesystem show 2>/dev/null; }
   echo; echo "== SMART =="
   if have smartctl; then
-    # compressed RAM, ramdisks, loop, network and device-mapper/RAID devices are not drives
-    for d in $(lsblk -dno NAME,TYPE 2>/dev/null | awk '$2 == "disk" && $1 !~ /^(zram|ram|loop|nbd|dm-|md)/ {print "/dev/" $1}'); do
-      echo "--- $d  $(lsblk -dno MODEL,SIZE "$d" 2>/dev/null | tr -s ' ')"
+    DISKS="$(linux_disks)"
+    [ -n "$DISKS" ] || { echo "no disks found (lsblk and /sys/block list none)"; FAILED="no-disks"; }
+    for d in $DISKS; do
+      echo "--- $d  $(linux_model "$d")"
       triage "$d"
     done
   else
