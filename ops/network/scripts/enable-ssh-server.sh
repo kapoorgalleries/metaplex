@@ -201,12 +201,22 @@ if [ "$HARDEN" = 1 ]; then
 fi
 
 echo "sshd is on. Add this row to inventory.csv:"
+# The LAN address is the source of the default route (not docker0, a VPN or a second NIC).
 if [ "$OS" = "Darwin" ]; then
   ip="$(ipconfig getifaddr "$(route -n get default 2>/dev/null | awk '/interface:/ {print $2}')" 2>/dev/null)" || ip=""
-else
-  ip="$(ip -4 -o addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -1)"
+elif have ip; then
+  ip="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{ for (i = 1; i < NF; i++) if ($i == "src") { print $(i + 1); exit } }')"
+  [ -n "$ip" ] || ip="$(ip -4 -o addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -1)"
+else ip=""; fi
+if [ -z "$ip" ] && [ "$OS" != "Darwin" ]; then   # no iproute2: the interface of the default route in /proc, then any address
+  dev="$(awk '$2 == "00000000" { print $1; exit }' /proc/net/route 2>/dev/null)" || dev=""
+  [ -n "$dev" ] && have ifconfig && ip="$(ifconfig "$dev" 2>/dev/null | awk '$1 == "inet" { sub(/^addr:/, "", $2); print $2; exit }')"
+  [ -n "$ip" ] || ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
+  [ -n "$ip" ] || ip="$(ifconfig 2>/dev/null | awk '$1 == "inet" { sub(/^addr:/, "", $2); if ($2 !~ /^127\./) { print $2; exit } }')"
 fi
-echo "  name=$HOST  ip=${ip:-?}  user=$U  os=$( [ "$OS" = "Darwin" ] && echo macos || echo linux )"
+# The port sshd listens on (its effective config), 22 when that cannot be read.
+port="$($SUDO sshd -T 2>/dev/null | awk '$1 == "port" { print $2; exit }')" || port=""
+echo "  name=$HOST  ip=${ip:-?}  user=$U  os=$( [ "$OS" = "Darwin" ] && echo macos || echo linux )  ssh_port=${port:-22}"
 if [ "$U" = root ]; then
   echo "  (user=root: rerun as the everyday login user, or with --user NAME, so that user's ~/.ssh is prepared)"
 fi

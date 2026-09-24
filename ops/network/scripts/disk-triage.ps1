@@ -3,7 +3,9 @@ Read-only look at every disk on this Windows machine: model, size, bus,
 partition style, volumes, health, reliability counters and the SMART
 failure-prediction bit. For the Hulk drives run it on the machine they are
 plugged into. Nothing is written to any disk. Run elevated for the
-reliability counters. Report: %USERPROFILE%\trimurti-disks-<host>-<stamp>.txt
+reliability counters. Run from the kit, the report is saved as
+out\disks-<host>-<stamp>.txt; pushed by run-remote.sh (or the MCP), nothing is
+saved on the target and the admin machine keeps the output in out/logs/.
 
 Usage: powershell -ExecutionPolicy Bypass -File scripts\disk-triage.ps1
   -h, --help   this text
@@ -23,8 +25,18 @@ foreach ($a in $args) {
 }
 $failed = @()
 $admin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-$report = Join-Path $HOME ("trimurti-disks-{0}-{1}.txt" -f $env:COMPUTERNAME, (Get-Date -Format 'yyyyMMdd-HHmmss'))
-Start-Transcript -Path $report | Out-Null
+# In the kit (lib.sh next to this script): a copy in out\. A lone copy (run-remote.sh puts one in
+# the SSH user's home) saves nothing; its output is the report.
+$report = ''
+$inKit = Test-Path -LiteralPath (Join-Path $PSScriptRoot 'lib.sh')
+if ($inKit) {
+  $outDir = if ($env:OUT_DIR) { $env:OUT_DIR } else { Join-Path (Split-Path -Parent $PSScriptRoot) 'out' }
+  try {
+    New-Item -ItemType Directory -Force -Path $outDir -ErrorAction Stop | Out-Null
+    $report = Join-Path (Resolve-Path -LiteralPath $outDir -ErrorAction Stop).ProviderPath ("disks-{0}-{1}.txt" -f $env:COMPUTERNAME, (Get-Date -Format 'yyyyMMdd-HHmmss'))
+    Start-Transcript -Path $report -ErrorAction Stop | Out-Null
+  } catch { "not saved in ${outDir}: $($_.Exception.Message)"; $report = '' }
+}
 
 "== $env:COMPUTERNAME - $(Get-Date) =="
 "`n== disks =="
@@ -68,7 +80,9 @@ if (Get-Command smartctl -ErrorAction SilentlyContinue) {
 "`nverdict rule: HealthStatus=Healthy, PredictFailure=False, Pending (197) and Uncorrectable (198) both 0 -> HEALTHY, then run a long self-test before trusting it."
 "              Reallocated (5), Reported Uncorrectable (187) or Command Timeout (188) > 0 -> WATCH (offline copies only)."
 "              197 or 198 > 0, NVMe Media Errors > 0, or a Critical Warning -> FAILING: image it with ddrescue first."
-Stop-Transcript | Out-Null
-"saved: $report   -> decide with checklists\hulk-drives.md"
-if ($failed.Count) { "DISK_TRIAGE_FAILED=$($failed -join ',')"; exit 1 }
+if ($report) { "saved: $report   -> decide with checklists\hulk-drives.md" }
+elseif (-not $inKit) { "not saved on ${env:COMPUTERNAME}: run-remote.sh keeps this output in out/logs/ on the admin machine   -> decide with checklists\hulk-drives.md" }
+if ($failed.Count) { "DISK_TRIAGE_FAILED=$($failed -join ',')" }
+if ($report) { Stop-Transcript | Out-Null }
+if ($failed.Count) { exit 1 }
 exit 0

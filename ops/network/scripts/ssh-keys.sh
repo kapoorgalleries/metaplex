@@ -11,7 +11,9 @@
 # without a passphrase, on purpose, and can only check hosts that already have
 # the key). A key with a passphrase is loaded into the ssh-agent (on macOS also
 # the Keychain); if no agent runs, one is started for this run only. Run this
-# from the admin machine (macOS, Linux, or Git Bash / WSL on Windows).
+# from the admin machine (macOS, Linux, or Git Bash on Windows; not WSL).
+# Every push offers only the admin key (IdentitiesOnly), so an ssh-agent full of
+# other keys cannot use up the host's login attempts before the password prompt.
 #
 # Usage: ssh-keys.sh [--host a,b] [--os windows] [--role new] [--trimurti yes] [--no-passphrase]
 # Without --host or --role it covers computers only (role admin, workstation or
@@ -76,27 +78,44 @@ test_login() {  # user host port
   return 1
 }
 
+# Password pushes offer the admin key alone (-i, IdentitiesOnly): with every key of an
+# ssh-agent on offer, sshd's MaxAuthTries (6) runs out before it asks for the password.
 push_unix() {  # user host port
   if have ssh-copy-id; then
-    ssh-copy-id -i "$PUB" -o ConnectTimeout=8 -o StrictHostKeyChecking=accept-new -p "$3" "$1@$2" </dev/null >/dev/null
+    ssh-copy-id -i "$PUB" -o "IdentityFile=\"$KEY_FILE\"" -o IdentitiesOnly=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=accept-new \
+      -p "$3" "$1@$2" </dev/null >/dev/null
   else
-    ssh -o ConnectTimeout=8 -o StrictHostKeyChecking=accept-new -p "$3" "$1@$2" \
-      "umask 077; mkdir -p ~/.ssh; touch ~/.ssh/authorized_keys; grep -qF '$PUBKEY' ~/.ssh/authorized_keys || echo '$PUBKEY' >> ~/.ssh/authorized_keys" </dev/null >/dev/null
+    # a last line without a newline would swallow the key into its comment
+    ssh "${KEY_OPTS[@]}" -o ConnectTimeout=8 -o StrictHostKeyChecking=accept-new -p "$3" "$1@$2" \
+      "umask 077; mkdir -p ~/.ssh; touch ~/.ssh/authorized_keys; grep -qF '$PUBKEY' ~/.ssh/authorized_keys || { [ -z \"\$(tail -c 1 ~/.ssh/authorized_keys)\" ] || echo >> ~/.ssh/authorized_keys; echo '$PUBKEY' >> ~/.ssh/authorized_keys; }" </dev/null >/dev/null
   fi
 }
 
-push_windows() {  # user host port  -- the PowerShell below is fed over stdin, so it works whether the login shell is cmd or powershell
-  cat <<EOF | ssh -o ConnectTimeout=8 -o StrictHostKeyChecking=accept-new -p "$3" "$1@$2" "powershell -NoProfile -ExecutionPolicy Bypass -Command -" >/dev/null
-\$k = '$PUBKEY'
-\$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-if (\$isAdmin) { \$f = 'C:\ProgramData\ssh\administrators_authorized_keys' } else { \$f = Join-Path \$env:USERPROFILE '.ssh\authorized_keys' }
-\$d = Split-Path -Parent \$f; if (-not (Test-Path \$d)) { New-Item -ItemType Directory -Path \$d -Force | Out-Null }
-if (-not (Test-Path \$f)) { New-Item -ItemType File -Path \$f -Force | Out-Null }
-if (-not (Select-String -Path \$f -SimpleMatch -Pattern \$k -Quiet)) { Add-Content -Path \$f -Value \$k }
-if (\$isAdmin) { icacls.exe \$f /inheritance:r /grant '*S-1-5-32-544:F' /grant '*S-1-5-18:F' | Out-Null }
-Write-Output "key installed in \$f"
+# The PowerShell below is fed over stdin, so it works whether the login shell is cmd or
+# powershell. '-Command -' runs stdin one line at a time and drops an unfinished statement
+# at EOF: every statement is one line, and the blank line at the end must stay. Like
+# enable-ssh-server.ps1, it rebuilds the file (UTF-8 without BOM, one key per LF line, the
+# key matched on type and body) instead of appending to it, then sets and checks the ACL
+# sshd demands of administrators_authorized_keys, and exits 1 with the reason on stderr.
+push_windows() {  # user host port
+  {
+    printf "\$k = '%s'\n" "$(printf '%s' "$PUBKEY" | sed "s/'/''/g")"
+    cat <<'EOF'
+$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+if ($isAdmin) { $f = Join-Path $env:ProgramData 'ssh\administrators_authorized_keys' } else { $f = Join-Path $env:USERPROFILE '.ssh\authorized_keys' }
+$err = ''; $lines = @()
+try { $d = Split-Path -Parent $f; if (-not (Test-Path -LiteralPath $d)) { New-Item -ItemType Directory -Path $d -Force -ErrorAction Stop | Out-Null } } catch { $err = "could not create ${d}: $($_.Exception.Message)" }
+if (-not $err -and (Test-Path -LiteralPath $f)) { try { $b = [IO.File]::ReadAllBytes($f); if ($b.Length -ge 2 -and $b[0] -eq 0xFF -and $b[1] -eq 0xFE) { $t = [Text.Encoding]::Unicode.GetString($b, 2, $b.Length - 2) } elseif ($b.Length -ge 2 -and $b[0] -eq 0xFE -and $b[1] -eq 0xFF) { $t = [Text.Encoding]::BigEndianUnicode.GetString($b, 2, $b.Length - 2) } elseif ($b.Length -ge 3 -and $b[0] -eq 0xEF -and $b[1] -eq 0xBB -and $b[2] -eq 0xBF) { $t = [Text.Encoding]::UTF8.GetString($b, 3, $b.Length - 3) } else { $t = [Text.Encoding]::UTF8.GetString($b) }; $lines = @($t -split '\r?\n') } catch { $err = "could not read it: $($_.Exception.Message)" } }
+$keys = @($lines | ForEach-Object { "$_".Trim() } | Where-Object { $_ }); $body = ($k -split '\s+')[0..1] -join ' '
+if (@($keys | Where-Object { (($_ -split '\s+')[0..1] -join ' ') -eq $body }).Count -eq 0) { $keys += $k }
+if (-not $err) { try { [IO.File]::WriteAllText($f, (($keys -join "`n") + "`n"), (New-Object Text.UTF8Encoding $false)) } catch { $err = "could not write it: $($_.Exception.Message)" } }
+if (-not $err -and $isAdmin) { $ic = Join-Path $env:SystemRoot 'System32\icacls.exe'; foreach ($a in @(@($f, '/reset'), @($f, '/setowner', '*S-1-5-32-544'), @($f, '/inheritance:r', '/grant:r', '*S-1-5-32-544:F', '*S-1-5-18:F'))) { if (-not $err) { $o = (& $ic @a 2>&1 | Out-String).Trim(); if ($LASTEXITCODE -ne 0) { $err = "icacls $($a -join ' ') failed ($LASTEXITCODE): $o" } } } }
+if (-not $err -and $isAdmin) { try { $acl = Get-Acl -LiteralPath $f; $owner = $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value; if ('S-1-5-32-544', 'S-1-5-18' -notcontains $owner) { $err = "sshd would refuse it: owner is $owner" }; foreach ($r in $acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])) { if ('S-1-5-32-544', 'S-1-5-18' -notcontains $r.IdentityReference.Value) { $err = "sshd would refuse it: $($r.IdentityReference.Value) has access" } } } catch { $err = "could not check its ACL: $($_.Exception.Message)" } }
+if ($err) { [Console]::Error.WriteLine("key NOT installed in ${f}: $err"); exit 1 }
+Write-Output "key installed in $f ($($keys.Count) key(s))"
 
 EOF
+  } | ssh "${KEY_OPTS[@]}" -o ConnectTimeout=8 -o StrictHostKeyChecking=accept-new -p "$3" "$1@$2" "powershell -NoProfile -ExecutionPolicy Bypass -Command -" >/dev/null
 }
 
 RESULTS="$OUT_DIR/ssh-keys-$(date +%Y%m%d-%H%M%S).txt"; : > "$RESULTS"
@@ -117,15 +136,25 @@ while IFS=, read -r name ip mac os user role port trimurti notes <&3; do
   if test_login "$user" "$host" "$port"; then
     ok "$name: key login PASS"; echo "$name PASS" >> "$RESULTS"
   else
-    push_err="$(printf '%s\n' "$push_err" | tr -d '\r' | grep -v '^[[:space:]]*$' | tail -1)"
-    fail "$name: key login still FAILS: ${push_err:+push: $push_err; }login: $LOGIN_ERR (see README, 'SSH troubleshooting')"
+    case "$push_err" in   # sshd hung up before it asked for the password
+      *"Too many authentication failures"*|*"Disconnected from"*|*"Received disconnect"*)
+        hint=" (the host closed the connection before asking for the password: its MaxAuthTries ran out on the keys ssh offered; check IdentityFile lines in ~/.ssh/config)" ;;
+      *) hint="" ;;
+    esac
+    push_err="$(printf '%s\n' "$push_err" | tr -d '\r' | grep -v '^[[:space:]]*$')"
+    case "$push_err" in   # push_windows' own reason, else ssh's last word
+      *"key NOT installed"*) push_err="$(printf '%s\n' "$push_err" | grep 'key NOT installed' | tail -1)" ;;
+      *) push_err="$(printf '%s\n' "$push_err" | tail -1)" ;;
+    esac
+    fail "$name: key login still FAILS: ${push_err:+push: $push_err$hint; }login: $LOGIN_ERR (see README, 'SSH troubleshooting')"
     echo "$name FAIL" >> "$RESULTS"
   fi
 done 3<<< "$HOSTS"
 log "results in $RESULTS:"; cat "$RESULTS"
 if [ "$TEMP_AGENT" = 1 ]; then
   warn "no ssh-agent was running, so the key was held by one started for this run only, now stopped.
-       run-remote.sh, verify.sh and the MCP tools need it in an agent: in the shell that runs them,
-       eval \"\$(ssh-agent -s)\"; ssh-add $KEY_FILE    (Git Bash: add both lines to ~/.bashrc)"
+       The AI agent's shells cannot type the passphrase: they need an ssh-agent holding the key when
+       the session starts. Start (or restart) it with launch.sh (launch.ps1 on Windows), which loads
+       the key first$([ "$(local_os)" = macos ] && printf '; on macOS, ssh-add --apple-use-keychain in any terminal also works')."
 fi
 grep -q ' FAIL$' "$RESULTS" && exit 1 || exit 0

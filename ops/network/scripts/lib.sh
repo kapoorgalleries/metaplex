@@ -119,13 +119,16 @@ select_hosts() {
 }
 
 # Why SSH-based tools skip a row, or nothing when it can be reached. A blank
-# ssh_port means "no SSH on this device"; 22 has to be written out.
+# ssh_port means "no SSH on this device"; 22 has to be written out. A user that
+# starts with '-' would reach ssh and scp as an option (user@host is their first
+# non-option argument), so such a row is skipped too.
 ssh_skip_reason() {  # user port
   case "$2" in
     "")       echo "no ssh_port set" ;;
     *[!0-9]*) echo "ssh_port '$2' is not a number" ;;
     *)        if [ ${#2} -gt 5 ] || [ "$2" -lt 1 ] || [ "$2" -gt 65535 ]; then echo "ssh_port '$2' is not a port"
-              elif [ -z "$1" ]; then echo "no user set"; fi ;;
+              elif [ -z "$1" ]; then echo "no user set"
+              else case "$1" in -*) echo "user '$1' starts with '-' (fix the inventory row)" ;; esac; fi ;;
   esac
 }
 
@@ -175,8 +178,10 @@ key_in_agent() {
 }
 
 # Why ssh cannot use the admin key without a prompt, or nothing when it can.
+# Safe under set -e (launch.sh). The AI agent's shells have no terminal: they
+# never start an agent or type a passphrase; Sanjay loads the key in his terminal.
 key_problem() {
-  local err k="$KEY_FILE"
+  local err k="$KEY_FILE" rc=0 msg launcher=launch.sh
   case "$k" in *" "*) k="\"$k\"" ;; esac
   [ -f "$KEY_FILE" ] || { echo "admin key not found: $k (run scripts/ssh-keys.sh in a terminal first)"; return; }
   err="$(ssh-keygen -y -P '' -f "$KEY_FILE" 2>&1 >/dev/null)" && return
@@ -187,15 +192,63 @@ key_problem() {
   key_in_agent && return
   # macOS: a passphrase stored in the Keychain loads without a prompt
   if [ "$(local_os)" = macos ]; then
-    { ssh-add --apple-load-keychain || ssh-add -A; } >/dev/null 2>&1
+    { ssh-add --apple-load-keychain || ssh-add -A || true; } >/dev/null 2>&1
     key_in_agent && return
   fi
-  ssh-add -l >/dev/null 2>&1
-  if [ $? -eq 2 ]; then
-    echo "key is passphrase-protected and no ssh-agent holds it: run ssh-add $k (no agent is running in this shell: start one first with eval \"\$(ssh-agent -s)\")"
+  ssh-add -l >/dev/null 2>&1 || rc=$?
+  msg="key is passphrase-protected and no ssh-agent holds it: run ssh-add $k"
+  [ "$(local_os)" = windows ] && launcher=launch.ps1
+  if has_tty; then
+    if [ "$rc" = 2 ]; then echo "$msg (this shell has no ssh-agent: rerun $launcher, which loads the key into one, or eval \"\$(ssh-agent -s)\" first)"
+    else echo "$msg"; fi
+  elif [ "$(local_os)" = macos ]; then
+    echo "$msg (this shell has no terminal for the passphrase: Sanjay runs ssh-add --apple-use-keychain $k in any terminal, or reruns $launcher)"
+  elif [ "$rc" != 2 ] && [ -n "${SSH_AUTH_SOCK:-}" ]; then
+    echo "$msg (this shell has no terminal for the passphrase: Sanjay reruns $launcher, or adds it to this shell's agent from any terminal: SSH_AUTH_SOCK='$SSH_AUTH_SOCK' ssh-add $k)"
   else
-    echo "key is passphrase-protected and no ssh-agent holds it: run ssh-add $k"
+    echo "$msg (this shell has no ssh-agent and no terminal for the passphrase: Sanjay reruns $launcher, which loads the key and starts the agent session with it)"
   fi
+}
+
+# Launchers only (launch.sh, start-codex.sh), in Sanjay's terminal, before the AI
+# agent starts: make the admin key usable without a prompt, so the agent and
+# every shell it opens inherit it. A missing key is created (ssh-keygen asks for
+# a passphrase; empty for none). A key with a passphrase is loaded into the
+# macOS Keychain-backed agent, the ssh-agent this terminal already answers on,
+# or one started here: then ADMIN_AGENT_STARTED=1 and the caller stops it when
+# the agent CLI exits. $1 = 1: dry run. Problems are warnings, never fatal.
+# shellcheck disable=SC2034  # read by the launchers
+ADMIN_AGENT_STARTED=0
+load_admin_key() {
+  local dry="${1:-0}" k="$KEY_FILE" kp me when rc=0
+  case "$k" in *" "*) k="\"$k\"" ;; esac
+  if [ ! -f "$KEY_FILE" ]; then
+    if ! has_tty; then warn "admin key $k not found and there is no terminal to create it: run scripts/ssh-keys.sh in a terminal"; return 0; fi
+    if [ "$(local_os)" = macos ]; then when="once (the Keychain remembers it)"; else when="once each time you run this launcher"; fi
+    log "creating the admin key $k. With a passphrase a copied key is useless, and you type it $when; with none there is nothing to type, but anyone who can read your home folder can log into every machine."
+    if [ "$dry" = 1 ]; then printf '  [dry-run] ssh-keygen -t ed25519 -a 64 -f %s\n' "$k"; return 0; fi
+    me="$(hostname -s 2>/dev/null || uname -n)"; me="${me%%.*}"
+    if ! ( umask 077; mkdir -p "$(dirname "$KEY_FILE")" && ssh-keygen -t ed25519 -a 64 -C "trimurti-admin@$me" -f "$KEY_FILE" ); then
+      warn "ssh-keygen failed: every SSH step will stop until the admin key exists"; return 0
+    fi
+  fi
+  kp="$(key_problem)"
+  case "$kp" in
+    "") return 0 ;;
+    "key is passphrase-protected"*) has_tty || { warn "$kp"; return 0; } ;;
+    *) warn "$kp"; return 0 ;;
+  esac
+  if [ "$dry" = 1 ]; then printf '  [dry-run] ssh-add %s\n' "$k"; return 0; fi
+  ssh-add -l >/dev/null 2>&1 || rc=$?
+  if [ "$rc" = 2 ]; then   # no agent answers in this terminal: start one for this launch
+    if ! eval "$(ssh-agent -s)" >/dev/null; then warn "could not start an ssh-agent: $kp"; return 0; fi
+    # shellcheck disable=SC2034
+    ADMIN_AGENT_STARTED=1
+  fi
+  log "loading the admin key into the ssh-agent: type its passphrase (the agent session inherits it)"
+  if [ "$(local_os)" = macos ]; then ssh-add --apple-use-keychain "$KEY_FILE" || ssh-add -K "$KEY_FILE" || true
+  else ssh-add "$KEY_FILE" || true; fi
+  key_in_agent || warn "the admin key is not in the ssh-agent, so every SSH step will stop with 'no ssh-agent holds it'; rerun this launcher to try again"
 }
 
 # One ping with a 1 s timeout. The flags differ per OS; Git Bash runs Windows

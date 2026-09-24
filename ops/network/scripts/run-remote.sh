@@ -11,15 +11,20 @@
 # Without --host or --role it runs on computers only (role admin, workstation or
 # new); a nas, printer or iot row runs only when named. Never on the router.
 # Rows with a blank ssh_port (no SSH) are skipped. Flags go before <script-base>;
-# everything after it goes to the script. Args must not contain spaces.
+# everything after it goes to the script. Args must not contain spaces (exit 2).
 # Ends with three plain lines, TRIMURTI_SUMMARY passed=... failed=... reboot_required=...
-# (comma-separated host names); exits 0 only if none failed, 2 on bad arguments.
+# (comma-separated host names), also when it stops before any host ran; exits 0
+# only if none failed, 1 otherwise, 2 on bad arguments.
 # shellcheck disable=SC2034  # every inventory column is read, not every one is used
 set -u
 # shellcheck source=lib.sh
 . "$(dirname "$0")/lib.sh"
 SCRIPT_FLAGS="--tty"
 parse_filters "$@"
+# parse_filters joins the arguments with spaces: refuse one that would fall apart there
+for a in "$@"; do
+  case "$a" in *[[:space:]]*) bad_usage "argument '$a' contains whitespace: arguments reach the script unquoted, so each must be one word" ;; esac
+done
 set -f
 # shellcheck disable=SC2086
 set -- $REST
@@ -36,17 +41,16 @@ done
 ARGS="$*"
 [ "$TTY" = 0 ] || [ -t 0 ] || bad_usage "--tty needs a terminal to type sudo passwords into; run it yourself in a terminal"
 
-mkdir -p "$LOGS"
-check_inventory
-HOSTS="$(select_hosts)"; [ -n "$HOSTS" ] || die "no hosts selected from $INVENTORY"
 PASSED=""; FAILED=""; REBOOT=""; RAN=0
-ESC="$(printf '\033')"; BEL="$(printf '\007')"
-
 summary() {
   printf 'TRIMURTI_SUMMARY passed=%s\n' "$PASSED"
   printf 'TRIMURTI_SUMMARY failed=%s\n' "$FAILED"
   printf 'TRIMURTI_SUMMARY reboot_required=%s\n' "$REBOOT"
 }
+mkdir -p "$LOGS"
+( check_inventory ) || { summary; exit 1; }
+HOSTS="$(select_hosts)"; [ -n "$HOSTS" ] || { fail "no hosts selected from $INVENTORY"; summary; exit 1; }
+ESC="$(printf '\033')"; BEL="$(printf '\007')"
 
 KEY_PROBLEM="$(key_problem)"
 if [ -n "$KEY_PROBLEM" ]; then
@@ -100,6 +104,6 @@ while IFS=, read -r name ip mac os user role port trimurti notes <&3; do
   else fail "$name: exit $rc"; FAILED="${FAILED:+$FAILED,}$name"; fi
 done 3<<< "$HOSTS"
 
-[ "$RAN" -gt 0 ] || fail "none of the selected hosts has an ssh_port: nothing ran"
+[ "$RAN" -gt 0 ] || fail "none of the selected hosts can be reached over SSH (see the skip reasons above): nothing ran"
 summary
 [ -z "$FAILED" ] && [ "$RAN" -gt 0 ]

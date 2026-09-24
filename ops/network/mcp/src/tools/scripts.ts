@@ -11,6 +11,36 @@ import { FilterFields } from './inventory.js';
 
 const ARG = /^[A-Za-z0-9._=:\\/-]{1,120}$/;
 
+/**
+ * update-all flags that AGENTS.md's hard rules reserve for Sanjay's yes, in every spelling the .sh
+ * and the .ps1 accept (the .ps1 matches without regard to case): --cleanup removes packages and
+ * caches, --major-upgrade installs a new macOS (on Windows it means -FeatureUpgrades), -Drivers
+ * installs driver updates, -FeatureUpgrades a new Windows version.
+ */
+export const HARD_RULE_FLAG = /^--?(cleanup|major-upgrade|drivers|feature-?upgrades)(=.*)?$/i;
+
+/**
+ * Why trimurti_run_script will not pass these args, or '' when it may. filters are run-remote.sh's
+ * selection flags for the same hosts, for the command Sanjay runs himself after his yes.
+ */
+export function refusedArgs(args: string[], filters: string[]): string {
+  const cmd = (script: string, flags: string[]) =>
+    ['scripts/run-remote.sh', ...filters, '--tty', script, ...flags].join(' ');
+  if (args.some((a) => /harden/i.test(a))) {
+    return `--harden turns password logins off, which AGENTS.md reserves for Sanjay's explicit yes. It is not run through MCP: after he says yes, give him the command for a terminal (${cmd('enable-ssh-server', ['--harden'])}).`;
+  }
+  const hard = args.filter((a) => HARD_RULE_FLAG.test(a));
+  if (hard.length) {
+    return `${hard.join(' ')}: update-all's --cleanup (removes packages and caches), --major-upgrade (a new macOS version), -Drivers and -FeatureUpgrades (a new Windows version) need Sanjay's explicit yes (AGENTS.md hard rules), so they are not run through MCP. Ask him; after his yes, give him the command for his terminal (${cmd('update-all', hard)}). update-all without them runs here.`;
+  }
+  return '';
+}
+
+/** The table file verify.sh names on its "saved:" line (out/verify-<timestamp>-<pid>.md; a Windows profile path has spaces). */
+export function verifySavedFile(text: string): string | undefined {
+  return /saved:\s+(.+?\.md)\s*$/m.exec(text)?.[1];
+}
+
 function filterArgs(p: HostFilter): string[] {
   const a: string[] = [];
   if (p.name) a.push('--host', p.name);
@@ -44,7 +74,9 @@ const RunScriptInput = z
       .array(z.string().regex(ARG, 'flags only: letters, digits, . _ = : / -, no spaces or quotes'))
       .max(8)
       .default([])
-      .describe("Arguments for the script, e.g. ['--skip-gemini'] or ['-WithGit']. --harden is refused here"),
+      .describe(
+        "Arguments for the script, e.g. ['--skip-gemini'] or ['-WithGit']. Refused here, because each needs Sanjay's yes and a run from his terminal: --harden, and update-all's --cleanup, --major-upgrade, -Drivers, -FeatureUpgrades",
+      ),
   })
   .strict();
 
@@ -132,7 +164,7 @@ export function registerScriptTools(server: McpServer): void {
 
 Scripts:
   - bootstrap-ai-clis: Node 20+, Claude Code, Codex CLI, Gemini CLI (args: --skip-claude/--skip-codex/--skip-gemini/--skip-node; Windows: -SkipClaude/-SkipCodex/-SkipGemini/-SkipNode/-WithGit)
-  - update-all: OS packages, Homebrew/winget, Windows Update, the CLIs; never reboots, ends with REBOOT_REQUIRED=yes|no|unknown (args: --no-os/--no-clis; Windows -NoOS/-NoCLIs)
+  - update-all: OS packages, Homebrew/winget, Windows Update (security and critical by default), the CLIs; never reboots, ends with REBOOT_REQUIRED=yes|no|unknown (args: --no-os/--no-clis; Windows -NoOS/-NoCLIs/-AllUpdates). --cleanup, --major-upgrade, -Drivers and -FeatureUpgrades are refused here: they need Sanjay's yes and a terminal
   - enable-ssh-server: sshd on + firewall (only useful once a host is already reachable, e.g. -Pwsh7 on Windows). --harden (password logins off) is refused here: it needs Sanjay's yes and a terminal
   - disk-triage: read-only disk and SMART report on that host (for the Hulk drives)
 
@@ -143,13 +175,12 @@ Returns: { job: { job_id, status, log_file, ... }, hosts: [names it runs on], sk
 Needs key login to each host first (trimurti_test_ssh); a missing or locked admin key is reported before anything starts. No TTY: on Linux hosts where sudo needs a password, update-all and bootstrap stop at the sudo step with "sudo needs a password on <host>"; run those locally with --tty via a terminal, or set up passwordless sudo.`,
       inputSchema: RunScriptInput,
       outputSchema: RunScriptOutput,
-      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
     },
     async (p) => {
       try {
-        if (p.args.some((a) => /harden/i.test(a))) {
-          return fail('--harden turns password logins off, which AGENTS.md reserves for Sanjay\'s explicit yes. It is not run through MCP: after he says yes, give him the command for a terminal (scripts/run-remote.sh --host <name> --tty enable-ssh-server --harden).');
-        }
+        const refused = refusedArgs(p.args, filterArgs({ name: await rowName(p.name).catch(() => p.name), os: p.os, role: p.role, trimurti: p.trimurti }));
+        if (refused) return fail(refused);
         const sel = await selectHosts({ name: p.name, os: p.os, role: p.role, trimurti: p.trimurti });
         const skipped = sel.skipped.map((s) => `${s.name}: ${s.reason}`);
         const hosts = sel.hosts.filter((h) => {
@@ -261,7 +292,7 @@ Every inventory row except the router is listed; only computers (role admin, wor
         const r = await run(bashCommand(), args, { timeoutMs: p.timeout_seconds * 1000 });
         const text = stripAnsi(r.stdout + '\n' + r.stderr);
         if (r.timedOut) return fail(`verify.sh did not finish in ${p.timeout_seconds}s. Narrow the filters or raise timeout_seconds.`);
-        const md = /saved:\s+(.+?\.md)\s*$/m.exec(text)?.[1];
+        const md = verifySavedFile(text);
         if (!md) return fail(`verify.sh produced no table. Output:\n${clipStream(text)}`);
         const raw = parseMdTable(await fsp.readFile(md, 'utf8'));
         const rows = raw.map((row) => ({

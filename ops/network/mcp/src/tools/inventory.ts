@@ -1,7 +1,7 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { INVENTORY, OS_VALUES, ROLE_VALUES, YES_NO } from '../constants.js';
-import { listHosts, removeHost, upsertHost, type HostPatch } from '../inventory.js';
+import { listHosts, LOGIN_USER, removeHost, upsertHost, type HostPatch } from '../inventory.js';
 import { errorMessage, fail, mdTable, ok } from '../result.js';
 
 export const HostSchema = z.object({
@@ -21,9 +21,6 @@ export const HostName = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$/, 'a
 
 /** Dotted IPv4, each octet 0-255 without leading zeros (192.168.1.021 would be read as octal). */
 export const IPV4 = /^(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(?:\.(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}$/;
-
-/** An SSH login name; never starting with '-', which ssh would read as an option. */
-export const LOGIN_USER = /^[A-Za-z0-9._][A-Za-z0-9._-]{0,63}$/;
 
 export const FilterFields = {
   name: HostName.optional().describe('Inventory name of one host, e.g. "new-pc-1" (case does not matter)'),
@@ -72,10 +69,10 @@ const UpsertInput = z
     os: z.enum(OS_VALUES).optional().describe('Required for a new row'),
     user: z
       .string()
-      .regex(LOGIN_USER, 'the SSH login user: letters, digits, . _ -, not starting with -')
+      .regex(LOGIN_USER, "the SSH login user: up to 64 characters, spaces inside are fine; no '-' or space at the start, no comma, double quote or control character")
       .or(z.literal(''))
       .optional()
-      .describe('SSH login user on that machine'),
+      .describe('SSH login user on that machine, as it is spelled there (a Windows account may have a space: "Sanjay Kapoor")'),
     role: z.enum(ROLE_VALUES).optional().describe('Required for a new row'),
     ssh_port: z
       .number()
@@ -172,7 +169,7 @@ Examples:
       title: 'Add or update an inventory host',
       description: `Create one row in ops/network/inventory.csv, or change fields of an existing one, keyed by name. Only the fields you pass change; everything else in the row is kept, so {name, trimurti: 'yes'} flips the flag and nothing else. Use it to record what trimurti_scan_lan found (ip, mac), to add the two new machines, or to set trimurti to 'yes' once a machine is onboarded.
 
-Args: name always; os and role as well for a new row. Optional: ip, mac, user, ssh_port (22 for a machine that runs sshd; "" or left out on a new row = no SSH on this device), trimurti (default 'no'), notes (no commas). "" clears ip, mac, user, ssh_port or notes. Validation is strict: IPv4 without leading zeros, aa:bb:cc:dd:ee:ff MACs, users not starting with '-'. A new row's name is stored lowercase.
+Args: name always; os and role as well for a new row. Optional: ip, mac, user, ssh_port (22 for a machine that runs sshd; "" or left out on a new row = no SSH on this device), trimurti (default 'no'), notes (no commas). "" clears ip, mac, user, ssh_port or notes. Validation is strict: IPv4 without leading zeros, aa:bb:cc:dd:ee:ff MACs, users not starting with '-' and without commas, double quotes or control characters (a space inside, as in "Sanjay Kapoor", is fine). A new row's name is stored lowercase.
 
 Refused: giving the router's row another role, and any non-router role for an IP that is this machine's default gateway or a role=router row's IP (the router is never logged into).
 

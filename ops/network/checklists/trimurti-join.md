@@ -95,7 +95,7 @@ Do these in order; each has a script or a checklist item.
 3. **ASK** **DHCP reservation** on the router (a router change; router-tuning.md §2). Renew the lease. Fill `ip` and `mac` in `inventory.csv`.
 4. **OS updates** now, before anything else: `update-all.ps1` (elevated) or `update-all.sh` locally this first time. Windows installs security and critical updates unless `-AllUpdates`; `-Drivers`, `-FeatureUpgrades`, `--cleanup` and `--major-upgrade` need Sanjay's yes. **ASK** before the reboot it asks for (`REBOOT_REQUIRED=yes`).
 5. **SSH server on**, run locally this first time: `enable-ssh-server.ps1` (elevated, with `-PublicKey`; see README "Windows") or `enable-ssh-server.sh` as the login user without sudo (it calls sudo itself). On Windows the script also switches the LAN interface (the one with the default route) to Private and allows SSH from the local subnet only. `ssh_port` 22 on the row.
-6. **Admin key**: Sanjay, in a terminal on the admin machine: `scripts/ssh-keys.sh --host new-pc-1`. Must print `PASS`.
+6. **Admin key**: Sanjay, in a terminal on the admin machine (Git Bash on Windows): `scripts/ssh-keys.sh --host new-pc-1`. It asks for that machine's password once, unless the key already works (`enable-ssh-server.ps1 -PublicKey`). Must print `PASS`.
 7. **`ssh new-pc-1` works**: `scripts/ssh-config-gen.sh`, then try it.
 8. **AI CLIs**: `scripts/run-remote.sh --host new-pc-1 bootstrap-ai-clis`; add `--tty` (Sanjay's terminal) when that machine's sudo asks for a password. It must end `INSTALL OK on <host>`. Then sign in to each of the three on that machine (the bootstrap output says how, including the no-browser routes).
 9. **NAS share** mounted with a named user (nas.md).

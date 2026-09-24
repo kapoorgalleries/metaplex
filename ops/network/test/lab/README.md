@@ -9,7 +9,7 @@ cd ops/network/test/lab
 ./lab.sh up smoke 90                 # 192.168.90.0/24; builds images the first time (~4 min), then ~15 s
 ./lab.sh check smoke                 # self-test, PASS/FAIL per item, exit 1 on any failure
 ./lab.sh exec smoke admin -u gallery # shell on the admin machine; the kit is at /kit
-./lab.sh inventory smoke             # ground-truth inventory.csv rows with the real MACs
+./lab.sh inventory smoke             # ground-truth inventory.csv rows with the real MACs (new-pc-2 trimurti=no until it joins)
 ./lab.sh status [smoke]              # all labs, or one lab's host table and tripwire log
 ./lab.sh down smoke                  # removes containers, network, forwarder, tripwire, state
 ```
@@ -54,5 +54,5 @@ Every host has `https_proxy`, `no_proxy` (the lab subnet) and `NODE_EXTRA_CA_CER
   - no mDNS or NetBIOS names: Docker's DNS resolves only `lab-<name>-<host>`, not the short names.
 - The systemd hosts run `--privileged`. On this cgroup-v1 host, `lab-init` gives systemd its own cgroup2 subtree, which systemd ≥ 256 requires. Units that would reach the host (udev, sysctl, binfmt, module loading, getty, fstrim) are masked. Package scripts that try to restart them print a harmless "Unit ... is masked".
 - The router is only a bridge IP. It has no web UI and no DHCP or DNS settings to tune, and ports other than 22 and 23 are closed. The NAS has no DSM API, volumes, snapshots or SSH.
-- **Internet.** Only HTTPS through the proxy works. Plain `http://` and hosts the policy denies fail. Tools that ignore `https_proxy` (such as Node's built-in fetch without `NODE_USE_ENV_PROXY=1`) get no internet. If the host's proxy port changes, run `up` again: it restarts the forwarder with the new port.
+- **Internet.** Only HTTPS through the proxy works. Plain `http://` and hosts the policy denies fail. `downloads.claude.ai` is one of them (Claude Code's installer, reached through `claude.ai/install.sh`), so `bootstrap-ai-clis.sh` installs Codex and Gemini but ends `failed: claude`. Tools that ignore `https_proxy` (such as Node's built-in fetch without `NODE_USE_ENV_PROXY=1`) get no internet. If the host's proxy port changes, run `up` again: it restarts the forwarder with the new port.
 - **admin.** `/opt/node22` is the host's Node, read-only, with the host's global npm tools. Its `claude` link is dangling. `npm -g` needs a user prefix (the kit switches to `~/.npm-global` by itself). `sshpass` and `expect` exist only to drive tests. The admin has no sshd.

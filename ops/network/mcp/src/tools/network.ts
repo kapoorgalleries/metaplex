@@ -7,7 +7,9 @@ import { run, stripAnsi } from '../exec.js';
 import { listHosts, routerInfo, routerReason } from '../inventory.js';
 import { clipStream, errorMessage, fail, mdTable, ok, parseCsv } from '../result.js';
 import { bashCommand } from '../system.js';
-import { LOGIN_USER } from './inventory.js';
+
+/** The ssh user nas-check.sh takes on its command line: letters, digits, '.', '_' and '-'. */
+const NAS_SSH_USER = /^[A-Za-z0-9._][A-Za-z0-9._-]{0,63}$/;
 
 const OCTET = '(?:25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)';
 /** Private /24s only (10/8, 172.16/12, 192.168/16): the sweep pings and port-probes every address. */
@@ -76,7 +78,7 @@ const NasInput = z
       .describe('Inventory name or IP of a role=nas row. Default: the first role=nas row'),
     ssh_user: z
       .string()
-      .regex(LOGIN_USER, 'a login name, not starting with -')
+      .regex(NAS_SSH_USER, "a login name: letters, digits, '.', '_' and '-', not starting with '-'")
       .optional()
       .describe("SSH user for the key-only probe (default: the NAS row's user; a blank user or ssh_port means no login is tried)"),
     timeout_seconds: z.number().int().min(15).max(300).default(90),

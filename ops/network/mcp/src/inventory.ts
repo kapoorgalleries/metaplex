@@ -160,11 +160,21 @@ export async function selectHosts(f: HostFilter, opts: { devices?: boolean } = {
   return out;
 }
 
+/**
+ * An SSH login name, as lib.sh and ssh-config-gen take it: up to 64 characters, not starting with
+ * '-' (ssh would read it as an option), no comma (the CSV), double quote (ssh-config-gen writes
+ * User "<user>") or control character. Spaces inside are fine: a Windows local account is often
+ * "Sanjay Kapoor", and every process gets it as one argv element. No space at either end (the CSV
+ * trims it). Plain \x and \u escapes, so the pattern means the same in any JSON Schema validator.
+ */
+export const LOGIN_USER = /^(?![-\s])(?!.*\s$)[^,"\x00-\x1f\x7f-\x9f\u2028\u2029]{1,64}$/;
+
 /** Why SSH-based tools skip a row, or '' when it can be tried (lib.sh ssh_skip_reason). */
 export function sshSkipReason(h: Host): string {
   if (h.ssh_port === null) return 'no ssh_port set (blank means no SSH on this device; write 22 if it runs sshd)';
   if (!h.user) return 'no user set';
-  if (!/^[A-Za-z0-9._][A-Za-z0-9._@\\-]{0,63}$/.test(h.user)) return `user '${h.user}' is not a login name`;
+  if (h.user.startsWith('-')) return `user '${h.user}' starts with '-' (fix the inventory row)`;
+  if (!LOGIN_USER.test(h.user)) return `user '${h.user}' is not a login name (a double quote or control character, or over 64 characters)`;
   if (!/^[A-Za-z0-9._][A-Za-z0-9._-]*$/.test(h.name)) return "a name may only have letters, digits, '.', '_' and '-'";
   return '';
 }

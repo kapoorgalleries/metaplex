@@ -26,7 +26,8 @@ Environment:
   KEY_FILE          admin ssh key         (default: ~/.ssh/id_ed25519_trimurti)
   OUT_DIR           scan/verify/job output (default: $TRIMURTI_OPS_DIR/out)
   TRIMURTI_BASH     Windows only: Git Bash's bash.exe (default: Program Files\\Git\\bin\\bash.exe,
-                    then next to \`git --exec-path\`; WSL's bash is never used)
+                    then next to \`git --exec-path\`; WSL's bash is never used). ssh, ssh-keygen
+                    and ssh-add come from Git's usr\\bin next to it, as in the scripts
 
 Tools: trimurti_list_hosts, trimurti_upsert_host, trimurti_remove_host, trimurti_scan_lan,
        trimurti_test_ssh, trimurti_ssh_run, trimurti_run_script, trimurti_get_job,

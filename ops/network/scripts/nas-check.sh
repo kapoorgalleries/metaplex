@@ -10,8 +10,9 @@
 # Default host: the inventory row with role=nas. The SSH probe uses the admin
 # key, the ssh_port and the user of the host's inventory row, and never asks
 # for a password; no row or a blank ssh_port means no SSH login is tried.
-# --smb-user lists the shares as USER: smbclient asks for the password in a
-# terminal, or reads it from PASSWD in the environment. It is never stored.
+# --smb-user lists the shares as USER: smbclient asks for the password, so
+# that part needs Sanjay's terminal (without one it is skipped with a note).
+# The password is never passed on a command line, stored or logged.
 # shellcheck disable=SC2034  # every inventory column is read, not every one is used
 set -u
 # shellcheck source=lib.sh
@@ -114,10 +115,7 @@ if [ -n "$SMB" ]; then
     log "SMB shares as guest (ACCESS_DENIED here just means guest is off, which is fine):"
     smbclient -L "//$NAS" -N -m SMB3 </dev/null 2>&1 | sed 's/^/   /' | head -25
     if [ -n "$SMB_USER" ]; then
-      if [ -n "${PASSWD:-}" ]; then
-        log "SMB shares as $SMB_USER (password from PASSWD):"
-        smbclient -L "//$NAS" -U "$SMB_USER" -m SMB3 </dev/null 2>&1 | sed 's/^/   /' | head -25
-      elif has_tty; then
+      if has_tty; then
         # straight to the terminal: through a pipe the password prompt would not show
         log "SMB shares as $SMB_USER (smbclient asks for the password):"
         smbclient -L "//$NAS" -U "$SMB_USER" -m SMB3 </dev/tty

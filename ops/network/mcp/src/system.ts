@@ -57,6 +57,38 @@ export function bashCommand(): string {
   return found;
 }
 
+/**
+ * Git for Windows' usr\bin, where the ssh, ssh-keygen and ssh-add that Git Bash (and so the kit's
+ * .sh scripts) run live: next to <git>\bin\bash.exe, or bash's own folder for usr\bin\bash.exe.
+ */
+export function gitUsrBin(bash: string, exists: (p: string) => boolean): string | undefined {
+  const w = path.win32;
+  const dir = w.dirname(w.normalize(bash));
+  return [w.join(dir, '..', 'usr', 'bin'), dir].find((d) => exists(w.join(d, 'ssh.exe')));
+}
+
+let sshDirCache: string | null | undefined;
+
+/**
+ * The ssh, ssh-keygen or ssh-add to run: from PATH on macOS and Linux. On Windows Git's own, next to
+ * the Git Bash the scripts run in, so this server uses the same key handling, the same ssh-agent
+ * (the SSH_AUTH_SOCK launch.ps1 sets is Git's, which Windows' OpenSSH cannot read) and the same
+ * known_hosts as the scripts. Windows' own ssh on PATH only when there is no Git Bash.
+ */
+export function sshTool(name: 'ssh' | 'ssh-keygen' | 'ssh-add'): string {
+  if (!IS_WINDOWS) return name;
+  if (sshDirCache === undefined) {
+    let bash: string | undefined;
+    try {
+      bash = bashCommand();
+    } catch {
+      bash = undefined;
+    }
+    sshDirCache = (bash && gitUsrBin(bash, (p) => fs.existsSync(p))) || null;
+  }
+  return sshDirCache ? path.win32.join(sshDirCache, `${name}.exe`) : name;
+}
+
 const IPV4 = /^(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(?:\.(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}$/;
 
 /** Linux /proc/net/route: default routes (destination 0) with a gateway, little-endian hex. */
@@ -107,9 +139,24 @@ function shownKey(): string {
 
 async function keyInAgent(): Promise<boolean> {
   const pub = fs.existsSync(`${KEY_FILE}.pub`) ? `${KEY_FILE}.pub` : KEY_FILE;
-  const fp = (await run('ssh-keygen', ['-l', '-f', pub], { timeoutMs: 10000 })).stdout.trim().split(/\s+/)[1];
+  const fp = (await run(sshTool('ssh-keygen'), ['-l', '-f', pub], { timeoutMs: 10000 })).stdout.trim().split(/\s+/)[1];
   if (!fp) return false;
-  return (await run('ssh-add', ['-l'], { timeoutMs: 10000 })).stdout.includes(fp);
+  return (await run(sshTool('ssh-add'), ['-l'], { timeoutMs: 10000 })).stdout.includes(fp);
+}
+
+/**
+ * What Sanjay does about a locked key, said to this server, which never has a terminal (lib.sh
+ * key_problem without a TTY): the launcher loads the key into an ssh-agent before the AI agent
+ * starts, and this server inherits it. It never starts an agent or asks for a passphrase itself.
+ */
+export function lockedKeyHint(k: string, platform: NodeJS.Platform, agentCode: number | null, sock: string | undefined): string {
+  const launcher = platform === 'win32' ? 'launch.ps1' : 'launch.sh';
+  if (platform === 'darwin') return `this MCP server has no terminal for the passphrase: Sanjay runs ssh-add --apple-use-keychain ${k} in any terminal, or reruns ${launcher}`;
+  if (platform !== 'win32' && agentCode !== 2 && sock) {
+    return `this MCP server has no terminal for the passphrase: Sanjay reruns ${launcher}, or adds it to this server's agent from any terminal: SSH_AUTH_SOCK='${sock}' ssh-add ${k}`;
+  }
+  const what = agentCode === 2 ? 'has no ssh-agent and no terminal for the passphrase' : 'has no terminal for the passphrase';
+  return `this MCP server ${what}: Sanjay reruns ${launcher}, which loads the key and starts the agent session with it`;
 }
 
 /**
@@ -120,7 +167,7 @@ export async function keyProblem(): Promise<string> {
   const k = shownKey();
   if (!fs.existsSync(KEY_FILE)) return `admin key not found: ${k} (run scripts/ssh-keys.sh in a terminal first, or set KEY_FILE)`;
   try {
-    const r = await run('ssh-keygen', ['-y', '-P', '', '-f', KEY_FILE], { timeoutMs: 10000 });
+    const r = await run(sshTool('ssh-keygen'), ['-y', '-P', '', '-f', KEY_FILE], { timeoutMs: 10000 });
     if (r.code === 0) return '';
     const err = `${r.stderr}\n${r.stdout}`;
     if (!/passphrase/i.test(err)) {
@@ -135,11 +182,9 @@ export async function keyProblem(): Promise<string> {
       if (r2.code !== 0) await run('ssh-add', ['-A'], { timeoutMs: 10000 });
       if (await keyInAgent()) return '';
     }
-    const agent = await run('ssh-add', ['-l'], { timeoutMs: 10000 });
+    const agent = await run(sshTool('ssh-add'), ['-l'], { timeoutMs: 10000 });
     const msg = `key is passphrase-protected and no ssh-agent holds it: run ssh-add ${k}`;
-    return agent.code === 2
-      ? `${msg} (this MCP server sees no ssh-agent at all: start one, add the key, and restart the MCP client from that session)`
-      : msg;
+    return `${msg} (${lockedKeyHint(k, process.platform, agent.code, process.env.SSH_AUTH_SOCK)})`;
   } catch {
     return ''; // no ssh-keygen/ssh-add here: let ssh itself report
   }

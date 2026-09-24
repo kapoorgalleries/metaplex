@@ -1,10 +1,10 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { KEY_FILE, SSH_BASE_OPTS } from '../constants.js';
-import { run } from '../exec.js';
+import { run, stripAnsi } from '../exec.js';
 import { selectHosts, sshSkipReason, sshTarget, type Host } from '../inventory.js';
 import { clipStream, errorMessage, fail, mdTable, ok } from '../result.js';
-import { keyProblem, localIps } from '../system.js';
+import { keyProblem, localIps, sshTool } from '../system.js';
 import { FilterFields, HostName } from './inventory.js';
 
 const NAS_SSH_SWITCH =
@@ -19,6 +19,9 @@ export function diagnose(stderr: string, host: Host, local: string[] = []): stri
   }
   if (/HOST IDENTIFICATION HAS CHANGED|Host key verification failed/i.test(s)) {
     return `host key changed (reinstalled machine, or another machine now has this IP?). On the admin machine: ssh-keygen -R ${host.ip || host.name}`;
+  }
+  if (/remote username contains invalid characters/i.test(s)) {
+    return `ssh itself refuses the inventory user "${host.user}": OpenSSH 9.6 and newer reject a user name given on the command line (as the kit gives it) with ' \` " ; & < > | ( ) { }, a '-' after a space, or a '\\' at the end. Log in with another account on that machine, or rename this one.`;
   }
   if (/Could not resolve hostname/i.test(s)) {
     return 'name does not resolve: set ip in the inventory (trimurti_upsert_host) or run scripts/ssh-config-gen.sh.';
@@ -55,7 +58,7 @@ export function diagnose(stderr: string, host: Host, local: string[] = []): stri
 export function isSshFailure(code: number | null, stderr: string): boolean {
   return (
     code === 255 &&
-    /^\S+@\S+: Permission denied \(|^ssh: |Host key verification failed|kex_exchange_identification|^Connection (closed|reset|timed out)|REMOTE HOST IDENTIFICATION HAS CHANGED|Could not resolve hostname|Warning: Identity file/m.test(
+    /^.+@\S+: Permission denied \(|^ssh: |Host key verification failed|kex_exchange_identification|^Connection (closed|reset|timed out)|REMOTE HOST IDENTIFICATION HAS CHANGED|Could not resolve hostname|Warning: Identity file|remote username contains invalid characters/m.test(
       stderr,
     )
   );
@@ -86,7 +89,48 @@ async function sshExec(
   const args = [...SSH_BASE_OPTS, '-o', 'ConnectTimeout=8', '-p', String(host.ssh_port), '--', sshTarget(host), ...command];
   const runOpts: Parameters<typeof run>[2] = { timeoutMs: opts.timeoutMs };
   if (opts.stdin !== undefined) runOpts.stdin = opts.stdin;
-  return run('ssh', args, runOpts);
+  return run(sshTool('ssh'), args, runOpts);
+}
+
+/**
+ * Runs the script that arrives on stdin as base64 of its UTF-8 text, as one script block, so a
+ * multi-line statement is never dropped ("-Command -" runs stdin one statement at a time and
+ * silently skips an unfinished one at EOF, exit 0). Base64 keeps the text intact whatever the
+ * console code page. Exit code: the script's own `exit N`; 1 for a parse or terminating error; when
+ * its last command failed, the last native program's exit code, or 1; else 0.
+ */
+export const PS_BOOTSTRAP = [
+  "$ErrorActionPreference = 'Continue'; $ProgressPreference = 'SilentlyContinue'",
+  'try { [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false } catch { }',
+  "if ($PSStyle) { $PSStyle.OutputRendering = 'PlainText' }",
+  "$global:__trimurti_ok = $true; $global:LASTEXITCODE = 0",
+  "try { $__trimurti_sb = [ScriptBlock]::Create([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String((@($input) -join '').Trim())) + \"`n`$global:__trimurti_ok = `$?\") }",
+  'catch { [Console]::Error.WriteLine($_.Exception.GetBaseException().Message); exit 1 }',
+  'try { & $__trimurti_sb } catch { [Console]::Error.WriteLine(($_ | Out-String).Trim()); exit 1 }',
+  'if (-not $global:__trimurti_ok) { if ($LASTEXITCODE) { exit $LASTEXITCODE }; exit 1 }',
+  'exit 0',
+].join('\n');
+
+/**
+ * The remote command line and stdin for shell=powershell: Windows PowerShell on Windows, pwsh
+ * elsewhere, started with the fixed bootstrap as -EncodedCommand (UTF-16LE base64, about 2 KB, well
+ * under cmd.exe's 8191-character limit) and the command itself on stdin.
+ */
+export function powershellInvocation(command: string, windows: boolean): { argv: string[]; stdin: string } {
+  return {
+    argv: [
+      windows ? 'powershell' : 'pwsh',
+      '-NoProfile',
+      '-NonInteractive',
+      '-ExecutionPolicy',
+      'Bypass',
+      '-OutputFormat',
+      'Text',
+      '-EncodedCommand',
+      Buffer.from(PS_BOOTSTRAP, 'utf16le').toString('base64'),
+    ],
+    stdin: `${Buffer.from(command, 'utf8').toString('base64')}\n`,
+  };
 }
 
 function routerNote(skipped: Array<{ name: string; reason: string }>): string {
@@ -124,7 +168,9 @@ const RunInput = z
     shell: z
       .enum(['default', 'bash', 'powershell'])
       .default('default')
-      .describe("'default' hands the string to the host's login shell; 'bash' or 'powershell' feed it to that interpreter over stdin (multi-line ok)"),
+      .describe(
+        "'default' hands the string to the host's login shell; 'bash' feeds it to bash over stdin; 'powershell' runs it as one PowerShell script (Windows PowerShell on Windows, pwsh on Linux and macOS). Multi-line scripts work in 'bash' and 'powershell'",
+      ),
     timeout_seconds: z.number().int().min(1).max(600).default(60),
   })
   .strict();
@@ -211,12 +257,12 @@ Returns: { key_file, key_problem, all_ok (every host that was tried logged in), 
 Args:
   - name: inventory host name (never the router: a role=router row or this machine's default gateway). The row needs an ssh_port.
   - command: what to run
-  - shell: 'default' (the host's login shell: bash/zsh on Unix, cmd or PowerShell on Windows depending on enable-ssh-server.ps1), 'bash' or 'powershell' (the command is piped to that interpreter, so multi-line scripts work)
-  - timeout_seconds (1-600, default 60). On Linux and macOS hosts with GNU timeout the command is stopped on the host when it runs out; elsewhere it may keep running there, and the hint says so.
+  - shell: 'default' (the host's login shell: bash/zsh on Unix, cmd or PowerShell on Windows depending on enable-ssh-server.ps1), 'bash' (piped to bash -s), or 'powershell' (run as one script block by Windows PowerShell on Windows, pwsh on Linux and macOS; the text is sent base64-encoded over stdin, so multi-line blocks, quotes and non-ASCII text arrive intact)
+  - timeout_seconds (1-600, default 60). On Linux and macOS hosts with GNU timeout a 'default' or 'bash' command is stopped on the host when it runs out; elsewhere it may keep running there, and the hint says so.
 
-Returns: { name, target, exit_code, timed_out, duration_ms, stdout, stderr, hint } (streams capped at 10k characters each, head and tail kept). hint is set only when ssh itself failed (with the fix) or the command timed out; a non-zero exit_code with no hint is the command's own result.
+Returns: { name, target, exit_code, timed_out, duration_ms, stdout, stderr, hint } (streams capped at 10k characters each, head and tail kept). hint is set only when ssh itself failed (with the fix) or the command timed out; a non-zero exit_code with no hint is the command's own result. With shell 'powershell', exit_code is the script's own \`exit N\`; 1 for a parse error or a terminating error (the error is on stderr); when the last command failed, the last native program's exit code, or 1; else 0.
 
-Notes: no TTY, so sudo cannot prompt; use passwordless sudo or run such things locally. Windows PowerShell as shell needs the command in PowerShell syntax.`,
+Notes: no TTY, so sudo cannot prompt and PowerShell runs -NonInteractive (Read-Host and credential prompts fail); use passwordless sudo or run such things locally. shell 'powershell' needs the command in PowerShell syntax.`,
       inputSchema: RunInput,
       outputSchema: RunOutput,
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
@@ -239,8 +285,7 @@ Notes: no TTY, so sudo cannot prompt; use passwordless sudo or run such things l
           argv = posix ? [posixWrap(undefined, p.timeout_seconds)] : ['bash', '-s'];
           stdin = p.command;
         } else if (p.shell === 'powershell') {
-          argv = ['powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', '-'];
-          stdin = p.command;
+          ({ argv, stdin } = powershellInvocation(p.command, !posix));
         } else {
           argv = [posix ? posixWrap(p.command, p.timeout_seconds) : p.command];
         }
@@ -260,8 +305,9 @@ Notes: no TTY, so sudo cannot prompt; use passwordless sudo or run such things l
           exit_code: r.code,
           timed_out: r.timedOut || stoppedThere,
           duration_ms: r.durationMs,
-          stdout: clipStream(r.stdout),
-          stderr: clipStream(r.stderr),
+          // pwsh 7 colours its error lines even with OutputRendering PlainText
+          stdout: clipStream(p.shell === 'powershell' ? stripAnsi(r.stdout) : r.stdout),
+          stderr: clipStream(p.shell === 'powershell' ? stripAnsi(r.stderr) : r.stderr),
           hint,
         };
         const text = [

@@ -48,6 +48,11 @@ assert.deepEqual(tools, [
   'trimurti_verify_hosts',
 ]);
 console.log('tools:', tools.length);
+const listed = Object.fromEntries((await client.listTools()).tools.map((t) => [t.name, t]));
+assert.equal(listed.trimurti_run_script.annotations.destructiveHint, true, 'run_script updates and reconfigures many machines');
+// the user pattern a client validates against has no flags: it must take "Sanjay Kapoor" and refuse "-x"
+const userPattern = new RegExp(listed.trimurti_upsert_host.inputSchema.properties.user.anyOf?.[0]?.pattern ?? listed.trimurti_upsert_host.inputSchema.properties.user.pattern);
+assert.ok(userPattern.test('Sanjay Kapoor') && !userPattern.test('-x') && !userPattern.test('a,b'));
 
 const resources = (await client.listResources()).resources.map((r) => r.uri).sort();
 assert.ok(resources.includes('trimurti://readme') && resources.includes('trimurti://inventory') && resources.includes('trimurti://agents'));
@@ -102,8 +107,24 @@ r = await client.callTool({ name: 'trimurti_upsert_host', arguments: { name: 'h9
 assert.match(r.structuredContent.warnings[0], /also on row new-pc-3/);
 r = await client.callTool({ name: 'trimurti_upsert_host', arguments: { name: 'h10', os: 'linux', role: 'workstation' } });
 assert.equal(r.isError, undefined, 'user is optional');
+// a Windows local account with a space (the scripts quote it; every process gets it as one argv element)
+r = await client.callTool({ name: 'trimurti_upsert_host', arguments: { name: 'h11', ip: '192.0.2.11', os: 'windows', user: 'Sanjay Kapoor', role: 'workstation', ssh_port: 22 } });
+assert.equal(r.isError, undefined, 'a user with a space is accepted');
+assert.equal(r.structuredContent.host.user, 'Sanjay Kapoor');
+assert.ok(fs.readFileSync(invFile, 'utf8').includes('\nh11,192.0.2.11,,windows,Sanjay Kapoor,workstation,22,no,\n'));
+r = await client.callTool({ name: 'trimurti_test_ssh', arguments: { name: 'h11', timeout_seconds: 5 } });
+assert.equal(r.structuredContent.results[0].skipped, false, 'the SSH tools try that row');
+assert.match(r.structuredContent.results[0].diagnosis, /admin key not found/);
+r = await client.callTool({ name: 'trimurti_upsert_host', arguments: { name: 'h11', user: 'GALLERY\\sanjay' } });
+assert.equal(r.structuredContent.host.user, 'GALLERY\\sanjay', 'a domain account too');
+r = await client.callTool({ name: 'trimurti_remove_host', arguments: { name: 'h11' } });
+assert.equal(r.structuredContent.removed.name, 'h11');
 for (const bad of [
   { name: 'bad host', os: 'linux', user: 'x', role: 'new' },
+  { name: 'h15', os: 'linux', user: 'a,b', role: 'new' },
+  { name: 'h16', os: 'linux', user: 'a"b', role: 'new' },
+  { name: 'h17', os: 'linux', user: ' lead', role: 'new' },
+  { name: 'h18', os: 'linux', user: '- x', role: 'new' },
   { name: 'h5', ip: '192.168.1.021', os: 'linux', user: 'x', role: 'new' },
   { name: 'h6', ip: '999.1.1.1', os: 'linux', user: 'x', role: 'new' },
   { name: 'h13', ip: '192.0.2.13', os: 'linux', user: '-Eowned', role: 'new' },
@@ -163,6 +184,16 @@ assert.match(r.content[0].text, /admin key not found/);
 r = await client.callTool({ name: 'trimurti_run_script', arguments: { script: 'enable-ssh-server', name: 'new-pc-2', args: ['--harden'] } });
 assert.equal(r.isError, true);
 assert.match(r.content[0].text, /--harden/);
+for (const flag of ['--cleanup', '--major-upgrade', '-Drivers', '-drivers', '--drivers', '-FeatureUpgrades', '--feature-upgrades']) {
+  r = await client.callTool({ name: 'trimurti_run_script', arguments: { script: 'update-all', name: 'NEW-PC-2', args: ['--no-clis', flag] } });
+  assert.equal(r.isError, true, `update-all ${flag} is refused`);
+  assert.match(r.content[0].text, /Sanjay's explicit yes/);
+  assert.ok(r.content[0].text.includes(`scripts/run-remote.sh --host new-pc-2 --tty update-all ${flag})`), r.content[0].text);
+}
+r = await client.callTool({ name: 'trimurti_run_script', arguments: { script: 'update-all', os: 'windows', args: ['-FeatureUpgrades'] } });
+assert.match(r.content[0].text, /run-remote\.sh --os windows --tty update-all -FeatureUpgrades\)/, 'the command keeps the selection');
+r = await client.callTool({ name: 'trimurti_run_script', arguments: { script: 'update-all', name: 'new-pc-2', args: ['--no-clis'] } });
+assert.match(r.content[0].text, /admin key not found.*Nothing started/, 'update-all without those flags gets past the refusal');
 r = await client.callTool({ name: 'trimurti_run_script', arguments: { script: 'disk-triage', name: 'new-pc-2' } });
 assert.equal(r.isError, true, 'no job starts without a usable key');
 assert.match(r.content[0].text, /admin key not found.*Nothing started/);

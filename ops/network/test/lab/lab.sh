@@ -37,7 +37,7 @@ HOSTS=(
   "debian-pc|22|debian|linux|workstation|22|yes"
   "fedora-pc|23|fedora|linux|workstation|22|yes"
   "arch-pc|24|arch|linux|workstation|22|yes"
-  "new-pc-2|25|ubuntu-nossh|linux|new|22|yes"
+  "new-pc-2|25|ubuntu-nossh|linux|new|22|no"      # yes only once trimurti-join.md is done
   "nas|30|nas|nas|nas||no"
 )
 IMAGES=(admin ubuntu-desk ubuntu-nossh nas debian fedora arch)

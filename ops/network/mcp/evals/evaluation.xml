@@ -4,7 +4,7 @@
     <answer>2</answer>
   </qa_pair>
   <qa_pair>
-    <question>Among the inventory machines that the kit is allowed to log into, exactly one uses an SSH login user other than sanjay. What is that machine's inventory name?</question>
+    <question>In the inventory as shipped, exactly one row has an SSH login user set to something other than sanjay, and the kit does not log into it yet because its ssh_port is blank. What is that row's inventory name?</question>
     <answer>nas</answer>
   </qa_pair>
   <qa_pair>
@@ -28,12 +28,12 @@
     <answer>5</answer>
   </qa_pair>
   <qa_pair>
-    <question>One checklist explains what it means when a traceroute's first hops are all private addresses and what to do about it. Give the name of that checklist as it appears at the end of its resource URI.</question>
+    <question>One checklist explains what it means when the LAN scan reports a possible double NAT because the second hop is a private address, and how to confirm it from the router's WAN IP. Give the name of that checklist as it appears at the end of its resource URI.</question>
     <answer>network-triage</answer>
   </qa_pair>
   <qa_pair>
-    <question>In the router checklist, some rows are marked as needing Sanjay's confirmation before the change is made. How many such rows are there across the whole checklist? Answer with the number only.</question>
-    <answer>5</answer>
+    <question>Every row of the router checklist needs Sanjay's yes, and some table rows are marked ASK because each needs its own yes. How many table rows carry that ASK mark across the whole checklist? Answer with the number only.</question>
+    <answer>7</answer>
   </qa_pair>
   <qa_pair>
     <question>The status sheet has a table meant to receive the output of the end-state verification. How many columns does that table have? Answer with the number only.</question>

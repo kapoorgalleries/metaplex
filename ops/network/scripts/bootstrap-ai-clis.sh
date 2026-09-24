@@ -15,32 +15,38 @@
 # Exit: 0 when every requested CLI is installed and a plain ssh command finds
 # it, 1 when something failed (the last line says what), 2 on bad arguments.
 #
-# Usage: bootstrap-ai-clis.sh [--skip-claude] [--skip-codex] [--skip-gemini] [--skip-node]
+# Usage: bootstrap-ai-clis.sh [--skip-claude] [--skip-codex] [--skip-gemini] [--skip-node] [--with-node]
 set -u
 
 usage() {
   cat <<'EOF'
-Usage: bootstrap-ai-clis.sh [--skip-claude] [--skip-codex] [--skip-gemini] [--skip-node]
+Usage: bootstrap-ai-clis.sh [--skip-claude] [--skip-codex] [--skip-gemini] [--skip-node] [--with-node]
 Installs or updates Claude Code, Codex CLI and Gemini CLI (and Node.js 20+ for Gemini).
   --skip-claude|--skip-codex|--skip-gemini   leave that CLI alone
   --skip-node   never install Node.js (Gemini then needs Node 20+ already)
+  --with-node   install Node.js 20+ even when Gemini is skipped (the trimurti-ops
+                MCP server needs it on the admin machine)
   -h, --help    this text
 Exit: 0 all requested CLIs installed and on the PATH of a plain 'ssh <host> <cli>',
       1 something failed (see the last line), 2 bad arguments.
 EOF
 }
 
-SKIP_CLAUDE=0; SKIP_CODEX=0; SKIP_GEMINI=0; SKIP_NODE=0
+SKIP_CLAUDE=0; SKIP_CODEX=0; SKIP_GEMINI=0; SKIP_NODE=0; WITH_NODE=0
 for a in "$@"; do
   case "$a" in
     --skip-claude) SKIP_CLAUDE=1 ;;
     --skip-codex)  SKIP_CODEX=1 ;;
     --skip-gemini) SKIP_GEMINI=1 ;;
     --skip-node)   SKIP_NODE=1 ;;
+    --with-node)   WITH_NODE=1 ;;
     -h|--help)     usage; exit 0 ;;
     *) echo "unknown flag: $a" >&2; usage >&2; exit 2 ;;
   esac
 done
+if [ "$SKIP_NODE" = 1 ] && [ "$WITH_NODE" = 1 ]; then
+  echo "--skip-node and --with-node contradict each other" >&2; usage >&2; exit 2
+fi
 
 log()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33mWARN\033[0m %s\n' "$*"; }
@@ -135,7 +141,7 @@ node_ok() { have node && [ "$(node -p 'process.versions.node.split(".")[0]' 2>/d
 install_node() {
   local cand
   if node_ok; then log "node $(node --version) present"; return 0; fi
-  log "installing Node.js 22 (Gemini CLI needs 20+)"
+  log "installing Node.js 22 (Gemini CLI and the trimurti-ops MCP server need 20+)"
   if [ "$OS" = "Darwin" ]; then
     have brew || { warn "Homebrew is missing. Install it from https://brew.sh, then rerun."; return 1; }
     brew install node >/dev/null 2>&1 || brew upgrade node >/dev/null 2>&1 || true
@@ -150,7 +156,7 @@ install_node() {
       case "$cand" in
         ''|*[!0-9]*) warn "apt has no nodejs package"; return 1 ;;
       esac
-      [ "$cand" -ge 20 ] || { warn "apt only offers nodejs $cand (Gemini CLI needs 20+); not installing it"; return 1; }
+      [ "$cand" -ge 20 ] || { warn "apt only offers nodejs $cand (20+ is needed); not installing it"; return 1; }
       $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nodejs >/dev/null
     elif have dnf;    then $SUDO dnf install -y nodejs npm >/dev/null
     # No -y: installing against a freshly synced database without upgrading everything is a partial upgrade.
@@ -231,6 +237,7 @@ fi
 [ "$SKIP_CLAUDE" = 1 ] || install_claude || failed claude
 [ "$SKIP_CODEX" = 1 ]  || install_codex  || failed codex
 [ "$SKIP_GEMINI" = 1 ] || install_gemini || failed gemini
+[ "$WITH_NODE" = 0 ] || node_once || true   # node_once reports its own failure
 for c in claude codex gemini; do
   case "$c" in claude) s=$SKIP_CLAUDE ;; codex) s=$SKIP_CODEX ;; *) s=$SKIP_GEMINI ;; esac
   [ "$s" = 0 ] && have "$c" || continue
@@ -241,7 +248,7 @@ log "versions on $HOST ($OS):"
 for c in node claude codex gemini; do
   if have "$c"; then printf '  %-7s %s\n' "$c" "$("$c" --version 2>&1 | head -1)"; else printf '  %-7s MISSING\n' "$c"; fi
 done
-cat <<'EOF'
+[ "$SKIP_CLAUDE$SKIP_CODEX$SKIP_GEMINI" = 111 ] || cat <<'EOF'
 
 Sign in once per machine, per user (open a NEW terminal first so PATH is fresh). Never type
 a token or key into a command line: it lands in shell history. The routes below read it with

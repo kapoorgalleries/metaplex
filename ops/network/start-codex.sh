@@ -3,9 +3,13 @@
 # Linux; on Windows use start-codex.ps1). It:
 #   1. installs Codex if it is missing (the kit's own bootstrap, Codex only),
 #   2. signs Codex in if it is not signed in,
-#   3. builds the trimurti-ops MCP server and registers it with Codex (needs Node 20+),
+#   3. builds the trimurti-ops MCP server and registers it with Codex (installs
+#      Node 20+ first if it is missing),
 #   4. keeps inventory.csv and status.md out of commits (git skip-worktree),
-#   5. starts Codex in ops/network, where it loads AGENTS.md as its instructions.
+#   5. makes the admin key ready here, where you can type: creates it if missing
+#      and loads a key with a passphrase into an ssh-agent (macOS: the Keychain),
+#      which Codex and its shells inherit (they cannot type a passphrase),
+#   6. starts Codex in ops/network, where it loads AGENTS.md as its instructions.
 #
 # Default permissions: full access to this machine, and Codex asks before
 # anything it judges risky. The work needs network access, sudo and ~/.ssh,
@@ -19,6 +23,8 @@
 set -eu
 
 OPS="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)"
+# shellcheck source=scripts/lib.sh
+. "$OPS/scripts/lib.sh"   # load_admin_key; the functions below replace its log, warn and have
 usage() { awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "$0"; }
 SANDBOXED=0; NO_MCP=0; DRY=0; EXTRA=""
 while [ $# -gt 0 ]; do
@@ -62,6 +68,11 @@ fi
 
 # 3. trimurti-ops MCP server
 node_ok() { have node && [ "$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)" -ge 20 ]; }
+if [ "$NO_MCP" = 0 ] && ! node_ok; then
+  log "Node.js 20+ is missing; installing it for the trimurti-ops MCP server (Node only)"
+  run bash "$OPS/scripts/bootstrap-ai-clis.sh" --skip-claude --skip-codex --skip-gemini --with-node || warn "the Node.js install reported a problem (see above)"
+  hash -r
+fi
 if [ "$NO_MCP" = 1 ]; then
   log "skipping the MCP server (--no-mcp); Codex will call the scripts directly"
 elif ! node_ok; then
@@ -83,7 +94,10 @@ if git -C "$OPS" ls-files -v -- inventory.csv status.md 2>/dev/null | grep -q '^
   run git -C "$OPS" update-index --skip-worktree -- inventory.csv status.md
 fi
 
-# 5. Start Codex
+# 5. The admin key, while this terminal can still take a passphrase.
+load_admin_key "$DRY"
+
+# 6. Start Codex
 PROMPT="Read AGENTS.md and status.md, then run the Trimurti network job from where status.md leaves off (step 0 if it is empty). Ask me the up-front questions in one message and start step 0 while I answer."
 [ -n "$EXTRA" ] && PROMPT="$PROMPT $EXTRA"
 if [ "$SANDBOXED" = 1 ]; then
@@ -93,4 +107,6 @@ else
 fi
 log "starting Codex in $OPS (resume later with: codex resume --last)"
 if [ "$DRY" = 1 ]; then printf '  [dry-run] codex'; printf ' %q' "$@" "$PROMPT"; printf '\n'; exit 0; fi
+# An ssh-agent started by load_admin_key lives as long as Codex does.
+if [ "$ADMIN_AGENT_STARTED" = 1 ]; then trap 'ssh-agent -k >/dev/null 2>&1' EXIT; codex "$@" "$PROMPT"; exit; fi
 exec codex "$@" "$PROMPT"

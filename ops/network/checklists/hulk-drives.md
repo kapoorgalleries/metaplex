@@ -7,7 +7,7 @@ Unknown so far: what they are (bare SATA disks, USB externals, a multi-bay enclo
 Plug them into any machine (Windows: read §2 first, it mounts disks read-write on sight) and run the matching script on that machine:
 
 - Linux / macOS: `scripts/disk-triage.sh` in a terminal (SMART needs sudo), or from the admin machine `scripts/run-remote.sh --tty --host <name> disk-triage`. Run from the kit it saves `out/disks-<host>-<stamp>.txt`; pushed, the output is in the admin machine's `out/logs/`.
-- Windows: `scripts/disk-triage.ps1` (elevated). It prints Windows' health fields, SMART counters and its grading rule, not a verdict per disk: grade each disk by that rule.
+- Windows: `scripts/disk-triage.ps1` (elevated), or from the admin machine `scripts/run-remote.sh --host <name> disk-triage`. It prints Windows' health fields, SMART counters and its grading rule, not a verdict per disk: grade each disk by that rule. Run from the kit it saves `out\disks-<host>-<stamp>.txt`; pushed, it saves nothing on that PC and the output is in the admin machine's `out/logs/`.
 
 Write down per drive: label, model, serial, size, filesystem, and the script's **VERDICT** line (`HEALTHY`, `WATCH`, `FAILING`, `UNKNOWN`). `UNKNOWN` always comes with its reason; it is common through USB enclosures on macOS and Windows. If it matters, put the bare disk in a Linux box for a real SMART read, or (**ASK**) in a NAS bay, where the NAS must never be told to initialise it.
 

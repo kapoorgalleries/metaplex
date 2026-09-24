@@ -5,13 +5,17 @@ on macOS or Linux use start-codex.sh). It:
   2. signs Codex in if it is not signed in,
   3. installs Node 20+ if needed (the bootstrap again), builds the trimurti-ops MCP
      server and registers it with Codex,
-  4. starts Codex in ops\network, where it loads AGENTS.md as its instructions.
+  4. keeps inventory.csv and status.md out of commits (git skip-worktree),
+  5. starts Codex in ops\network, where it loads AGENTS.md as its instructions.
 
 Default permissions: full access to this machine, and Codex asks before anything
 it judges risky. AGENTS.md lists what always needs Sanjay's yes. -Sandboxed
 keeps Codex's workspace sandbox but lets network through and makes ~\.ssh
 writable; expect more prompts. The kit's .sh scripts need Git for Windows
 (Git Bash); install it with scripts\bootstrap-ai-clis.ps1 -WithGit if it is missing.
+An admin key with a passphrase must already sit in Git's ssh-agent in this
+window: launch.ps1 -Codex does that first, then runs this. Codex passes the
+MCP server only the variables it is told to, so SSH_AUTH_SOCK is named for it.
 
 Usage: powershell -ExecutionPolicy Bypass -File start-codex.ps1 [-Sandboxed] [-NoMcp] [-DryRun] [-Extra "more words for the first prompt"] [more words ...]
   -Sandboxed   keep Codex's workspace sandbox (network allowed, ~\.ssh writable)
@@ -117,6 +121,7 @@ else { Log 'signing Codex in (a browser opens)'; Run 'codex' @('login') }
 
 # 3. trimurti-ops MCP server
 $mcp = Join-Path $Ops 'mcp'
+$mcpOn = $false
 $dist = Join-Path $mcp 'dist\index.js'
 if ($NoMcp) { Log 'skipping the MCP server (-NoMcp); Codex will call the scripts directly' }
 else {
@@ -139,14 +144,26 @@ else {
     Log 'registering trimurti-ops with Codex'
     if (-not $DryRun) { [void](Test-Quiet 'codex' @('mcp', 'remove', 'trimurti-ops')) }
     Run 'codex' @('mcp', 'add', 'trimurti-ops', '--env', "TRIMURTI_OPS_DIR=$Ops", '--', 'node', $dist)
+    $mcpOn = $true
   }
 }
 
-# 4. Start Codex
+# 4. With real data these two map the gallery's network: keep them out of 'git commit -a'
+$tracked = & { $ErrorActionPreference = 'Continue'; if (Have 'git') { & git -C $Ops ls-files -v -- inventory.csv status.md 2>$null } }
+if (@($tracked) -clike 'H *') {
+  Log 'marking inventory.csv and status.md skip-worktree so commits leave them out (undo: git update-index --no-skip-worktree inventory.csv status.md)'
+  try { Run 'git' @('-C', $Ops, 'update-index', '--skip-worktree', '--', 'inventory.csv', 'status.md') } catch { Write-Warning "$_" }
+}
+
+# 5. Start Codex
 $prompt = 'Read AGENTS.md and status.md, then run the Trimurti network job from where status.md leaves off (step 0 if it is empty). Ask me the up-front questions in one message and start step 0 while I answer.'
 if ($Extra) { $prompt = "$prompt $Extra" }
 if ($Sandboxed) { $argv = @('-C', $Ops, '-s', 'workspace-write', '-a', 'on-request', '-c', 'sandbox_workspace_write.network_access=true', '--add-dir', (Join-Path $HOME '.ssh')) }
 else { $argv = @('-C', $Ops, '-s', 'danger-full-access', '-a', 'on-request') }
+# Codex starts an MCP server with a short list of variables (PATH, USERPROFILE, TEMP, ...), not
+# SSH_AUTH_SOCK: name the agent's for it, or its SSH tools cannot reach the key. Only for a server
+# registered just now: an override for a missing one stops Codex ('invalid transport').
+if ($mcpOn) { $argv += @('-c', "mcp_servers.trimurti-ops.env_vars=['SSH_AUTH_SOCK','SSH_AGENT_PID']") }
 Log "starting Codex in $Ops (resume later with: codex resume --last)"
 if ($DryRun) { Write-Host ("  [dry-run] codex {0} `"{1}`"" -f ($argv -join ' '), $prompt); exit 0 }
 $ErrorActionPreference = 'Continue'
