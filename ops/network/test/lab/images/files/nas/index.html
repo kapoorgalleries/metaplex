@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<!-- trimurti lab fixture: imitates the DSM login page of a Synology NAS. Not a real device. -->
+<html class="syno-login">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="X-UA-Compatible" content="IE=edge">
+<meta name="application-name" content="Synology DiskStation">
+<meta name="description" content="DiskStation provides a full-featured network attached storage (NAS) solution">
+<meta name="keywords" content="Synology, DiskStation, NAS, DSM">
+<title>Synology DiskStation</title>
+<link rel="shortcut icon" href="/webman/favicon.ico">
+</head>
+<body>
+<noscript>This page requires JavaScript.</noscript>
+<div id="sds-login-vue-inst">
+  <h1>Synology DiskStation</h1>
+  <p>DSM 7.2 &middot; Sign in</p>
+  <form action="/webapi/entry.cgi" method="post">
+    <input name="account" placeholder="Account"> <input name="passwd" type="password" placeholder="Password">
+    <button type="submit" disabled>Sign in</button>
+  </form>
+  <p>trimurti lab simulation</p>
+</div>
+</body>
+</html>

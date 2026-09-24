@@ -1,0 +1,36 @@
+#!/bin/sh
+# Add the HTTPS proxy's CA (/usr/local/share/lab/proxy-ca.crt, possibly a whole bundle) to
+# the system trust store of Debian/Ubuntu, Fedora or Arch. Certificates the store already
+# has are skipped, so a full bundle only adds the proxy's own CA.
+set -eu
+src=/usr/local/share/lab/proxy-ca.crt
+[ -s "$src" ] || { echo "lab-ca-install: $src missing or empty" >&2; exit 1; }
+
+if command -v update-ca-certificates >/dev/null 2>&1; then
+  dir=/usr/local/share/ca-certificates/lab; ext=crt; upd="update-ca-certificates"
+  sys=/etc/ssl/certs/ca-certificates.crt
+elif [ -d /etc/pki/ca-trust/source/anchors ]; then
+  dir=/etc/pki/ca-trust/source/anchors; ext=pem; upd="update-ca-trust extract"
+  sys=/etc/pki/tls/certs/ca-bundle.crt
+elif [ -d /etc/ca-certificates/trust-source/anchors ]; then
+  dir=/etc/ca-certificates/trust-source/anchors; ext=pem; upd="update-ca-trust extract"
+  sys=/etc/ssl/certs/ca-certificates.crt
+else
+  echo "lab-ca-install: no known system trust store" >&2; exit 1
+fi
+
+mkdir -p "$dir"
+rm -f "$dir"/lab-proxy-*
+awk -v d="$dir" -v e="$ext" '
+  /-----BEGIN CERTIFICATE-----/ { n++; f = sprintf("%s/lab-proxy-%03d.%s", d, n, e) }
+  f { print > f }
+  /-----END CERTIFICATE-----/ { close(f); f = "" }' "$src"
+
+added=0
+for f in "$dir"/lab-proxy-*; do
+  [ -f "$f" ] || continue
+  first="$(sed -n 2p "$f")"
+  if [ -f "$sys" ] && grep -qF -- "$first" "$sys"; then rm -f "$f"; else added=$((added + 1)); fi
+done
+$upd >/dev/null 2>&1
+echo "lab-ca-install: $added certificate(s) added to the system trust store"

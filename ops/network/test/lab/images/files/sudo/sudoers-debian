@@ -1,0 +1,10 @@
+# Debian 12's default /etc/sudoers (used with the lab's upstream sudo build).
+Defaults	env_reset
+Defaults	mail_badpass
+Defaults	secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+Defaults	use_pty
+
+root	ALL=(ALL:ALL) ALL
+%sudo	ALL=(ALL:ALL) ALL
+
+@includedir /etc/sudoers.d
