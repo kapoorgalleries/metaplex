@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Update this macOS or Linux machine: OS packages, Homebrew, snap/flatpak if
-# present, and the three AI CLIs. Never reboots; prints REBOOT_REQUIRED=yes
-# when one is needed so you can schedule it. Run on the target, or push it
-# with:  run-remote.sh --os linux --tty update-all   (--tty so sudo can ask).
+# present, and the AI CLIs (claude, codex, gemini, hf). Never reboots; prints
+# REBOOT_REQUIRED=yes when one is needed so you can schedule it. Run on the
+# target, or push it with:  run-remote.sh --os linux --tty update-all   (--tty so sudo can ask).
 #
 # Usage: update-all.sh [--no-os] [--no-clis]
 set -u
@@ -16,6 +16,7 @@ SUDO=""; [ "$(id -u)" -ne 0 ] && have sudo && SUDO="sudo"
 OS="$(uname -s)"; REBOOT=no
 export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
 export DEBIAN_FRONTEND=noninteractive
+export HF_HUB_DISABLE_UPDATE_CHECK=1   # hf's daily hint goes to stderr ahead of --version; hf update still checks
 
 if [ "$NO_OS" = 0 ]; then
   if [ "$OS" = "Darwin" ]; then
@@ -50,10 +51,11 @@ if [ "$NO_CLIS" = 0 ]; then
     log "Gemini CLI"
     npm install -g --no-fund --no-audit @google/gemini-cli@latest >/dev/null 2>&1 || echo "  (npm update of Gemini CLI failed; rerun bootstrap-ai-clis.sh)"
   fi
+  if have hf; then log "Hugging Face CLI"; hf update 2>&1 | tail -2; fi   # installer, brew or pip, whichever it came from; refreshes the hf-cli skill
 fi
 
 log "versions on $(hostname -s):"
-for c in claude codex gemini node; do
+for c in claude codex gemini hf node; do
   if have "$c"; then printf '  %-7s %s\n' "$c" "$("$c" --version 2>&1 | head -1)"; else printf '  %-7s missing\n' "$c"; fi
 done
 echo "REBOOT_REQUIRED=$REBOOT"

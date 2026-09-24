@@ -1,6 +1,7 @@
 <#
 Update this Windows machine: every winget-managed app (Store apps included),
-Windows Update through the PSWindowsUpdate module, and the three AI CLIs.
+Windows Update through the PSWindowsUpdate module, and the AI CLIs (claude,
+codex, gemini, hf).
 Never reboots; prints REBOOT_REQUIRED=yes when one is needed. Run elevated
 (an SSH session as an administrator already is), or push it with
 run-remote.sh --os windows update-all.
@@ -12,6 +13,7 @@ $ErrorActionPreference = 'Continue'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 function Log($m)  { Write-Host "==> $m" -ForegroundColor Cyan }
 function Have($c) { return [bool](Get-Command $c -ErrorAction SilentlyContinue) }
+$env:HF_HUB_DISABLE_UPDATE_CHECK = '1'   # hf's daily hint goes to stderr ahead of --version; hf update still checks
 # winget is a per-user Store app and can be missing from PATH in an SSH session; find it.
 function Find-Winget {
   $c = Get-Command winget.exe -ErrorAction SilentlyContinue
@@ -70,6 +72,7 @@ if (-not $NoCLIs) {
       if ($LASTEXITCODE -eq 0) { Log $p; & npm install -g --no-fund --no-audit "$p@latest" | Out-Host }
     }
   }
+  if (Have 'hf') { Log 'Hugging Face CLI'; try { & hf update | Out-Host } catch { } }   # installer or pip, whichever it came from; refreshes the hf-cli skill
 }
 
 # Other reboot signals Windows leaves behind
@@ -78,7 +81,7 @@ if (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based S
 if (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager' -Name PendingFileRenameOperations -ErrorAction SilentlyContinue) { $reboot = $true }
 
 Log "versions on ${env:COMPUTERNAME}:"
-foreach ($c in 'claude', 'codex', 'gemini', 'node') {
+foreach ($c in 'claude', 'codex', 'gemini', 'hf', 'node') {
   if (Have $c) { $v = (& $c --version 2>&1 | Select-Object -First 1) } else { $v = 'missing' }
   Write-Host ("  {0,-7} {1}" -f $c, $v)
 }

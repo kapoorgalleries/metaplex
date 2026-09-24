@@ -94,7 +94,7 @@ Do these in order; each has a script or a checklist item.
 5. **SSH server on**: `enable-ssh-server.ps1` (elevated) or `enable-ssh-server.sh`, run locally this first time. Windows: the script also flips the network profile to Private.
 6. **Admin key**: from the admin machine, `scripts/ssh-keys.sh --host new-pc-1`. Must print `PASS`.
 7. **`ssh new-pc-1` works**: `scripts/ssh-config-gen.sh`, then try it.
-8. **AI CLIs**: `scripts/run-remote.sh --host new-pc-1 bootstrap-ai-clis`. Then sign in to each of the three on that machine (the bootstrap output says how, including the no-browser routes).
+8. **AI CLIs**: `scripts/run-remote.sh --host new-pc-1 bootstrap-ai-clis`. Then sign in to claude, codex, gemini and hf on that machine, and to Hugging Face's MCP server in Codex with `codex mcp login huggingface` (the bootstrap output says how, including the no-browser routes).
 9. **NAS share** mounted with a named user (nas.md).
 10. **Trimurti join step** for the case ticked above.
 11. **Verify**: `scripts/verify.sh --host new-pc-1` all green; set `trimurti=yes`; paste the row into `status.md`.

@@ -30,8 +30,8 @@ $env:Path = "$env:USERPROFILE\.local\bin;$env:LOCALAPPDATA\Programs\OpenAI\Codex
 # 1. Codex installed
 if (-not (Have 'codex')) {
   Log "Codex is not installed; installing it with the kit's bootstrap (Codex only)"
-  if ($DryRun) { Write-Host "  [dry-run] scripts\bootstrap-ai-clis.ps1 -SkipClaude -SkipGemini"; Write-Host "dry run: codex not found, stopping here"; exit 0 }
-  & (Join-Path $Ops 'scripts\bootstrap-ai-clis.ps1') -SkipClaude -SkipGemini
+  if ($DryRun) { Write-Host "  [dry-run] scripts\bootstrap-ai-clis.ps1 -SkipClaude -SkipGemini -SkipHf"; Write-Host "dry run: codex not found, stopping here"; exit 0 }
+  & (Join-Path $Ops 'scripts\bootstrap-ai-clis.ps1') -SkipClaude -SkipGemini -SkipHf
   $env:Path = [Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' + [Environment]::GetEnvironmentVariable('Path', 'User')
   if (-not (Have 'codex')) { throw 'codex is still not on PATH; open a new terminal and rerun' }
 }

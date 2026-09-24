@@ -50,7 +50,7 @@ Requirements on the admin machine: Node 20+, `ssh`/`scp` on PATH, and `bash` (ma
 | `trimurti_ssh_run` | no | One command on one inventory host (`default`, `bash` or `powershell` shell), output capped |
 | `trimurti_run_script` | no | Push `bootstrap-ai-clis`, `update-all`, `enable-ssh-server` or `disk-triage` to the selected hosts as a background job |
 | `trimurti_get_job` / `trimurti_list_jobs` | yes | Job status, passed/failed hosts, hosts needing a reboot, log tail |
-| `trimurti_verify_hosts` | yes | `verify.sh`: ping, key login and CLI versions per host; `all_green` and a problems list |
+| `trimurti_verify_hosts` | yes | `verify.sh`: ping, key login and CLI versions (claude, codex, gemini, hf, node) per host; `all_green` and a problems list |
 | `trimurti_check_nas` | yes | `nas-check.sh`: ping, open ports, vendor guess, shares, SSH probe, and which `nas.md` section applies |
 
 Resources: `trimurti://readme`, `trimurti://status`, `trimurti://inventory`, `trimurti://checklists/{network-triage|router-tuning|nas|hulk-drives|trimurti-join}`.

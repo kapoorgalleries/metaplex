@@ -1,7 +1,7 @@
 // End-to-end smoke test over stdio: spawns dist/index.js against a scratch copy
 // of ops/network so nothing in the repo is modified. Exercises tool listing,
-// resources, inventory read/write, an SSH probe that must fail fast and the
-// job API's error path. Run with `npm test`.
+// resources, inventory read/write, an SSH probe that must fail fast, verify.sh's
+// table parsing (with the hf column) and the job API's error path. Run with `npm test`.
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import assert from 'node:assert/strict';
@@ -26,7 +26,8 @@ const transport = new StdioClientTransport({
 const client = new Client({ name: 'smoke', version: '0.0.0' });
 await client.connect(transport);
 
-const tools = (await client.listTools()).tools.map((t) => t.name).sort();
+const listed = (await client.listTools()).tools;
+const tools = listed.map((t) => t.name).sort();
 assert.deepEqual(tools, [
   'trimurti_check_nas',
   'trimurti_get_job',
@@ -40,6 +41,9 @@ assert.deepEqual(tools, [
   'trimurti_verify_hosts',
 ]);
 console.log('tools:', tools.length);
+const byName = Object.fromEntries(listed.map((t) => [t.name, t]));
+assert.match(byName.trimurti_run_script.description, /--skip-hf/, 'bootstrap flags documented');
+assert.ok(byName.trimurti_verify_hosts.outputSchema.properties.rows.items.properties.hf, 'verify rows carry hf');
 
 const resources = (await client.listResources()).resources.map((r) => r.uri).sort();
 assert.ok(resources.includes('trimurti://readme') && resources.includes('trimurti://inventory'));
@@ -90,6 +94,14 @@ console.log('ssh probe:', r.structuredContent.results[0].diagnosis.slice(0, 70))
 
 r = await client.callTool({ name: 'trimurti_test_ssh', arguments: { role: 'router' } });
 assert.equal(r.isError, true, 'routers are never tested');
+
+// 192.0.2.9 is TEST-NET: the host is unreachable, so every CLI column reads '-'.
+r = await client.callTool({ name: 'trimurti_verify_hosts', arguments: { name: 'new-pc-3', timeout_seconds: 60 } });
+assert.equal(r.isError, undefined, 'verify.sh ran and produced a table');
+assert.equal(r.structuredContent.all_green, false);
+assert.deepEqual(r.structuredContent.rows.map((x) => [x.host, x.hf]), [['new-pc-3', '-']], 'hf column parsed');
+assert.match(r.structuredContent.problems[0], /hf missing/);
+console.log('verify:', r.structuredContent.problems[0]);
 
 r = await client.callTool({ name: 'trimurti_get_job', arguments: { job_id: '20260101-000000-abcd' } });
 assert.equal(r.isError, true);

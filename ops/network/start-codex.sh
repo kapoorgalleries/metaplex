@@ -36,7 +36,7 @@ export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:/opt/homebrew/bin:/usr/local
 # 1. Codex installed
 if ! have codex; then
   log "Codex is not installed; installing it with the kit's bootstrap (Codex only)"
-  run bash "$OPS/scripts/bootstrap-ai-clis.sh" --skip-claude --skip-gemini
+  run bash "$OPS/scripts/bootstrap-ai-clis.sh" --skip-claude --skip-gemini --skip-hf
   [ "$DRY" = 1 ] || have codex || { warn "codex still not on PATH; open a new terminal and rerun"; exit 1; }
 fi
 [ "$DRY" = 1 ] && ! have codex && { warn "dry run: codex not found, stopping here"; exit 0; }

@@ -27,7 +27,7 @@ const RunScriptInput = z
       .array(z.string().regex(ARG, 'flags only: letters, digits, . _ = : / -, no spaces or quotes'))
       .max(8)
       .default([])
-      .describe("Arguments for the script, e.g. ['--skip-gemini'] or ['-WithGit']"),
+      .describe("Arguments for the script, e.g. ['--skip-gemini'], ['--skip-hf'] or ['-WithGit']"),
   })
   .strict();
 
@@ -78,6 +78,7 @@ const VerifyRow = z.object({
   claude: z.string(),
   codex: z.string(),
   gemini: z.string(),
+  hf: z.string(),
   node: z.string(),
   os: z.string(),
 });
@@ -110,8 +111,8 @@ export function registerScriptTools(server: McpServer): void {
       description: `Push one of the kit's scripts to every selected inventory host and run it there, choosing the .sh or .ps1 variant per host OS (this is scripts/run-remote.sh). The run happens in the background: you get a job_id at once and poll it with trimurti_get_job, because installs and OS updates take minutes.
 
 Scripts:
-  - bootstrap-ai-clis: Node 20+, Claude Code, Codex CLI, Gemini CLI (args: --skip-claude/--skip-codex/--skip-gemini/--skip-node; Windows: -SkipClaude/-SkipCodex/-SkipGemini/-SkipNode/-WithGit)
-  - update-all: OS packages, Homebrew/winget, Windows Update, the CLIs; never reboots (args: --no-os/--no-clis; Windows -NoOS/-NoCLIs)
+  - bootstrap-ai-clis: Node 20+, Claude Code, Codex CLI, Gemini CLI, the Hugging Face CLI (hf, plus Python 3.10+ for it), and Hugging Face's MCP server registered with Codex and Gemini (args: --skip-claude/--skip-codex/--skip-gemini/--skip-node/--skip-hf, --with-claude-hf-mcp to register it with Claude Code too, only for machines not signed in with claude.ai; Windows: -SkipClaude/-SkipCodex/-SkipGemini/-SkipNode/-SkipHf/-WithClaudeHfMcp/-WithGit)
+  - update-all: OS packages, Homebrew/winget, Windows Update, the CLIs including hf; never reboots (args: --no-os/--no-clis; Windows -NoOS/-NoCLIs)
   - enable-ssh-server: sshd on + firewall (only useful once a host is already reachable, e.g. to add --harden on Linux/macOS, or -Pwsh7 on Windows)
   - disk-triage: read-only disk and SMART report on that host (for the Hulk drives)
 
@@ -194,12 +195,12 @@ Returns: { job, passed[], failed[], reboot_required[], log_tail }.`,
     'trimurti_verify_hosts',
     {
       title: 'Verify the end state',
-      description: `The done-check for the whole network: for each selected host, ping, key-only SSH login, and the installed versions of claude, codex, gemini and node, plus the OS string. Runs scripts/verify.sh and returns the table it saves. Read-only.
+      description: `The done-check for the whole network: for each selected host, ping, key-only SSH login, and the installed versions of claude, codex, gemini, hf and node, plus the OS string. Runs scripts/verify.sh and returns the table it saves. Read-only.
 
 Args: inventory filters (name/os/role/trimurti) and timeout_seconds (default 240).
-Returns: { md_file, all_green, problems: ['host: what is wrong', ...], rows: [{ host, ping, ssh_key, claude, codex, gemini, node, os }] }.
+Returns: { md_file, all_green, problems: ['host: what is wrong', ...], rows: [{ host, ping, ssh_key, claude, codex, gemini, hf, node, os }] }.
 
-all_green means every selected host pings, accepts the key, and has all three CLIs and node present. Paste rows into status.md.`,
+all_green means every selected host pings, accepts the key, and has claude, codex, gemini, hf and node present. Paste rows into status.md.`,
       inputSchema: VerifyInput,
       outputSchema: VerifyOutput,
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
@@ -220,6 +221,7 @@ all_green means every selected host pings, accepts the key, and has all three CL
           claude: row.claude ?? '',
           codex: row.codex ?? '',
           gemini: row.gemini ?? '',
+          hf: row.hf ?? '',
           node: row.node ?? '',
           os: row.os ?? '',
         }));
@@ -228,14 +230,14 @@ all_green means every selected host pings, accepts the key, and has all three CL
           const bad: string[] = [];
           if (row.ping !== 'yes') bad.push('no ping');
           if (row.ssh_key !== 'yes') bad.push('key login fails');
-          for (const k of ['claude', 'codex', 'gemini', 'node'] as const) {
+          for (const k of ['claude', 'codex', 'gemini', 'hf', 'node'] as const) {
             if (row[k] === 'missing' || row[k] === '-' || row[k] === '') bad.push(`${k} missing`);
           }
           if (bad.length) problems.push(`${row.host}: ${bad.join(', ')}`);
         }
         const out = { md_file: md, all_green: rows.length > 0 && problems.length === 0, problems, rows };
         const summary = out.all_green ? 'ALL GREEN' : `${problems.length} host(s) with problems`;
-        return ok(`${summary} (${md})\n\n${mdTable(rows, ['host', 'ping', 'ssh_key', 'claude', 'codex', 'gemini', 'node', 'os'])}\n\n${problems.map((x) => `- ${x}`).join('\n')}`, out);
+        return ok(`${summary} (${md})\n\n${mdTable(rows, ['host', 'ping', 'ssh_key', 'claude', 'codex', 'gemini', 'hf', 'node', 'os'])}\n\n${problems.map((x) => `- ${x}`).join('\n')}`, out);
       } catch (e) {
         return fail(`could not run verify.sh: ${errorMessage(e)} (needs bash on the admin machine)`);
       }

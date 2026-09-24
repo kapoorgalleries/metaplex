@@ -10,7 +10,7 @@ Done means all of this is true:
 
 - One router, one subnet, one DHCP server, no double NAT, a DHCP reservation for every machine (`checklists/network-triage.md`, "What sorted means").
 - `ssh <name>` works with the admin key from this machine to every machine in `inventory.csv`.
-- `claude`, `codex` and `gemini` are installed and signed in on every machine.
+- `claude`, `codex`, `gemini` and `hf` are installed and signed in on every machine, and each agent reaches Hugging Face's MCP server (Codex and Gemini through the bootstrap's registration; Claude through the claude.ai connector, or `--with-claude-hf-mcp` on a machine without a claude.ai login).
 - The NAS is reachable, its shares mount from every PC, its volume is healthy, and it is hardened.
 - Every Hulk drive has a verdict, its data is safe, and it has a job.
 - Both new computers are onboarded and `trimurti=yes` in the inventory.
@@ -63,7 +63,7 @@ On Windows, use the `.ps1` scripts where they exist, and run `.sh` scripts throu
 | 0. Discover | Sweep the LAN, then fill `inventory.csv` with every real machine (name, ip, mac, os, user, role, trimurti) | `scripts/netscan.sh` or `netscan.ps1`; MCP `trimurti_scan_lan`, `trimurti_upsert_host` |
 | 1. Fix the LAN | Work `checklists/network-triage.md` top to bottom: topology, one DHCP server, reservations, DNS, Windows Private profile, cables | Router changes by the rules above |
 | 2. SSH | Once per machine, locally: `enable-ssh-server.sh` or `.ps1` (elevated). Then from here: `ssh-keys.sh` (Sanjay types each machine's password once), `ssh-config-gen.sh` | MCP `trimurti_test_ssh` for the diagnosis per failure |
-| 3. AI CLIs | `run-remote.sh bootstrap-ai-clis` for every machine, then sign each one in. Signing in needs Sanjay at a browser; give him the exact command per machine | MCP `trimurti_run_script`, `trimurti_get_job` |
+| 3. AI CLIs | `run-remote.sh bootstrap-ai-clis` for every machine (it also installs `hf` and registers Hugging Face's MCP server with Codex and Gemini), then sign each one in, including `hf auth login` and `codex mcp login huggingface`. Signing in needs Sanjay at a browser; give him the exact command per machine | MCP `trimurti_run_script`, `trimurti_get_job` |
 | 4. NAS | `nas-check.sh`, then the matching section of `checklists/nas.md` | MCP `trimurti_check_nas` |
 | 5. Hulk drives | `disk-triage` on the machine they are plugged into, then `checklists/hulk-drives.md` | Destructive steps by the rules above |
 | 6. New computers | `checklists/trimurti-join.md`: the join step for whatever Trimurti is, then the per-machine onboarding list | |
