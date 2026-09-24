@@ -14,6 +14,8 @@ A row whose hint says 'stale ARP' is only in the neighbour cache: it answered ne
 Exit: 0 scanned, 1 failed, 2 bad arguments.
 #>
 $ErrorActionPreference = 'Continue'
+# Warnings as plain 'WARN ...' lines, the same on every Windows language (the MCP scan tool reads them).
+function Warn([string]$m) { Write-Host "WARN $m" -ForegroundColor Yellow }
 
 function Show-Usage([int]$Code, [string]$Why) {
   $text = (((Get-Content -LiteralPath $PSCommandPath -Raw) -split '#>')[0] -replace '^\s*<#\r?\n', '').TrimEnd()
@@ -57,11 +59,11 @@ if (-not $Subnet) { $Subnet = ($myIp -split '\.')[0..2] -join '.' }
 
 Write-Host "adapter=$($adapter.Name)  link=$($adapter.LinkSpeed)  ip=$myIp/$prefix  gateway=$gw  profile=$netCat"
 Write-Host "dns servers: $dns"
-if ($adapter.LinkSpeed -match '^100 Mbps') { Write-Warning "link is 100 Mbps: bad cable or a 100 Mb switch port. Gigabit expected." }
-if ($prefix -ne 24) { Write-Warning "prefix is /$prefix, not /24. The network may be split; pass -Subnet if the sweep looks wrong." }
+if ($adapter.LinkSpeed -match '^100 Mbps') { Warn "link is 100 Mbps: bad cable or a 100 Mb switch port. Gigabit expected." }
+if ($prefix -ne 24) { Warn "prefix is /$prefix, not /24. The network may be split; pass -Subnet if the sweep looks wrong." }
 if ($netCat -and "$netCat" -ne 'Private' -and "$netCat" -ne 'DomainAuthenticated') {
-  Write-Warning "network profile is '$netCat'. On Public, Windows hides this machine and blocks file sharing, discovery and ping; the kit's SSH rule then only works if it includes Public (enable-ssh-server.ps1 moves this LAN to Private)."
-  Write-Warning "fix (admin): Set-NetConnectionProfile -InterfaceIndex $ifIndex -NetworkCategory Private"
+  Warn "network profile is '$netCat'. On Public, Windows hides this machine and blocks file sharing, discovery and ping; the kit's SSH rule then only works if it includes Public (enable-ssh-server.ps1 moves this LAN to Private)."
+  Warn "fix (admin): Set-NetConnectionProfile -InterfaceIndex $ifIndex -NetworkCategory Private"
 }
 
 # ---------------------------------------------------------------- 2. double NAT
@@ -100,7 +102,7 @@ $hops = @(tracert -d -h 4 -w 1000 1.1.1.1 2>$null | ForEach-Object {
   if ($_ -match '^\s*\d+\s.*?(\d+\.\d+\.\d+\.\d+)\s*$') { $matches[1] } elseif ($_ -match '^\s*\d+\s') { '*' }
 })
 $verdicts = Get-NatVerdict $hops
-foreach ($v in $verdicts) { Write-Warning $v }
+foreach ($v in $verdicts) { Warn $v }
 if (-not $verdicts.Count) { Write-Host "single NAT (first hops: $($hops -join ' '))" }
 
 # ---------------------------------------------------------------- 3. sweep

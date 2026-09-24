@@ -184,7 +184,7 @@ try {
 try { Restart-Service sshd } catch { Add-Failure 'sshd' "sshd did not restart: $($_.Exception.Message)" }
 $ips = (Get-NetIPAddress -AddressFamily IPv4 | Where-Object { $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.254.*' }).IPAddress -join ', '
 Write-Host "sshd: $((Get-Service sshd).Status)   login shell: $shell"
-Write-Host "Add this row to inventory.csv:  name=$env:COMPUTERNAME  ip=$ips  user=$env:USERNAME  os=windows  ssh_port=22"
+Write-Host "Add this row to inventory.csv:  name=$($env:COMPUTERNAME.ToLower())  ip=$ips  user=$env:USERNAME  os=windows  ssh_port=22"
 if ($Failed.Count) { Write-Host "ENABLE-SSH INCOMPLETE on ${env:COMPUTERNAME}, failed: $($Failed -join ' ')"; exit 1 }
 Write-Host "ENABLE-SSH OK on ${env:COMPUTERNAME}"
 exit 0
