@@ -1,0 +1,42 @@
+<evaluation>
+  <qa_pair>
+    <question>Using the network inventory as shipped in the repository, how many machines are flagged as Trimurti members but do not yet have an IP address recorded? Answer with the number only.</question>
+    <answer>2</answer>
+  </qa_pair>
+  <qa_pair>
+    <question>Among the inventory machines that the kit is allowed to log into, exactly one uses an SSH login user other than sanjay. What is that machine's inventory name?</question>
+    <answer>nas</answer>
+  </qa_pair>
+  <qa_pair>
+    <question>The router checklist recommends a specific range of last octets for the dynamic DHCP pool, leaving lower addresses for reservations. Give that range as two numbers joined by a hyphen, for example 50-60.</question>
+    <answer>100-199</answer>
+  </qa_pair>
+  <qa_pair>
+    <question>According to the NAS checklist, on which TCP port does a QNAP unit serve its web administration page by default over plain HTTP? Answer with the port number only.</question>
+    <answer>8080</answer>
+  </qa_pair>
+  <qa_pair>
+    <question>The external-drives checklist says that a disk whose health verdict is failing, but which still holds wanted data, must be imaged before any file is copied. Which command-line tool does it name for that imaging step? Answer with the tool name only.</question>
+    <answer>ddrescue</answer>
+  </qa_pair>
+  <qa_pair>
+    <question>The runbook's SSH troubleshooting list gives the full Windows path of the file where a member of the Administrators group must have their public key for sshd to accept it. Give that path exactly as written.</question>
+    <answer>C:\ProgramData\ssh\administrators_authorized_keys</answer>
+  </qa_pair>
+  <qa_pair>
+    <question>How many distinct values of the operating-system column appear across all rows of the shipped inventory, counting the router's value as one of them? Answer with the number only.</question>
+    <answer>5</answer>
+  </qa_pair>
+  <qa_pair>
+    <question>One checklist explains what it means when a traceroute's first hops are all private addresses and what to do about it. Give the name of that checklist as it appears at the end of its resource URI.</question>
+    <answer>network-triage</answer>
+  </qa_pair>
+  <qa_pair>
+    <question>In the router checklist, some rows are marked as needing Sanjay's confirmation before the change is made. How many such rows are there across the whole checklist? Answer with the number only.</question>
+    <answer>5</answer>
+  </qa_pair>
+  <qa_pair>
+    <question>The status sheet has a table meant to receive the output of the end-state verification. How many columns does that table have? Answer with the number only.</question>
+    <answer>8</answer>
+  </qa_pair>
+</evaluation>
