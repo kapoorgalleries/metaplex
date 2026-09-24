@@ -80,9 +80,9 @@ if have traceroute; then
   # shellcheck disable=SC2086
   HOPS="$($TO traceroute -n -m 4 -w 1 -q 1 1.1.1.1 2>/dev/null | awk '$1 ~ /^[0-9]+$/ {print $2}' | tr '\n' ' ')"
 elif have tracepath; then
-  # the last address given for each hop number (a "pmtu" line repeats the hop before)
+  # one address per hop number; a "pmtu" line is the hop before reporting a smaller MTU
   # shellcheck disable=SC2086
-  HOPS="$($TO tracepath -n -m 4 1.1.1.1 2>/dev/null | awk '$1 ~ /^[0-9]+:$/ { n = $1 + 0
+  HOPS="$($TO tracepath -n -m 4 1.1.1.1 2>/dev/null | awk '$1 ~ /^[0-9]+:$/ && !/pmtu/ { n = $1 + 0
       if ($2 ~ /^[0-9.]+$/) h[n] = $2; else if (!(n in h)) h[n] = "*"; if (n > m) m = n }
     END { for (i = 1; i <= m; i++) print ((i in h) ? h[i] : "*") }' | tr '\n' ' ')"
 else
@@ -103,8 +103,8 @@ else
   done
   set +f
   CONFIRM="Confirm on the router's status page: a WAN IP in 10/8, 172.16/12 or 192.168/16 proves double NAT; a public WAN IP means single NAT. See checklists/network-triage.md, 'Double NAT'."
-  if [ "$ANS" = 0 ]; then
-    warn "double-NAT check inconclusive: no hop towards 1.1.1.1 answered (${HOPS:-none})"
+  if [ "$ANS" -lt 2 ]; then
+    warn "double-NAT check inconclusive: $ANS of the first hops towards 1.1.1.1 answered (${HOPS:-none}). Look at the router's status page: a WAN IP in 10/8, 172.16/12 or 192.168/16 means double NAT."
   elif [ "$PRIV" -ge 2 ]; then
     case "$HOP2" in
       192.168.*) warn "DOUBLE NAT likely: the router's upstream hop $HOP2 is a home-router address ($HOPS), so a second NAT box (the ISP modem in router mode) sits between this LAN and the internet. $CONFIRM" ;;
