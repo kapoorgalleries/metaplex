@@ -1,0 +1,29 @@
+# Codex project config for this repository. No credentials belong in this file.
+#
+# Codex loads it only after you trust the repo, once per machine, in
+# ~/.codex/config.toml (Windows: %USERPROFILE%\.codex\config.toml):
+#
+#   [projects."/absolute/path/to/your/metaplex/clone"]
+#   trust_level = "trusted"
+#
+# Skills need no trust: Codex reads .agents/skills/ in any checkout.
+# See docs/hugging-face.md.
+
+# Hugging Face MCP server. Sign in once per machine with
+#   codex mcp login huggingface              (add --no-browser over SSH)
+# `?login` makes the server ask for sign-in instead of quietly running with
+# the anonymous tool set.
+[mcp_servers.huggingface]
+url = "https://huggingface.co/mcp?login"
+# Removed because they spend credits or write to the Hub. The server's URL
+# options only change which tools are advertised, not which can be called, so
+# the client removes them. If Sanjay says yes to one of these jobs, do it with
+# the hf CLI instead.
+disabled_tools = [
+  "hf_jobs",         # HF Jobs: billed compute
+  "dynamic_space",   # calls Gradio Spaces: ZeroGPU quota, overflow billed on paid plans
+  "create_repo",     # creates repositories on the Hub
+  "hf_sandbox",      # sandboxes run on HF infrastructure
+  "hf_sandbox_exec",
+  "hf_sandbox_fs",
+]
