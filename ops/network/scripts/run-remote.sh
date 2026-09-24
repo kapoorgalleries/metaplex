@@ -8,61 +8,96 @@
 #   run-remote.sh --role new bootstrap-ai-clis            # both new machines, right variant each
 #   run-remote.sh --os linux --tty update-all              # --tty lets sudo ask for its password
 #   run-remote.sh --os windows enable-ssh-server -Pwsh7
-# Args must not contain spaces.
+# Without --host or --role it runs on computers only (role admin, workstation or
+# new); a nas, printer or iot row runs only when named. Never on the router.
+# Rows with a blank ssh_port (no SSH) are skipped. Flags go before <script-base>;
+# everything after it goes to the script. Args must not contain spaces.
+# Ends with three plain lines, TRIMURTI_SUMMARY passed=... failed=... reboot_required=...
+# (comma-separated host names); exits 0 only if none failed, 2 on bad arguments.
 # shellcheck disable=SC2034  # every inventory column is read, not every one is used
 set -u
 # shellcheck source=lib.sh
 . "$(dirname "$0")/lib.sh"
+SCRIPT_FLAGS="--tty"
 parse_filters "$@"
+set -f
 # shellcheck disable=SC2086
 set -- $REST
-TTY=0; [ "${1:-}" = "--tty" ] && { TTY=1; shift; }
-BASE="${1:-}"; [ -n "$BASE" ] || die "usage: run-remote.sh [filters] [--tty] <script-base> [args...]"
-shift; ARGS="$*"
+set +f
+TTY=0; while [ "${1:-}" = "--tty" ]; do TTY=1; shift; done
+BASE="${1:-}"; [ -n "$BASE" ] || bad_usage "no script given"
+shift
+case "$BASE" in .*|*[!A-Za-z0-9._-]*) bad_usage "not a script name: $BASE" ;; esac
+SCRIPTS="$OPS_DIR/scripts"; LOGS="$OUT_DIR/logs"
+[ -f "$SCRIPTS/$BASE.sh" ] || [ -f "$SCRIPTS/$BASE.ps1" ] || bad_usage "no $BASE.sh or $BASE.ps1 in $SCRIPTS"
+for a in "$@"; do
+  case "$a" in *[!A-Za-z0-9._=:/,@+\\-]*) bad_usage "argument '$a': only letters, digits and . _ = : / , @ + \\ - are allowed" ;; esac
+done
+ARGS="$*"
+[ "$TTY" = 0 ] || [ -t 0 ] || bad_usage "--tty needs a terminal to type sudo passwords into; run it yourself in a terminal"
 
-SCRIPTS="$OPS_DIR/scripts"; LOGS="$OUT_DIR/logs"; mkdir -p "$LOGS"
+mkdir -p "$LOGS"
+check_inventory
 HOSTS="$(select_hosts)"; [ -n "$HOSTS" ] || die "no hosts selected from $INVENTORY"
-PASSED=""; FAILED=""
+PASSED=""; FAILED=""; REBOOT=""; RAN=0
+ESC="$(printf '\033')"
 
-OLDIFS="$IFS"; IFS='
-'
-for row in $HOSTS; do
-  IFS="$OLDIFS"
-  IFS=, read -r name ip mac os user role port trimurti notes <<< "$row"
+summary() {
+  printf 'TRIMURTI_SUMMARY passed=%s\n' "$PASSED"
+  printf 'TRIMURTI_SUMMARY failed=%s\n' "$FAILED"
+  printf 'TRIMURTI_SUMMARY reboot_required=%s\n' "$REBOOT"
+}
+
+KEY_PROBLEM="$(key_problem)"
+if [ -n "$KEY_PROBLEM" ]; then
+  fail "$KEY_PROBLEM"
+  while IFS=, read -r name ip mac os user role port trimurti notes; do
+    [ -n "$(ssh_skip_reason "$user" "$port")" ] || FAILED="${FAILED:+$FAILED,}$name"
+  done <<< "$HOSTS"
+  summary; exit 1
+fi
+
+while IFS=, read -r name ip mac os user role port trimurti notes <&3; do
+  why="$(ssh_skip_reason "$user" "$port")"
+  if [ -n "$why" ]; then warn "$name: skipped, $why"; continue; fi
+  RAN=$((RAN + 1)); rc=1
   target="$(ssh_target "$user" "$ip" "$name")"
-  logf="$LOGS/$name-$BASE-$(date +%Y%m%d-%H%M%S).log"
-  rc=1
-  if [ "$(lower "$os")" = "windows" ]; then
-    src="$SCRIPTS/$BASE.ps1"; remote="trimurti-$BASE.ps1"
-    if [ ! -f "$src" ]; then fail "$name: no $BASE.ps1 for a Windows host"; FAILED="$FAILED $name"; IFS='
-'; continue; fi
-    log "$name: $BASE.ps1 -> $target (log: $logf)"
-    if scp -q -o ConnectTimeout=8 -P "$port" "$src" "$target:$remote" </dev/null; then
+  logf="$LOGS/$name-$BASE-$(date +%Y%m%d-%H%M%S)-$$.log"
+  tag="$$-$RANDOM"   # a remote file of its own, so two jobs on one host do not clash
+  if [ "$(lower "$os")" = "windows" ]; then src="$SCRIPTS/$BASE.ps1"; remote="trimurti-$BASE-$tag.ps1"
+  else src="$SCRIPTS/$BASE.sh"; remote="/tmp/trimurti-$BASE-$tag.sh"; fi
+  if [ ! -f "$src" ]; then fail "$name: no ${src##*/} for a $os host"; FAILED="${FAILED:+$FAILED,}$name"; continue; fi
+  log "$name: ${src##*/} -> $target (log: $logf)"
+  printf '# %s %s on %s (%s)\n' "$(date '+%F %T')" "${src##*/} $ARGS" "$name" "$target" > "$logf"
+  # shellcheck disable=SC2086
+  if err="$(scp $SSH_OPTS "${KEY_OPTS[@]}" -P "$port" "$src" "$target:$remote" </dev/null 2>&1)"; then
+    if [ "$(lower "$os")" = "windows" ]; then
       # -File works whether the login shell is cmd or powershell; its exit code is the script's.
-      ssh $SSH_OPTS -p "$port" "$target" "powershell -NoProfile -ExecutionPolicy Bypass -File $remote $ARGS" </dev/null 2>&1 | tee "$logf"
+      # shellcheck disable=SC2086
+      ssh $SSH_OPTS "${KEY_OPTS[@]}" -p "$port" "$target" "powershell -NoProfile -ExecutionPolicy Bypass -File $remote $ARGS" </dev/null 2>&1 | tee -a "$logf"
       rc=${PIPESTATUS[0]}
-      ssh $SSH_OPTS -p "$port" "$target" "del $remote" </dev/null >/dev/null 2>&1 || true
+      # shellcheck disable=SC2086
+      ssh $SSH_OPTS "${KEY_OPTS[@]}" -p "$port" "$target" "del $remote" </dev/null >/dev/null 2>&1 || true
+    elif [ "$TTY" = 1 ]; then
+      # shellcheck disable=SC2086
+      ssh -t $SSH_OPTS "${KEY_OPTS[@]}" -p "$port" "$target" "bash $remote $ARGS; c=\$?; rm -f $remote; exit \$c" 2>&1 | tee -a "$logf"
+      rc=${PIPESTATUS[0]}
+    else
+      # shellcheck disable=SC2086
+      ssh $SSH_OPTS "${KEY_OPTS[@]}" -p "$port" "$target" "bash $remote $ARGS; c=\$?; rm -f $remote; exit \$c" </dev/null 2>&1 | tee -a "$logf"
+      rc=${PIPESTATUS[0]}
     fi
   else
-    src="$SCRIPTS/$BASE.sh"; remote="/tmp/trimurti-$BASE.sh"
-    if [ ! -f "$src" ]; then fail "$name: no $BASE.sh"; FAILED="$FAILED $name"; IFS='
-'; continue; fi
-    log "$name: $BASE.sh -> $target (log: $logf)"
-    if scp -q -o ConnectTimeout=8 -P "$port" "$src" "$target:$remote" </dev/null; then
-      if [ "$TTY" = 1 ]; then
-        ssh -t -o ConnectTimeout=8 -p "$port" "$target" "bash $remote $ARGS; c=\$?; rm -f $remote; exit \$c" 2>&1 | tee "$logf"
-      else
-        ssh $SSH_OPTS -p "$port" "$target" "bash $remote $ARGS; c=\$?; rm -f $remote; exit \$c" </dev/null 2>&1 | tee "$logf"
-      fi
-      rc=${PIPESTATUS[0]}
-    fi
+    printf '%s\n' "$err" | tee -a "$logf" >&2
+    fail "$name: could not copy ${src##*/} to $target"
   fi
-  if [ "$rc" -eq 0 ]; then ok "$name: exit 0"; PASSED="$PASSED $name"; else fail "$name: exit $rc"; FAILED="$FAILED $name"; fi
-  IFS='
-'
-done
-IFS="$OLDIFS"
+  # the log without terminal colours and CRs (ssh -t and Windows add them)
+  tr -d '\r' < "$logf" | LC_ALL=C sed "s/$ESC\[[0-9;?]*[A-Za-z]//g" > "$logf.tmp" && mv "$logf.tmp" "$logf"
+  grep -q '^REBOOT_REQUIRED=yes' "$logf" && REBOOT="${REBOOT:+$REBOOT,}$name"
+  if [ "$rc" -eq 0 ]; then ok "$name: exit 0"; PASSED="${PASSED:+$PASSED,}$name"
+  else fail "$name: exit $rc"; FAILED="${FAILED:+$FAILED,}$name"; fi
+done 3<<< "$HOSTS"
 
-log "passed:${PASSED:- none}"
-log "failed:${FAILED:- none}"
-[ -z "$FAILED" ]
+[ "$RAN" -gt 0 ] || fail "none of the selected hosts has an ssh_port: nothing ran"
+summary
+[ -z "$FAILED" ] && [ "$RAN" -gt 0 ]
