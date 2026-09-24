@@ -24,6 +24,7 @@ async function checklistNames(): Promise<string[]> {
 
 export function registerResources(server: McpServer): void {
   const statics: Array<[string, string, string, string, string]> = [
+    ['agents', 'trimurti://agents', 'Agent instructions and hard rules', "Read first: the job, what done means, the actions that need Sanjay's yes, what is never done (the router, secrets), and the order of work", path.join(OPS_DIR, 'AGENTS.md')],
     ['readme', 'trimurti://readme', 'Network kit runbook', 'The ordered plan, ground rules and SSH troubleshooting for the network clean-up', path.join(OPS_DIR, 'README.md')],
     ['status', 'trimurti://status', 'Status sheet', 'The record of what was found and changed; fill it as the work progresses', path.join(OPS_DIR, 'status.md')],
   ];
@@ -59,8 +60,11 @@ export function registerResources(server: McpServer): void {
     },
     async (u, vars) => {
       const raw = String(vars.name ?? '');
-      const name = raw.replace(/[^a-z0-9-]/g, '');
-      const body = name ? await text(path.join(CHECKLISTS_DIR, `${name}.md`)) : `(no checklist named "${raw}"; available: ${(await checklistNames()).join(', ')})`;
+      const names = await checklistNames();
+      const name = raw.toLowerCase().replace(/\.md$/, '');
+      const body = names.includes(name)
+        ? await text(path.join(CHECKLISTS_DIR, `${name}.md`))
+        : `(no checklist named "${raw}"; available: ${names.join(', ') || 'none found in ' + CHECKLISTS_DIR})`;
       return { contents: [{ uri: u.href, mimeType: 'text/markdown', text: body }] };
     },
   );

@@ -25,16 +25,25 @@ Environment:
   INVENTORY         inventory.csv path    (default: $TRIMURTI_OPS_DIR/inventory.csv)
   KEY_FILE          admin ssh key         (default: ~/.ssh/id_ed25519_trimurti)
   OUT_DIR           scan/verify/job output (default: $TRIMURTI_OPS_DIR/out)
+  TRIMURTI_BASH     Windows only: Git Bash's bash.exe (default: Program Files\\Git\\bin\\bash.exe,
+                    then next to \`git --exec-path\`; WSL's bash is never used)
 
-Tools: trimurti_list_hosts, trimurti_upsert_host, trimurti_scan_lan, trimurti_test_ssh,
-       trimurti_ssh_run, trimurti_run_script, trimurti_get_job, trimurti_list_jobs,
-       trimurti_verify_hosts, trimurti_check_nas
-Resources: trimurti://readme, trimurti://status, trimurti://inventory, trimurti://checklists/{name}
+Tools: trimurti_list_hosts, trimurti_upsert_host, trimurti_remove_host, trimurti_scan_lan,
+       trimurti_test_ssh, trimurti_ssh_run, trimurti_run_script, trimurti_get_job,
+       trimurti_list_jobs, trimurti_verify_hosts, trimurti_check_nas
+Resources: trimurti://agents, trimurti://readme, trimurti://status, trimurti://inventory,
+           trimurti://checklists/{name}
 `);
   process.exit(0);
 }
 
-const server = new McpServer({ name: 'trimurti-ops-mcp-server', version: '1.0.0' });
+const server = new McpServer(
+  { name: 'trimurti-ops-mcp-server', version: '1.0.0' },
+  {
+    instructions:
+      "Tools for the gallery's network job (ops/network). Before anything else read trimurti://agents: the hard rules (what needs Sanjay's yes, never the router, never write secrets anywhere) and the order of work; then trimurti://status to resume. The router (role=router, or this machine's default gateway) is never logged into or probed by any tool.",
+  },
+);
 registerInventoryTools(server);
 registerNetworkTools(server);
 registerSshTools(server);

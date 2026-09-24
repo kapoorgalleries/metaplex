@@ -137,6 +137,66 @@ function Read-WUResult([string[]]$Lines) {
   } elseif ($last -match '^TRIMURTI_WU_ERROR (.*)$') { $r.text = "Windows Update failed: $($Matches[1])" }
   return $r
 }
+# Windows Update through a SYSTEM scheduled task: create it, wait for it ($Minutes at most), read its
+# result and remove it. Returns what Windows Update says about a reboot: yes, no or unknown.
+function Invoke-WUTask([string]$Dir, [hashtable]$Filter, [int]$Minutes = 120) {
+  $wuLog = Join-Path $Dir 'windows-update.log'
+  try {
+    $module = Get-PSWUModulePath
+    # SYSTEM runs the script in this folder and writes the log there, so only Administrators and
+    # SYSTEM may write to it: owner, ACL and our two files are reset before every run.
+    if ((Test-Path $Dir) -and ((Get-Item -LiteralPath $Dir -Force).Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+      throw "$Dir is a link, not a folder; remove it by hand and rerun"
+    }
+    New-Item -ItemType Directory -Path $Dir -Force -ErrorAction Stop | Out-Null
+    $icacls = "$env:SystemRoot\System32\icacls.exe"
+    foreach ($acl in @(@($Dir, '/reset'), @($Dir, '/setowner', '*S-1-5-32-544'),
+                       @($Dir, '/inheritance:r', '/grant:r', '*S-1-5-32-544:(OI)(CI)F', '*S-1-5-18:(OI)(CI)F'))) {
+      $rc = Invoke-Native $icacls $acl
+      if ($rc -ne 0) { throw "icacls $($acl -join ' ') failed ($rc)" }
+    }
+    $taskScript = Join-Path $Dir 'windows-update-task.ps1'
+    Remove-Item -LiteralPath $taskScript, $wuLog -Force -ErrorAction SilentlyContinue
+    [IO.File]::WriteAllText($taskScript, (New-WUTaskScript $module $wuLog $Filter), (New-Object Text.UTF8Encoding $false))
+    # -ExecutionPolicy Bypass: the default policy on Windows clients (Restricted) would refuse the
+    # script and PSWindowsUpdate's own .psm1 and .ps1xml files.
+    $action = New-ScheduledTaskAction -Execute "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" `
+      -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$taskScript`""
+    $principal = New-ScheduledTaskPrincipal -UserId 'S-1-5-18' -LogonType ServiceAccount -RunLevel Highest
+    $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Hours 3)
+    Register-ScheduledTask -TaskName $TaskName -Action $action -Principal $principal -Settings $settings -Force -ErrorAction Stop | Out-Null
+    $start = (Get-Date).AddSeconds(-5)
+    Start-ScheduledTask -TaskName $TaskName -ErrorAction Stop
+    $deadline = (Get-Date).AddMinutes($Minutes); $began = $false; $state = ''
+    do {
+      Start-Sleep -Seconds 10
+      $state = "$((Get-ScheduledTask -TaskName $TaskName).State)"
+      if ($state -eq 'Running' -or (Get-ScheduledTaskInfo -TaskName $TaskName).LastRunTime -ge $start) { $began = $true }
+      if (-not $began -and (Get-Date) -gt $start.AddMinutes(3)) { break }
+    } until (($began -and $state -ne 'Running' -and $state -ne 'Queued') -or (Get-Date) -gt $deadline)
+    $lines = @(); if (Test-Path $wuLog) { $lines = @(Get-Content -LiteralPath $wuLog -Encoding UTF8) }
+    $lines | Where-Object { $_ -notmatch '^TRIMURTI_WU_' } | Out-Host
+    if (-not $began) {
+      Add-Failure 'windows-update' 'the Windows Update task did not start within 3 minutes'
+      Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
+      return 'unknown'
+    }
+    if ($state -eq 'Running' -or $state -eq 'Queued') {
+      Add-Failure 'windows-update' "Windows Update is still running after $Minutes minutes; the task keeps going, check $wuLog later"
+      return 'unknown'
+    }
+    $r = Read-WUResult $lines
+    $code = (Get-ScheduledTaskInfo -TaskName $TaskName).LastTaskResult
+    Log "Windows Update: $($r.text) (task exit $code)"
+    if (-not $r.ok -or $code -ne 0) { Add-Failure 'windows-update' "Windows Update: $($r.text) (task exit $code); see $wuLog" }
+    Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $taskScript -Force -ErrorAction SilentlyContinue
+    return $r.reboot
+  } catch {
+    Add-Failure 'windows-update' "Windows Update could not run: $($_.Exception.Message). Use Settings > Windows Update on this machine instead."
+    return 'unknown'
+  }
+}
 $Winget = Find-Winget
 $reboot = 'no'
 $TaskName = 'trimurti-windows-update'
@@ -165,65 +225,13 @@ if (-not $NoOS) {
     Add-Failure 'windows-update' "a Windows Update task from an earlier run is still running; check $wuLog and rerun later"
     $reboot = 'unknown'
   } else {
-    try {
-      $module = Get-PSWUModulePath
-      # SYSTEM runs the script in this folder and writes the log there, so only Administrators and
-      # SYSTEM may write to it: owner, ACL and our two files are reset before every run.
-      if ((Test-Path $dir) -and ((Get-Item -LiteralPath $dir -Force).Attributes -band [IO.FileAttributes]::ReparsePoint)) {
-        throw "$dir is a link, not a folder; remove it by hand and rerun"
-      }
-      New-Item -ItemType Directory -Path $dir -Force -ErrorAction Stop | Out-Null
-      $icacls = "$env:SystemRoot\System32\icacls.exe"
-      foreach ($acl in @(@($dir, '/reset'), @($dir, '/setowner', '*S-1-5-32-544'),
-                         @($dir, '/inheritance:r', '/grant:r', '*S-1-5-32-544:(OI)(CI)F', '*S-1-5-18:(OI)(CI)F'))) {
-        $rc = Invoke-Native $icacls $acl
-        if ($rc -ne 0) { throw "icacls $($acl -join ' ') failed ($rc)" }
-      }
-      $taskScript = Join-Path $dir 'windows-update-task.ps1'
-      Remove-Item -LiteralPath $taskScript, $wuLog -Force -ErrorAction SilentlyContinue
-      $utf8 = New-Object Text.UTF8Encoding $false
-      [IO.File]::WriteAllText($taskScript, (New-WUTaskScript $module $wuLog (Get-WUFilter $AllUpdates $Drivers $FeatureUpgrades)), $utf8)
-      $action = New-ScheduledTaskAction -Execute "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" `
-        -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$taskScript`""
-      $principal = New-ScheduledTaskPrincipal -UserId 'S-1-5-18' -LogonType ServiceAccount -RunLevel Highest
-      $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Hours 3)
-      Register-ScheduledTask -TaskName $TaskName -Action $action -Principal $principal -Settings $settings -Force -ErrorAction Stop | Out-Null
-      $start = (Get-Date).AddSeconds(-5)
-      Start-ScheduledTask -TaskName $TaskName -ErrorAction Stop
-      $deadline = (Get-Date).AddMinutes(120); $began = $false; $state = ''
-      do {
-        Start-Sleep -Seconds 10
-        $state = "$((Get-ScheduledTask -TaskName $TaskName).State)"
-        if ($state -eq 'Running' -or (Get-ScheduledTaskInfo -TaskName $TaskName).LastRunTime -ge $start) { $began = $true }
-        if (-not $began -and (Get-Date) -gt $start.AddMinutes(3)) { break }
-      } until (($began -and $state -ne 'Running' -and $state -ne 'Queued') -or (Get-Date) -gt $deadline)
-      $lines = @(); if (Test-Path $wuLog) { $lines = @(Get-Content -LiteralPath $wuLog -Encoding UTF8) }
-      $lines | Where-Object { $_ -notmatch '^TRIMURTI_WU_' } | Out-Host
-      if (-not $began) {
-        Add-Failure 'windows-update' 'the Windows Update task did not start within 3 minutes'
-        Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
-        $reboot = 'unknown'
-      } elseif ($state -eq 'Running' -or $state -eq 'Queued') {
-        Add-Failure 'windows-update' "Windows Update is still running after 2 hours; the task keeps going, check $wuLog later"
-        $reboot = 'unknown'
-      } else {
-        $r = Read-WUResult $lines
-        $code = (Get-ScheduledTaskInfo -TaskName $TaskName).LastTaskResult
-        Log "Windows Update: $($r.text) (task exit $code)"
-        if (-not $r.ok -or $code -ne 0) { Add-Failure 'windows-update' "Windows Update: $($r.text) (task exit $code); see $wuLog" }
-        if ($r.reboot -eq 'yes') { $reboot = 'yes' }
-        Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
-        Remove-Item -LiteralPath $taskScript -Force -ErrorAction SilentlyContinue
-        $left = @()
-        if (-not $AllUpdates) { $left += 'other software updates (-AllUpdates)' }
-        if (-not $Drivers) { $left += 'drivers (-Drivers)' }
-        if (-not $FeatureUpgrades) { $left += 'feature upgrades (-FeatureUpgrades)' }
-        if ($left.Count) { Write-Host "  not installed on purpose: $($left -join ', '); drivers and feature upgrades only with Sanjay's yes" }
-      }
-    } catch {
-      Add-Failure 'windows-update' "Windows Update could not run: $($_.Exception.Message). Use Settings > Windows Update on this machine instead."
-      $reboot = 'unknown'
-    }
+    $wu = Invoke-WUTask $dir (Get-WUFilter $AllUpdates $Drivers $FeatureUpgrades)
+    if ($wu -ne 'no') { $reboot = $wu }
+    $left = @()
+    if (-not $AllUpdates) { $left += 'other software updates (-AllUpdates)' }
+    if (-not $Drivers) { $left += 'drivers (-Drivers)' }
+    if (-not $FeatureUpgrades) { $left += 'feature upgrades (-FeatureUpgrades)' }
+    if ($left.Count) { Write-Host "  not installed on purpose: $($left -join ', '); drivers and feature upgrades only with Sanjay's yes" }
   }
   # Earlier versions of this script left a 'PSWindowsUpdate' task behind (Invoke-WUJob)
   $old = Get-ScheduledTask -TaskName 'PSWindowsUpdate' -ErrorAction SilentlyContinue
