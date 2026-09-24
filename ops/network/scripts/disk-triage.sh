@@ -20,6 +20,9 @@ for a in "$@"; do
   esac
 done
 have() { command -v "$1" >/dev/null 2>&1; }
+# smartctl lives in sbin (not on a Debian user's PATH) or Homebrew (not on a macOS ssh PATH)
+export PATH="$PATH:/usr/local/sbin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin"
+SMARTCTL="$(command -v smartctl 2>/dev/null)"
 OS="$(uname -s)"
 HOST="${HOSTNAME:-$(uname -n)}"; HOST="${HOST%%.*}"   # no hostname(1) on Arch or minimal Fedora
 FAILED=""
@@ -67,15 +70,16 @@ selftest_failure() {
 }
 
 smart_verdict() {  # $1 = smartctl -H -A output, $2 = smartctl -l selftest output
-  local out="$1" realloc rep_unc cmd_to pend uncorr nvme_err spare used crit bad=0 hot=0 health grown st worn rsvd now past
+  local out="$1" realloc rep_unc cmd_to pend uncorr nvme_err spare used crit nv="" bad=0 hot=0 health grown st worn rsvd now past
   realloc="$(attr "$out" 5)"; rep_unc="$(attr "$out" 187)"; cmd_to="$(cmd_timeouts "$out")"
   pend="$(attr "$out" 197)"; uncorr="$(attr "$out" 198)"
   nvme_err="$(nvme_field "$out" 'Media and Data Integrity Errors')"
   spare="$(nvme_field "$out" 'Available Spare:')"; used="$(nvme_field "$out" 'Percentage Used')"
   crit="$(printf '%s\n' "$out" | awk -F: '/^Critical Warning/ {gsub(/[[:space:]]/, "", $2); print $2; exit}')"
   # NVMe critical warning bits: 0x01 spare low, 0x04 reliability degraded, 0x08 read-only,
-  # 0x20 PMR read-only = failing; 0x02 temperature, 0x10 backup power = watch
-  case "$crit" in 0x[0-9a-fA-F][0-9a-fA-F]) bad=$((crit & 0x2D)); hot=$((crit & 0x12)) ;; esac
+  # 0x20 PMR read-only = failing; 0x02 temperature, 0x10 backup power = watch. NVMe's own
+  # overall-health says FAILED for any bit, so the bits decide when they can be read.
+  case "$crit" in 0x[0-9a-fA-F][0-9a-fA-F]) nv=1; bad=$((crit & 0x2D)); hot=$((crit & 0x12)) ;; esac
   health="$(printf '%s\n' "$out" | sed -n 's/^SMART Health Status: *//p' | head -1)"   # SCSI/SAS
   grown="$(printf '%s\n' "$out" | awk -F: '/^Elements in grown defect list/ {gsub(/[^0-9]/, "", $2); print $2; exit}')"
   # attributes smartctl flags: FAILING_NOW on a pre-fail one fails the drive, anything else is wear or history
@@ -85,7 +89,7 @@ smart_verdict() {  # $1 = smartctl -H -A output, $2 = smartctl -l selftest outpu
   worn="$(printf '%s\n' "$out" | awk '$1 ~ /^[0-9]+$/ && $2 ~ /Wear_Leveling_Count|Media_Wearout_Indicator|SSD_Life_Left|Percent_Lifetime_Remain|Remaining_Lifetime_Perc|Percent_Life_Remaining|Available_Reservd_Space/ && $4 + 0 <= 10 {print $2 "=" $4 + 0; exit}')"
   rsvd="$(printf '%s\n' "$out" | awk '$2 ~ /^Used_Rsvd_Blk_Cnt/ {v = $10; gsub(/[^0-9].*/, "", v); print v; exit}')"
   st="$(selftest_failure "$2")"
-  if { [ -z "$crit" ] && printf '%s' "$out" | grep -q 'overall-health.*FAILED'; } || [ -n "$now" ]; then
+  if { [ -z "$nv" ] && printf '%s' "$out" | grep -q 'overall-health.*FAILED'; } || [ -n "$now" ]; then
     echo "FAILING (SMART self-assessment failed${now:+: $now}) - copy data off NOW with ddrescue, then retire"
   elif [ -n "$health" ] && [ "$health" != "OK" ]; then
     echo "FAILING (SMART health: $health) - copy data off NOW with ddrescue, then retire"
@@ -133,19 +137,23 @@ unknown_reason() {  # device, smartctl output
 
 # smartctl output for a device, trying the device types that rescue USB bridges.
 # Sets SMART_OUT, SMART_TYPE (the -d type that worked, empty if none) and SMART_MSG
-# (the first answer, for the reason). A bare SCSI health line without attributes
-# is kept only if no ATA pass-through type shows more.
+# (the first answer, for the reason). SCSI-style health (a SAS disk, or a USB bridge
+# answering for the drive) is kept only if no ATA pass-through type shows attributes;
+# a SAS answer with its defect list beats a bare health line.
 smart_read() {
   local d out
   SMART_OUT=""; SMART_TYPE=""; SMART_MSG=""
   for d in auto sat sat,12 usbjmicron usbsunplus; do
-    out="$($SUDO smartctl -H -A -d "$d" "$1" 2>&1)"
+    out="$($SUDO "$SMARTCTL" -H -A -d "$d" "$1" 2>&1)"
     [ -n "$SMART_MSG" ] || SMART_MSG="$out"
     printf '%s' "$out" | grep -qE 'overall-health|SMART Health Status:|SMART/Health Information' || continue
-    if printf '%s' "$out" | grep -qE '^ID# ATTRIBUTE_NAME|SMART/Health Information|^Elements in grown defect list'; then
+    if printf '%s' "$out" | grep -qE '^ID# ATTRIBUTE_NAME|SMART/Health Information'; then
       SMART_OUT="$out"; SMART_TYPE="$d"; return 0
     fi
-    [ -n "$SMART_TYPE" ] || { SMART_OUT="$out"; SMART_TYPE="$d"; }
+    if [ -z "$SMART_TYPE" ] || { printf '%s' "$out" | grep -q '^Elements in grown defect list' &&
+                                 ! printf '%s' "$SMART_OUT" | grep -q '^Elements in grown defect list'; }; then
+      SMART_OUT="$out"; SMART_TYPE="$d"
+    fi
   done
   [ -n "$SMART_TYPE" ]
 }
@@ -159,7 +167,7 @@ triage() {  # device
       /^ *(5|9|187|188|194|196|197|198|199) / {printf "   %-4s %-28s raw=%s\n", $1, $2, $10}
       /^ *[0-9]+ (Wear_Leveling_Count|Media_Wearout_Indicator|SSD_Life_Left|Percent_Lifetime_Remain|Remaining_Lifetime_Perc|Used_Rsvd_Blk_Cnt)/ {printf "   %-4s %-28s value=%s raw=%s\n", $1, $2, $4, $10}
       /Percentage Used|Available Spare:|Media and Data Integrity Errors|Critical Warning|^Temperature:|Power On Hours/ {print "   " $0}'
-    st="$($SUDO smartctl -l selftest -d "$SMART_TYPE" "$1" 2>/dev/null)"
+    st="$($SUDO "$SMARTCTL" -l selftest -d "$SMART_TYPE" "$1" 2>/dev/null)"
     printf '%s\n' "$st" | awk '/^ *#? *[0-9]+ +[A-Za-z]/ {n++; if (n <= 2) print "   selftest " $0}'
     echo "   VERDICT $1: $(smart_verdict "$SMART_OUT" "$st")"
   else
@@ -175,7 +183,8 @@ linux_disks() {
 }
 linux_model() {  # /dev/name -> model and size
   if have lsblk; then lsblk -dno MODEL,SIZE "$1" 2>/dev/null | tr -s ' '
-  else printf '%s %sG' "$(cat "/sys/block/${1#/dev/}/device/model" 2>/dev/null)" "$(( $(cat "/sys/block/${1#/dev/}/size" 2>/dev/null || echo 0) / 2097152 ))"; fi
+  else printf '%s ' "$(cat "/sys/block/${1#/dev/}/device/model" 2>/dev/null)"
+       awk '{printf "%.1fG", $1 / 2097152}' "/sys/block/${1#/dev/}/size" 2>/dev/null; fi
 }
 
 if [ "$OS" = "Linux" ]; then
