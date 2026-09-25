@@ -42,9 +42,13 @@ const TITLE_MAX_BYTES = MAX_NAME_BYTES;
 
 const OVERRIDE_LABEL = 'I have checked this myself';
 
+/* Worded for every case that sets usedFallback: an endpoint that refused the
+ * schema, one that is never asked for it, and one that is sent it but is not
+ * known to enforce it (Hugging Face, where enforcement is per provider). It
+ * must not claim "not supported" for the last of those. */
 const FALLBACK_NOTE =
-  'Structured output was not supported by this endpoint — the response was ' +
-  'validated client-side instead.';
+  'The endpoint is not known to have enforced the record shape — the ' +
+  'response was validated client-side instead.';
 
 const INSCRIPTION_CAUTION =
   'Verify the transcription and translation before minting — this is machine ' +

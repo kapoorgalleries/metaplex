@@ -34,19 +34,22 @@ const PROVIDER_LABELS: Record<ProviderId, string> = {
   openai: 'OpenAI',
   deepseek: 'DeepSeek',
   github: 'GitHub Models',
+  huggingface: 'Hugging Face',
   azure: 'Azure OpenAI',
   trimurti: 'Trimurti',
 };
 
 /** What each provider calls its secret, for error copy. Telling a dealer the
  *  gateway "rejected the API key" sends them hunting for a key that does not
- *  exist — its secret is a passphrase. Kept in step with each entry's
- *  keyLabel below; test 46 asserts the two agree. */
+ *  exist — its secret is a passphrase. Hugging Face calls its secret a User
+ *  Access Token. Kept in step with each entry's keyLabel below; test 46
+ *  asserts the two agree. */
 const SECRET_NAMES: Record<ProviderId, string> = {
   gemini: 'API key',
   openai: 'API key',
   deepseek: 'API key',
   github: 'GitHub token',
+  huggingface: 'access token',
   azure: 'API key',
   trimurti: 'access key',
 };
@@ -117,6 +120,15 @@ export function joinUrl(base: string, path: string): string {
   return trimTrailingSlash(head) + path + query;
 }
 
+/** mapStatus writes its own advice straight after the endpoint's line, so a
+ *  line with no closing punctuation would run into it ("Rate limited Wait
+ *  and retry"). Applied wherever advice follows, whatever shape the line
+ *  arrived in; a line that stands alone is passed through verbatim. */
+function asSentence(line: string): string {
+  const trimmed = line.trim();
+  return trimmed === '' || /[.!?]$/.test(trimmed) ? trimmed : trimmed + '.';
+}
+
 /**
  * Shared HTTP status mapping for every provider, which is why it lives here
  * rather than in client.ts. It takes `model` because the 404 message names the
@@ -139,11 +151,66 @@ export function mapStatus(
     providerId: providerId,
     ...(providerCode ? { code: providerCode } : {}),
   };
+  /** The endpoint's line, terminated, for the branches that follow it with
+   *  advice of their own. */
+  const detail = providerMessage ? ' ' + asSentence(providerMessage) : '';
 
   if (status === 400) {
+    /* Hugging Face's router answers an unknown model, or one that no
+     * provider the dealer has enabled serves, with a 400 coded
+     * model_not_supported — never the 404 whose copy below names the model.
+     * Its own line says which model; what it cannot say is where providers
+     * are enabled. The added sentence names neither response_format nor a
+     * drift token, so client.ts still makes no retry of it. */
+    if (
+      providerId === 'huggingface' &&
+      providerCode === 'model_not_supported'
+    ) {
+      return aiError(
+        'bad_request',
+        (asSentence(providerMessage) ||
+          'Model "' + model + '" is not served.') +
+          ' Check the model id, or enable a provider that serves it under Inference Providers in your Hugging Face settings.',
+        opts,
+      );
+    }
     return aiError(
       'bad_request',
       providerMessage || 'The provider rejected the request.',
+      opts,
+    );
+  }
+  if (status === 402 && providerId === 'huggingface') {
+    /* The router's answer once the account's inference credit is spent —
+     * $0.10 a month on a free account, $2 on PRO — after which every call is
+     * refused until credit is bought or the month resets. Observed in dated
+     * 2026 logs as {"error":"You have depleted your monthly included
+     * credits. ..."}; Hugging Face does not document the status or the body.
+     * Kind rate_limit because it is a budget refusal like a 429, and because
+     * client.ts retries nothing but bad_request, so it is never repeated
+     * automatically. Scoped to this provider: every other provider's 402
+     * still maps exactly as before. */
+    return aiError(
+      'rate_limit',
+      label +
+        ' refused this request for lack of inference credit (402).' +
+        detail +
+        ' Add credit at huggingface.co/settings/billing, or wait for the monthly allowance to reset — until then every run fails the same way. Or switch provider.',
+      opts,
+    );
+  }
+  if (status === 422 && providerId === 'huggingface') {
+    /* 422 is how TGI rejects a body it cannot validate (InferError::
+     * ValidationError in text-generation-inference router/src/server.rs), and
+     * Hugging Face's own client treats a 422 from a chat completion alongside
+     * 400, 404 and 500. Read as the 400 it amounts to, so a refused
+     * response_format reaches client.ts's single schema-in-prompt retry —
+     * free, since the router bills only calls that succeed. Left to the
+     * generic line below it would be kind server, which is never retried.
+     * Scoped to this provider like the 402 above. */
+    return aiError(
+      'bad_request',
+      providerMessage || label + ' could not process the request (422).',
       opts,
     );
   }
@@ -162,8 +229,8 @@ export function mapStatus(
         label +
           ' relayed a ' +
           status +
-          ' from the model provider: ' +
-          providerMessage +
+          ' from the model provider:' +
+          detail +
           ' That is the provider key held on the gateway, not the access key in these settings.',
         opts,
       );
@@ -174,7 +241,6 @@ export function mapStatus(
      * before answering the CORS preflight, so the fetch simply fails and
      * client.ts names the allowlist in its network error instead. Anything
      * in front of the gateway that forwards the body lands here. */
-    const detail = providerMessage ? ' ' + providerMessage : '';
     return aiError(
       'auth',
       label +
@@ -202,7 +268,8 @@ export function mapStatus(
      * the storefront's own 4 MB-per-image ceiling can exceed it. */
     return aiError(
       'bad_request',
-      (providerMessage || 'The endpoint refused the request as too large.') +
+      (asSentence(providerMessage) ||
+        'The endpoint refused the request as too large.') +
         ' Lower "Image max edge" in AI settings, or send fewer detail photographs.',
       opts,
     );
@@ -213,7 +280,6 @@ export function mapStatus(
      * provider"); a provider's quota 429 is relayed with the provider's own
      * line. Either way the line is the difference between waiting and
      * knowing which budget needs raising. */
-    const detail = providerMessage ? ' ' + providerMessage : '';
     return aiError(
       'rate_limit',
       label +
@@ -230,7 +296,6 @@ export function mapStatus(
      * hiding that behind a generic line sends the dealer to the wrong fix.
      * client.ts passes '' for a body that was not JSON, so an HTML error
      * page never lands here. */
-    const detail = providerMessage ? ' ' + providerMessage : '';
     return aiError(
       'server',
       label +
@@ -270,16 +335,69 @@ function isContentFilter(body: unknown): boolean {
   );
 }
 
-/** Every provider here reports failures as `{ error: { message } }`. */
-function providerErrorMessage(body: unknown): string {
-  const wrapper = body as { error?: { message?: unknown } } | null | undefined;
-  const err = wrapper ? wrapper.error : undefined;
-  return err && typeof err.message === 'string' ? err.message : '';
+/**
+ * The endpoint's own explanation of a failure, verbatim, or '' when it gave
+ * none. Whatever shape it arrived in it is returned as written; mapStatus
+ * terminates it where it appends advice of its own.
+ *
+ * Most bodies here are `{ error: { message } }`, the OpenAI shape, and that
+ * shape is read first. Hugging Face's router writes the refusals it makes
+ * itself as `{ error: "..." }` instead — a bad token (401), spent credit
+ * (402), a token without the inference permission (403) — and so does TGI,
+ * the engine behind older dedicated Inference Endpoints (ErrorResponse
+ * { error, error_type }). Read only the first shape and those arrive with no
+ * explanation at all, which for a 402 is the one line that says what to do.
+ * The router also relays a downstream provider's body as that provider wrote
+ * it, so a top-level `message` or `detail` string is read too, in the order
+ * Hugging Face's own client reads them (@huggingface/inference 4.13.30,
+ * src/utils/request.ts).
+ *
+ * The gateway is held to the first shape alone. Its own bodies and
+ * everything it relays from a model provider use it, and mapStatus reads any
+ * 401 or 403 line from it that is not the gateway's own as a model provider
+ * refusing the key held ON the gateway. A platform error from whatever sits
+ * in front of the function, in some other shape, would then be blamed on the
+ * wrong secret; left unread it gets the plain "check the access key" line.
+ */
+export function providerErrorMessage(
+  body: unknown,
+  providerId: ProviderId,
+): string {
+  if (typeof body !== 'object' || body === null) {
+    return '';
+  }
+  const wrapper = body as {
+    error?: unknown;
+    message?: unknown;
+    detail?: unknown;
+  };
+  const err = wrapper.error;
+  if (
+    typeof err === 'object' &&
+    err !== null &&
+    typeof (err as { message?: unknown }).message === 'string'
+  ) {
+    return (err as { message: string }).message;
+  }
+  if (providerId === 'trimurti') {
+    return '';
+  }
+  if (typeof err === 'string') {
+    return err;
+  }
+  if (typeof wrapper.message === 'string') {
+    return wrapper.message;
+  }
+  if (typeof wrapper.detail === 'string') {
+    return wrapper.detail;
+  }
+  return '';
 }
 
-/** The endpoint's own machine-readable code, when it supplies one. Only the
- *  gallery's gateway does, and only client.ts reads it — to tell a refusal
- *  that cost nothing from one that already spent a budget reservation. */
+/** The endpoint's own machine-readable code, when it supplies one. The
+ *  gallery's gateway does, and client.ts reads it to tell a refusal that cost
+ *  nothing from one that already spent a budget reservation. Hugging Face's
+ *  router does for an unserved model, and mapStatus reads that one. */
 function providerErrorCode(body: unknown): string {
   const wrapper = body as { error?: { code?: unknown } } | null | undefined;
   const err = wrapper ? wrapper.error : undefined;
@@ -436,7 +554,12 @@ export const GEMINI: AiProvider = {
 
   extractText(status: number, body: unknown, cfg: ProviderSettings): string {
     if (status !== 200) {
-      throw mapStatus(status, providerErrorMessage(body), 'gemini', cfg.model);
+      throw mapStatus(
+        status,
+        providerErrorMessage(body, 'gemini'),
+        'gemini',
+        cfg.model,
+      );
     }
 
     const parsed = (body || {}) as GeminiBody;
@@ -495,18 +618,19 @@ export const GEMINI: AiProvider = {
 /* ------------------------------------------------------------------ */
 /* The OpenAI chat/completions dialect                                 */
 /*                                                                     */
-/* OpenAI, DeepSeek, GitHub Models and Azure OpenAI all speak it, so   */
-/* they are one factory rather than four near-copies. What genuinely   */
-/* differs between them is small and enumerated in OpenAiCompatible:   */
-/* the auth header, how much of the structured-output directive the    */
-/* endpoint tolerates, and the copy. Everything else — the content     */
-/* parts, the image labelling, the choices reading, the parameter-     */
-/* drift retry — is shared, so a fix to any of it lands in all four.   */
+/* OpenAI, DeepSeek, GitHub Models, Hugging Face, Azure OpenAI and the */
+/* gallery's own gateway all speak it, so they are one factory rather  */
+/* than six near-copies. What genuinely differs between them is small  */
+/* and enumerated in OpenAiCompatible: the auth header, how much of    */
+/* the structured-output directive the endpoint tolerates, the path,   */
+/* and the copy. Everything else — the content parts, the image        */
+/* labelling, the choices reading, the parameter-drift retry — is      */
+/* shared, so a fix to any of it lands in all of them.                 */
 /* ------------------------------------------------------------------ */
 
 type OpenAiContentPart =
   | { type: 'text'; text: string }
-  | { type: 'image_url'; image_url: { url: string; detail: string } };
+  | { type: 'image_url'; image_url: { url: string; detail?: string } };
 
 /**
  * 'low' downsamples to 512px, which makes any inscription unreadable. This is
@@ -552,7 +676,10 @@ function openaiImageUrl(img: ImagePart): string {
     : img.url;
 }
 
-function openaiContent(req: CatalogueRequest): OpenAiContentPart[] {
+function openaiContent(
+  req: CatalogueRequest,
+  imageDetail: boolean,
+): OpenAiContentPart[] {
   const content: OpenAiContentPart[] = [
     { type: 'text', text: buildUserPrompt(req) },
   ];
@@ -560,7 +687,9 @@ function openaiContent(req: CatalogueRequest): OpenAiContentPart[] {
     content.push({ type: 'text', text: labelFor(req.images, i) });
     content.push({
       type: 'image_url',
-      image_url: { url: openaiImageUrl(img), detail: OPENAI_IMAGE_DETAIL },
+      image_url: imageDetail
+        ? { url: openaiImageUrl(img), detail: OPENAI_IMAGE_DETAIL }
+        : { url: openaiImageUrl(img) },
     });
   });
   return content;
@@ -574,13 +703,24 @@ function openaiContent(req: CatalogueRequest): OpenAiContentPart[] {
  *  both) and rely on openaiRetryBody if a model of theirs renames it. */
 type TokenParam = 'max_tokens' | 'max_completion_tokens';
 
+/** The per-provider constants of the wire format, fixed once in the factory
+ *  so the two request builders can never disagree about them. */
+interface WireFormat {
+  auth: AuthStyle;
+  completionsPath: string;
+  tokenParam: TokenParam;
+  /** False to leave `detail` off every image part; see OpenAiCompatible. */
+  imageDetail: boolean;
+  /** True to state the schema in the system prompt beside a strict
+   *  json_schema directive too; see OpenAiCompatible. */
+  schemaInPrompt: boolean;
+}
+
 function openaiPlan(
   req: CatalogueRequest,
   cfg: ProviderSettings,
-  auth: AuthStyle,
   mode: ResponseFormatMode,
-  completionsPath: string,
-  tokenParam: TokenParam,
+  wire: WireFormat,
 ): HttpPlan {
   /* Key order is deliberate: response_format is emitted before `messages` so
    * that a provider echoing the head of a rejected body in its 400 shows the
@@ -589,7 +729,7 @@ function openaiPlan(
     model: cfg.model,
     temperature: req.temperature,
   };
-  body[tokenParam] = req.maxOutputTokens;
+  body[wire.tokenParam] = req.maxOutputTokens;
   /* Explicit, because the gallery's trimurti-gateway defaults to streaming
    * when the field is absent and would answer with an SSE stream this
    * driver cannot read. Every direct provider accepts it too. */
@@ -611,22 +751,24 @@ function openaiPlan(
   /* Anything short of strict json_schema leaves the model free to invent its
    * own field names, so the schema moves into the system prompt. Dropping the
    * directive without doing this is how you get valid JSON of the wrong
-   * shape — which parseCatalogueRecord then rejects, wasting the call. */
+   * shape — which parseCatalogueRecord then rejects, wasting the call. An
+   * endpoint that may pass a strict directive on to a backend that silently
+   * ignores it gets the schema in the prompt as well, for the same reason. */
   body.messages = [
     {
       role: 'system',
       content:
-        mode === 'schema'
+        mode === 'schema' && !wire.schemaInPrompt
           ? CATALOGUE_SYSTEM_PROMPT
           : CATALOGUE_SYSTEM_PROMPT + FALLBACK_SYSTEM_SUFFIX,
     },
-    { role: 'user', content: openaiContent(req) },
+    { role: 'user', content: openaiContent(req, wire.imageDetail) },
   ];
 
   return {
-    url: joinUrl(cfg.baseUrl, completionsPath),
+    url: joinUrl(cfg.baseUrl, wire.completionsPath),
     method: 'POST',
-    headers: openaiHeaders(cfg, auth),
+    headers: openaiHeaders(cfg, wire.auth),
     body: JSON.stringify(body),
   };
 }
@@ -641,14 +783,24 @@ interface OpenAiBody {
 }
 
 /**
- * The one concession to parameter drift, shared by all four: reasoning-family
- * models rename max_tokens and reject a non-default temperature. OpenAI's
- * gpt-5 family, DeepSeek's reasoner and whatever either publisher ships next
- * behind GitHub Models or an Azure deployment all fail the same way, so they
- * all get the same single retry — at most once, on a 400 only. A body that
- * already carries the current name (OpenAI proper sends it up front) has
- * nothing to rename, so only its temperature can go; once that is gone too
- * there is nothing left to change and the answer is null, never a loop.
+ * The one concession to parameter drift, shared by every OpenAI-dialect entry
+ * but one: reasoning-family models rename max_tokens and reject a non-default
+ * temperature. OpenAI's gpt-5 family,
+ * DeepSeek's reasoner and whatever either publisher ships next behind GitHub
+ * Models or an Azure deployment all fail the same way, so they all get the
+ * same single retry — at most once, on a 400 only. A body that already
+ * carries the current name (OpenAI proper sends it up front) has nothing to
+ * rename, so only its temperature can go; once that is gone too there is
+ * nothing left to change and the answer is null, never a loop.
+ *
+ * Hugging Face is the entry that opts out (driftRetry: false): its spec has
+ * no max_completion_tokens, so the rename would resend the request with a
+ * field the router never defined and no reply ceiling it recognises, and
+ * would report THAT call's answer in place of the real refusal — the drift
+ * regexp is loose enough ("does not support") to match a 400 about image
+ * input. Nothing documents a provider behind its router refusing a
+ * temperature the spec allows, so there is nothing else for this retry to
+ * fix there.
  */
 function openaiRetryBody(body: unknown, message: string): unknown | null {
   const b = (body || {}) as Record<string, unknown>;
@@ -701,14 +853,57 @@ interface OpenAiCompatible {
   /** The directive tried first, and the one tried after a 400 that names it. */
   primaryMode: ResponseFormatMode;
   fallbackMode: ResponseFormatMode;
+  /** Omit to declare it from primaryMode: a strict directive up front means
+   *  the endpoint enforces the schema. False for an endpoint that is SENT
+   *  the strict directive but is not known to enforce it, so that every run
+   *  is disclosed in the review panel as validated here rather than
+   *  constrained upstream (see AiProvider.structuredOutput). */
+  structuredOutput?: boolean;
+  /** Omit to send image_url.detail 'high'. False for an endpoint whose
+   *  documented image part is { url } alone, where `detail` is a field the
+   *  endpoint never defined and might refuse. */
+  imageDetail?: boolean;
+  /** True for an endpoint that may forward a strict json_schema directive to
+   *  a backend that silently ignores it: the schema is then stated in the
+   *  system prompt as well, so the model knows the field names either way. */
+  schemaInPrompt?: boolean;
+  /** Omit for the shared parameter-drift retry (openaiRetryBody). False for
+   *  an endpoint whose spec has no max_completion_tokens to rename into and
+   *  no documented temperature refusal: its 400 is then reported as it
+   *  arrived, never followed by a second call carrying an undefined field. */
+  driftRetry?: boolean;
   isOwnEndpoint?(baseUrl: string): boolean;
+}
+
+/**
+ * The isOwnEndpoint test for a provider whose first-party hostnames are
+ * known: true when the Base URL's host is one of them, so the request goes
+ * to the provider itself and a key is required. A fully-qualified name
+ * ending in a root dot is the same host. An unparseable URL answers true —
+ * it is configProblem's business, not this test's, and reading it as a
+ * proxy would wave a blank key through.
+ */
+function ownEndpoint(hosts: RegExp): (baseUrl: string) => boolean {
+  return baseUrl => {
+    try {
+      return hosts.test(new URL(baseUrl).hostname.replace(/\.$/, ''));
+    } catch (e) {
+      return true;
+    }
+  };
 }
 
 function openAiCompatible(spec: OpenAiCompatible): AiProvider {
   const shortLabel = PROVIDER_LABELS[spec.id];
   const supportsImages = spec.supportsImages !== false;
   const completionsPath = spec.completionsPath || '/chat/completions';
-  const tokenParam: TokenParam = spec.tokenParam || 'max_tokens';
+  const wire: WireFormat = {
+    auth: spec.auth,
+    completionsPath: completionsPath,
+    tokenParam: spec.tokenParam || 'max_tokens',
+    imageDetail: spec.imageDetail !== false,
+    schemaInPrompt: spec.schemaInPrompt === true,
+  };
 
   /** A text-only model must refuse the photographs rather than post them:
    *  the gallery's trimurti-gateway flattens them to "[photo attached — not
@@ -749,7 +944,10 @@ function openAiCompatible(spec: OpenAiCompatible): AiProvider {
     modelSuggestions: spec.modelSuggestions,
     supportsRemoteImageUrl: spec.supportsRemoteImageUrl,
     supportsImages: supportsImages,
-    structuredOutput: spec.primaryMode === 'schema',
+    structuredOutput:
+      spec.structuredOutput === undefined
+        ? spec.primaryMode === 'schema'
+        : spec.structuredOutput,
     completionsPath: completionsPath,
     persistKey: spec.persistKey !== false,
     modelLabel: spec.modelLabel,
@@ -759,14 +957,7 @@ function openAiCompatible(spec: OpenAiCompatible): AiProvider {
 
     buildRequest(req: CatalogueRequest, cfg: ProviderSettings): HttpPlan {
       requireImageSupport(req, cfg);
-      return openaiPlan(
-        req,
-        cfg,
-        spec.auth,
-        spec.primaryMode,
-        completionsPath,
-        tokenParam,
-      );
+      return openaiPlan(req, cfg, spec.primaryMode, wire);
     },
 
     buildFallbackRequest(
@@ -774,14 +965,7 @@ function openAiCompatible(spec: OpenAiCompatible): AiProvider {
       cfg: ProviderSettings,
     ): HttpPlan {
       requireImageSupport(req, cfg);
-      return openaiPlan(
-        req,
-        cfg,
-        spec.auth,
-        spec.fallbackMode,
-        completionsPath,
-        tokenParam,
-      );
+      return openaiPlan(req, cfg, spec.fallbackMode, wire);
     },
 
     extractText(status: number, body: unknown, cfg: ProviderSettings): string {
@@ -796,7 +980,7 @@ function openAiCompatible(spec: OpenAiCompatible): AiProvider {
         }
         throw mapStatus(
           status,
-          providerErrorMessage(body),
+          providerErrorMessage(body, spec.id),
           spec.id,
           cfg.model,
           providerErrorCode(body),
@@ -838,10 +1022,11 @@ function openAiCompatible(spec: OpenAiCompatible): AiProvider {
       }
       return text;
     },
-
-    retryBody: openaiRetryBody,
   };
 
+  if (spec.driftRetry !== false) {
+    provider.retryBody = openaiRetryBody;
+  }
   if (spec.isOwnEndpoint) {
     provider.isOwnEndpoint = spec.isOwnEndpoint;
   }
@@ -966,6 +1151,142 @@ export const GITHUB: AiProvider = openAiCompatible({
 });
 
 /* ------------------------------------------------------------------ */
+/* Hugging Face Inference Providers                                    */
+/* ------------------------------------------------------------------ */
+
+/** Hugging Face's own hosts: the router and every other huggingface.co
+ *  name, and dedicated Inference Endpoints, which live at
+ *  <id>.<region>.<cloud>.endpoints.huggingface.cloud. A token sent to any of
+ *  them goes to Hugging Face itself, so none is proxy mode — reading a
+ *  dedicated endpoint as a proxy would accept a blank token and hide the
+ *  stored-key warning, the trap Azure's per-tenant hosts already taught.
+ *  Spaces (*.hf.space) are deliberately absent: a Space runs code its owner
+ *  wrote, which is exactly what a dealer's own proxy is. */
+const HUGGINGFACE_OWN_HOSTS =
+  /(^|\.)(huggingface\.co|endpoints\.huggingface\.cloud)$/i;
+
+/** Families the Hub tags text-generation rather than image-text-to-text
+ *  (hub_repo_details, 2026-09-24): openai/gpt-oss, deepseek-ai's
+ *  DeepSeek-V4-Pro and R1, Qwen/Qwen3-Coder, moonshotai/Kimi-K2-Instruct and
+ *  zai-org/GLM-5.3. Their near-twins DO read images and must not match:
+ *  GLM-5.3-Flash, DeepSeek-V4.1-Flash, Kimi-K2.5 and K3. A ':provider' or
+ *  ':policy' suffix names the same model, so one may follow. Anchored on the
+ *  publisher namespace exactly as the router takes the id, because the Model
+ *  field does not always hold a Hub id: on a dedicated Inference Endpoint,
+ *  or a proxy, it holds a name the dealer chose, and a bare 'glm-5.3' may
+ *  well be serving a vision model — so a name without its namespace never
+ *  matches. What the router does with a photograph sent to a text-only model
+ *  — refuse the call, or drop the image and bill for a reading of nothing —
+ *  is not confirmed, which is why the photograph is refused here instead. */
+const HUGGINGFACE_TEXT_ONLY =
+  /^(openai\/gpt-oss-|deepseek-ai\/DeepSeek-(V4-Pro|R1)|Qwen\/Qwen3-Coder|moonshotai\/Kimi-K2-Instruct|zai-org\/GLM-5\.3(?=:|$))/i;
+
+/**
+ * Hugging Face Inference Providers: one OpenAI-compatible router, POST
+ * https://router.huggingface.co/v1/chat/completions, in front of many
+ * inference companies (novita, deepinfra, together, fireworks-ai, …) serving
+ * open-weight models, all paid for through one Hugging Face token. The facts
+ * this entry rests on are stated here in full; their sourcing — Hugging
+ * Face's docs (inference-providers: index, tasks/chat-completion, hub-api,
+ * guides/structured-output, pricing; inference-endpoints: tutorials/chat_bot,
+ * guides/autoscaling) and its own client code (@huggingface/inference
+ * 4.13.30, @huggingface/tasks 0.21.48, huggingface_hub 2.0.0), read
+ * 2026-09-24 — is laid out in research_notes/Hugging Face integration/
+ * inference_providers.md. Where nothing confirmed a point, this says so.
+ *
+ *  - The model is the Hub repo id, sent verbatim. By default the router
+ *    picks the fastest provider serving it (highest throughput); the dealer
+ *    can switch that account-wide default to cheapest or to their own
+ *    provider order at huggingface.co/settings/inference-providers, and a
+ *    suffix on the id overrides it per request: ':<provider>' pins one (at
+ *    the cost of automatic failover), ':fastest', ':cheapest' or
+ *    ':preferred' names a policy. Nothing here parses or strips the suffix.
+ *  - A strict json_schema response_format is in the router's documented
+ *    request spec, but whether it is ENFORCED is per provider and per model:
+ *    /v1/models reports supports_structured_output, and the docs' own example
+ *    shows one provider false beside three true for the same model. What a
+ *    provider without it does — refuse the directive or ignore it silently —
+ *    is not confirmed. Two consequences. schemaInPrompt: the model is told
+ *    the field names even if the directive goes nowhere, which costs the
+ *    serialised schema — about 8,600 characters as of this writing, a couple
+ *    of thousand prompt tokens — on EVERY run, paid for nothing on a
+ *    provider that does enforce the directive; that is
+ *    accepted here as correctness over cost, and no /models probe is made
+ *    to find out which kind answered. structuredOutput false: the directive
+ *    is sent, but since enforcement cannot be claimed the review panel
+ *    discloses every run as validated here rather than constrained
+ *    upstream, and parseCatalogueRecord checks the reply either way. A
+ *    refusal naming response_format (a 400, or a 422, which mapStatus reads
+ *    as a 400 here) is the single retry, with no directive at all —
+ *    json_object support per provider is no better known.
+ *  - max_tokens is the documented name for the reply ceiling;
+ *    max_completion_tokens is not in Hugging Face's spec, and temperature is
+ *    documented (0 to 2) with no provider recorded as refusing it. So the
+ *    shared parameter-drift retry is off (driftRetry false): a 400 or 422 is
+ *    reported as it arrived rather than resent with a field the spec never
+ *    defined and no reply ceiling the router recognises.
+ *  - Photographs go inline as base64 data URLs, as Hugging Face's own Python
+ *    client sends local images. A remote URL is documented too, but whether
+ *    every provider behind the router fetches one — an arweave original, at
+ *    full size — is not, and an inlined image has been through this page's
+ *    own downscale. image_url carries no `detail`: Hugging Face's spec
+ *    defines it as { url } alone.
+ *  - The router's own refusals are `{ error: "..." }` strings (401 bad token,
+ *    402 spent credit, 403 token without the inference permission), and an
+ *    unknown or unserved model is a 400 coded model_not_supported, never a
+ *    404; providerErrorMessage and mapStatus read all of them.
+ *  - CORS: Hugging Face's own guide builds a browser-only page that posts to
+ *    this router with a token, and third-party pages post image data URLs to
+ *    it the same way. Not observed from here: the router was unreachable from
+ *    the session that researched it.
+ *  - A dedicated Inference Endpoint speaks the same dialect at its own URL
+ *    plus /v1, with the endpoint's NAME as the model, and bills compute time
+ *    rather than per call. vLLM and SGLang are its recommended engines; one
+ *    still on TGI (maintenance mode since 2025-12-11) takes response_format in
+ *    TGI's own { type, value } shape (router/src/lib.rs, GrammarType), and
+ *    how it answers the OpenAI shape sent here has not been observed. A
+ *    scaled-to-zero endpoint answers 503 while its replica starts.
+ */
+export const HUGGINGFACE: AiProvider = openAiCompatible({
+  id: 'huggingface',
+  label: 'Hugging Face Inference Providers',
+  // Pre-filled: a fine-grained token with the inference permission alone.
+  keyUrl:
+    'https://huggingface.co/settings/tokens/new?ownUserPermissions=inference.serverless.write&tokenType=fineGrained',
+  // Every id here reads images (Hub task image-text-to-text) and was served
+  // live by at least two providers on 2026-09-24 (hub_repo_details). The
+  // default is the non-thinking Instruct edition, so "Max output tokens"
+  // goes to the record rather than to reasoning, and its card claims OCR in
+  // 32 languages and better handling of rare and ancient characters. No card
+  // read names Tibetan, Ranjana, Siddham or Newari script; that is untested.
+  defaultModel: 'Qwen/Qwen3-VL-235B-A22B-Instruct',
+  defaultBaseUrl: 'https://router.huggingface.co/v1',
+  modelSuggestions: [
+    'Qwen/Qwen3-VL-235B-A22B-Instruct',
+    'google/gemma-4-31B-it',
+    'Qwen/Qwen3.8-27B',
+    'zai-org/GLM-5.3-Flash',
+    'Qwen/Qwen2.5-VL-72B-Instruct',
+    'Qwen/Qwen3.5-397B-A17B',
+  ],
+  supportsRemoteImageUrl: false,
+  textOnlyModels: HUGGINGFACE_TEXT_ONLY,
+  modelLabel: 'Model',
+  keyLabel: 'Access token',
+  baseUrlHelp:
+    "A proxy here must accept POST {base}/chat/completions and forward the Authorization header. For a dedicated Inference Endpoint, use its URL plus /v1 (https://<id>.<region>.<cloud>.endpoints.huggingface.cloud/v1) and put the endpoint's name in Model, not a Hub model id; one that has scaled to zero answers 503 until its replica has started.",
+  note: 'Needs a fine-grained Hugging Face access token with the "Make calls to Inference Providers" permission and nothing else: it is saved in this browser\'s local storage, and a read or write token would also open the account\'s repositories. Free accounts get $0.10 of inference credit a month and PRO accounts $2; once it is spent, every run fails with "depleted your monthly included credits" (402) until you buy credit or the month resets. By default Hugging Face routes each run to the fastest provider serving the model — changeable in your Inference Providers settings — unless the model id ends in :provider (for example :deepinfra), :fastest, :cheapest or :preferred. Whether the record shape is strictly enforced depends on the provider that answers, so pin one for steadier results; because that cannot be confirmed from here, the schema is also written into every request (a couple of thousand extra prompt tokens a run), the reply is checked here, and the review panel marks every run as validated here rather than enforced by the endpoint. Models that think by default, such as Qwen3.8 and GLM-5.3-Flash, spend part of "Max output tokens" thinking. A dedicated Inference Endpoint works too, by changing the Base URL.',
+  auth: 'bearer',
+  primaryMode: 'schema',
+  fallbackMode: 'none',
+  structuredOutput: false,
+  imageDetail: false,
+  schemaInPrompt: true,
+  driftRetry: false,
+  isOwnEndpoint: ownEndpoint(HUGGINGFACE_OWN_HOSTS),
+});
+
+/* ------------------------------------------------------------------ */
 /* Azure OpenAI (Microsoft Foundry)                                    */
 /* ------------------------------------------------------------------ */
 
@@ -998,15 +1319,7 @@ export const AZURE: AiProvider = openAiCompatible({
   auth: 'api-key',
   primaryMode: 'schema',
   fallbackMode: 'json',
-  isOwnEndpoint(baseUrl: string): boolean {
-    try {
-      // A fully-qualified name ending in a root dot is the same host.
-      return AZURE_OWN_HOSTS.test(new URL(baseUrl).hostname.replace(/\.$/, ''));
-    } catch (e) {
-      // An unparseable URL is configProblem's business, not this test's.
-      return true;
-    }
-  },
+  isOwnEndpoint: ownEndpoint(AZURE_OWN_HOSTS),
 });
 
 /* ------------------------------------------------------------------ */
@@ -1104,15 +1417,7 @@ export const TRIMURTI: AiProvider = openAiCompatible({
   // cannot enforce one is the single schema-in-prompt retry.
   primaryMode: 'schema',
   fallbackMode: 'none',
-  isOwnEndpoint(baseUrl: string): boolean {
-    try {
-      return TRIMURTI_OWN_HOSTS.test(
-        new URL(baseUrl).hostname.replace(/\.$/, ''),
-      );
-    } catch (e) {
-      return true;
-    }
-  },
+  isOwnEndpoint: ownEndpoint(TRIMURTI_OWN_HOSTS),
 });
 
 /* ------------------------------------------------------------------ */
@@ -1124,18 +1429,22 @@ export const PROVIDERS: Record<ProviderId, AiProvider> = {
   openai: OPENAI,
   deepseek: DEEPSEEK,
   github: GITHUB,
+  huggingface: HUGGINGFACE,
   azure: AZURE,
   trimurti: TRIMURTI,
 };
 
 /** Display order in the settings form. Every ProviderId appears exactly once;
  *  a test asserts that, because settings.ts rebuilds the whole stored record
- *  from this list and an omission would silently drop a provider's config. */
+ *  from this list and an omission would silently drop a provider's config.
+ *  The two multi-publisher catalogues, GitHub Models and Hugging Face, sit
+ *  together; the gallery's own gateway stays last. */
 export const PROVIDER_IDS: ProviderId[] = [
   'gemini',
   'openai',
   'deepseek',
   'github',
+  'huggingface',
   'azure',
   'trimurti',
 ];
