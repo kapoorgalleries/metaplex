@@ -5,6 +5,7 @@ This repo is Kapoor Galleries' storefront for Indian, Himalayan and South Asian 
 - `ops/network/` has its own `AGENTS.md` for the LAN job. Follow it when you work there.
 - `.claude/README.md` explains the Supabase MCP server. It points at live production guest data and must stay read-only.
 - `docs/hugging-face.md` covers the Hugging Face setup in full.
+- Never stop, interrupt, or archive the provenance pipeline (the "Art provenance pipeline integration" session or anything it runs). Only Sanjay can change this.
 
 ## Hugging Face tooling available here
 
