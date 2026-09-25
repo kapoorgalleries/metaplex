@@ -109,9 +109,11 @@ function Npm-Global($pkg) { return ((Invoke-Native 'npm' @('install', '-g', '--n
 # A vendor's install.ps1 in a child PowerShell: an 'exit' or Set-StrictMode in it stays there. Returns
 # its exit code. $Flags go to the script's own param block (hf's -NoModifyPath), which Invoke-Expression cannot pass.
 function Invoke-Installer([string]$Url, [string]$Flags = '') {
-  $cmd = "if ([int][Net.ServicePointManager]::SecurityProtocol -ne 0) { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 }; "
-  if ($Flags) { $cmd += "& ([scriptblock]::Create((Invoke-RestMethod -Uri '$Url'))) $Flags" }
-  else { $cmd += "Invoke-RestMethod -Uri '$Url' | Invoke-Expression" }
+  # Only the download is made terminating: a vendor installer that relies on the default 'Continue'
+  # (Windows PowerShell 5.1 turns redirected native stderr into error records) keeps working.
+  $cmd = "if ([int][Net.ServicePointManager]::SecurityProtocol -ne 0) { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 }; try { `$s = Invoke-RestMethod -Uri '$Url' -ErrorAction Stop } catch { exit 1 }; "
+  if ($Flags) { $cmd += "& ([scriptblock]::Create(`$s)) $Flags" }
+  else { $cmd += "Invoke-Expression `$s" }
   return (Invoke-Native $PsExe @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', $cmd))
 }
 # Put a directory on the user's persistent PATH (and this session's) once.
@@ -132,9 +134,87 @@ function Invoke-Captured([string]$Exe, [string[]]$ArgList = @()) {
 function Test-Python {
   foreach ($probe in @(@('py', '-3', '--version'), @('python', '--version'))) {
     if (-not (Have $probe[0])) { continue }
-    if ((Invoke-Captured $probe[0] $probe[1..($probe.Count - 1)]).Out -match 'Python 3\.(\d+)\.' -and [int]$Matches[1] -ge 10) { return $true }
+    $r = Invoke-Captured $probe[0] $probe[1..($probe.Count - 1)]
+    if ($r.Code -eq 0 -and $r.Out -match 'Python 3\.(\d+)\.' -and [int]$Matches[1] -ge 10) { return $true }
   }
   return $false
+}
+# A child process reads a candidate user config in isolation, without this checkout's MCP entry.
+# The parent's CODEX_HOME and working directory are never modified. No OAuth/server calls.
+function Invoke-CodexConfig([string]$Dir, [string]$Action) {
+  $quoted = $Dir.Replace("'", "''")
+  $cmd = "`$ErrorActionPreference = 'Stop'; `$env:CODEX_HOME = '$quoted'; Set-Location -LiteralPath '$quoted'; try { `$ErrorActionPreference = 'Continue'; `$global:LASTEXITCODE = 1; & codex mcp $Action --json 2>`$null; exit `$LASTEXITCODE } catch { exit 1 }"
+  return (Invoke-Captured $PsExe @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', $cmd))
+}
+function Test-HfCodexEntry([string]$Json) {
+  try {
+    $entry = $Json | ConvertFrom-Json -ErrorAction Stop
+    if ($entry.enabled -eq $false -or @('https://huggingface.co/mcp', 'https://huggingface.co/mcp?login') -cnotcontains $entry.transport.url) { return $false }
+    foreach ($tool in $hfDeny) { if (@($entry.disabled_tools) -cnotcontains $tool) { return $false } }
+    return $true
+  } catch { return $false }
+}
+function Register-CodexHf {
+  $userDir = if ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path $env:USERPROFILE '.codex' }
+  $cfg = Join-Path $userDir 'config.toml'
+  $stage = Join-Path ([IO.Path]::GetTempPath()) ('trimurti-hf-mcp-' + [guid]::NewGuid().ToString('N'))
+  try {
+    New-Item -ItemType Directory -Path $stage | Out-Null
+    $candidate = Join-Path $stage 'config.toml'
+    $exists = Test-Path -LiteralPath $cfg
+    $original = $null
+    if ($exists) { $original = [IO.File]::ReadAllBytes($cfg); [IO.File]::WriteAllBytes($candidate, $original) }
+    if ((Invoke-CodexConfig $stage 'list').Code -ne 0) { throw 'user config could not be parsed; left unchanged' }
+    $entry = Invoke-CodexConfig $stage 'get huggingface'
+    if ($entry.Code -eq 0) {
+      if (-not (Test-HfCodexEntry $entry.Out)) { throw 'existing user huggingface entry has an incompatible URL, disabled server, or missing blocked tools; left unchanged' }
+      Log 'codex: compatible user huggingface MCP server already configured; left as is'; return
+    }
+    $addition = (@('', '# Hugging Face MCP (ops/network bootstrap). Sign in once: codex mcp login huggingface',
+      '[mcp_servers.huggingface]', ('url = "{0}?login"' -f $hfUrl),
+      ('disabled_tools = [{0}]' -f (($hfDeny | ForEach-Object { '"' + $_ + '"' }) -join ', '))) -join "`n") + "`n"
+    [IO.File]::AppendAllText($candidate, $addition)
+    $entry = Invoke-CodexConfig $stage 'get huggingface'
+    if ($entry.Code -ne 0 -or -not (Test-HfCodexEntry $entry.Out)) { throw 'cannot safely append to this user config; left unchanged. Add the Hugging Face entry manually.' }
+    if ($exists) {
+      if (-not (Test-Path -LiteralPath $cfg) -or [Convert]::ToBase64String([IO.File]::ReadAllBytes($cfg)) -cne [Convert]::ToBase64String($original)) { throw 'user config changed during validation; rerun' }
+    } elseif (Test-Path -LiteralPath $cfg) { throw 'user config appeared during validation; rerun' }
+    New-Item -ItemType Directory -Force -Path $userDir | Out-Null
+    [IO.File]::AppendAllText($cfg, $addition) # Preserve existing bytes, permissions and user entries.
+    Log 'codex: added the user huggingface MCP server'
+  } catch { Add-Failure 'hf-mcp-codex' "codex: $($_.Exception.Message)" }
+  finally { if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force } }
+}
+# 0 compatible, 3 absent, 1 unsupported/incompatible. Use properties, not a textual key match.
+# PS 5.1 ConvertFrom-Json does not accept comments: preserve those settings for manual review.
+function Get-HfClientState([string]$Client) {
+  $geminiDir = if ($env:GEMINI_CLI_HOME) { $env:GEMINI_CLI_HOME } else { $env:USERPROFILE }
+  $cfg = Join-Path $geminiDir '.gemini\settings.json'
+  if ($Client -eq 'claude') {
+    $dir = if ($env:CLAUDE_CONFIG_DIR) { $env:CLAUDE_CONFIG_DIR } else { $env:USERPROFILE }
+    $cfg = Join-Path $dir '.claude.json'
+  }
+  if (-not (Test-Path -LiteralPath $cfg)) { return 3 }
+  try {
+    $settings = [IO.File]::ReadAllText($cfg) | ConvertFrom-Json -ErrorAction Stop
+    if ($null -eq $settings -or $settings -isnot [pscustomobject]) { return 1 }
+    $servers = $settings.mcpServers
+    # A present-but-null mcpServers needs manual review, as in the bash validator; absent means absent.
+    if ($null -eq $servers) { if ($settings.PSObject.Properties['mcpServers']) { return 1 }; return 3 }
+    if ($servers -isnot [pscustomobject]) { return 1 }
+    $property = $servers.PSObject.Properties | Where-Object { $_.Name -ceq 'huggingface' } | Select-Object -First 1
+    if ($null -eq $property) { return 3 }
+    $entry = $property.Value
+    if ($Client -eq 'claude') {
+      if ($entry.type -cne 'http' -or @($hfUrl, "$($hfUrl)?login") -cnotcontains $entry.url) { return 1 }
+    } else {
+      # Gemini CLI 0.61 writes url + type "http"; older settings carry the deprecated httpUrl. Both count.
+      $gurl = if ($entry.PSObject.Properties['httpUrl']) { $entry.httpUrl } elseif ($entry.type -ceq 'http') { $entry.url } else { $null }
+      if (@($hfUrl, "$($hfUrl)?login") -cnotcontains $gurl) { return 1 }
+      foreach ($tool in $hfDeny) { if (@($entry.excludeTools) -cnotcontains $tool) { return 1 } }
+    }
+    return 0
+  } catch { return 1 }
 }
 # Node 20+ at most once per run; $true when it is on PATH afterwards.
 $NodeOk = $null
@@ -228,45 +308,33 @@ if (-not $SkipHf) {
       $rc = Invoke-Installer 'https://hf.co/cli/install.ps1' '-NoModifyPath'
       if ($env:USERPROFILE) { Add-UserPath (Join-Path $env:USERPROFILE '.local\bin') }
       Refresh-Path
-      if (-not (Have 'hf')) { Add-Failure 'hf' "hf install FAILED (installer exit $rc; https://hf.co/cli/install.ps1 needs Python 3.10+ and access to hf.co and pypi.org)" }
+      if ($rc -ne 0 -or -not (Have 'hf')) { Add-Failure 'hf' "hf install FAILED (installer exit $rc; https://hf.co/cli/install.ps1 needs Python 3.10+ and access to hf.co and pypi.org)" }
     }
   }
 
-  # Hugging Face's MCP server, user scope, added only when missing so a hand-made entry is never
-  # replaced. Why Codex gets OAuth through an appended table, Gemini a bearer header from $HF_TOKEN,
-  # and Claude Code nothing unless -WithClaudeHfMcp: see register_hf_mcp in bootstrap-ai-clis.sh.
-  # Registration does not need hf itself, so it runs even when the install failed.
+  # Validate user entries without logging config contents, which may hold credentials.
   $hfUrl = 'https://huggingface.co/mcp'
   $hfDeny = 'hf_jobs', 'create_repo', 'dynamic_space', 'hf_sandbox', 'hf_sandbox_exec', 'hf_sandbox_fs'
-  if (-not $SkipCodex -and (Have 'codex')) {
-    $codexHome = if ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path $env:USERPROFILE '.codex' }
-    $cfg = Join-Path $codexHome 'config.toml'
-    $known = ((Invoke-Captured 'codex' @('mcp', 'get', 'huggingface')).Code -eq 0) -or
-             ((Test-Path $cfg) -and (Select-String -Path $cfg -Pattern '^\s*\[mcp_servers\."?huggingface"?\s*\]' -Quiet))
-    if ($known) { Log 'codex: huggingface MCP server already configured; left as is' }
-    else {
-      New-Item -ItemType Directory -Force -Path $codexHome | Out-Null
-      $toml = @('', '# Hugging Face MCP (ops/network bootstrap). Sign in once: codex mcp login huggingface',
-                '[mcp_servers.huggingface]', ('url = "{0}?login"' -f $hfUrl),
-                ('disabled_tools = [{0}]' -f (($hfDeny | ForEach-Object { '"' + $_ + '"' }) -join ', ')))
-      [IO.File]::AppendAllText($cfg, ($toml -join "`n") + "`n")   # UTF-8 without a BOM
-      Log 'codex: added the huggingface MCP server'
-    }
-  }
+  if (-not $SkipCodex -and (Have 'codex')) { Register-CodexHf }
   if (-not $SkipGemini -and (Have 'gemini')) {
-    $gcfg = Join-Path $env:USERPROFILE '.gemini\settings.json'
-    if ((Test-Path $gcfg) -and (Select-String -Path $gcfg -Pattern '"huggingface"\s*:' -Quiet)) { Log 'gemini: huggingface MCP server already configured; left as is' }
-    else {
-      # Single quotes keep ${HF_TOKEN} for Gemini to expand; options after the positionals (--exclude-tools takes several values).
+    $state = Get-HfClientState 'gemini'
+    if ($state -eq 0) { Log 'gemini: compatible user huggingface MCP server already configured; left as is' }
+    elseif ($state -eq 3) {
+      # Single quotes preserve the placeholder, so neither argv nor settings contain the token value.
       $r = Invoke-Captured 'gemini' (@('mcp', 'add', '-s', 'user', '-t', 'http', 'huggingface', $hfUrl, '-H', 'Authorization: Bearer ${HF_TOKEN}', '--exclude-tools') + $hfDeny)
-      if ($r.Code -eq 0) { Log 'gemini: added the huggingface MCP server' } else { Write-Warning "gemini mcp add failed: $($r.Out)" }
-    }
+      if ($r.Code -eq 0 -and (Get-HfClientState 'gemini') -eq 0) { Log 'gemini: added the user huggingface MCP server' }
+      else { Add-Failure 'hf-mcp-gemini' 'gemini: Hugging Face MCP registration failed; check user settings' }
+    } else { Add-Failure 'hf-mcp-gemini' 'gemini: user settings need manual review (commented/unsupported JSON, incompatible URL or missing blocked tools); left unchanged' }
   }
   if ($WithClaudeHfMcp -and -not $SkipClaude -and (Have 'claude')) {
-    $r = Invoke-Captured 'claude' @('mcp', 'add', '--scope', 'user', '--transport', 'http', 'huggingface', "$($hfUrl)?login")
-    if ($r.Code -eq 0) { Log 'claude: added the huggingface MCP server' }
-    elseif ($r.Out -match 'already exists') { Log 'claude: huggingface MCP server already configured; left as is' }
-    else { Write-Warning "claude mcp add failed: $($r.Out)" }
+    $state = Get-HfClientState 'claude'
+    if ($state -eq 0) { Log 'claude: compatible user huggingface MCP server already configured; left as is' }
+    elseif ($state -eq 3) {
+      $r = Invoke-Captured 'claude' @('mcp', 'add', '--scope', 'user', '--transport', 'http', 'huggingface', "$($hfUrl)?login")
+      if ($r.Code -eq 0 -and (Get-HfClientState 'claude') -eq 0) { Log 'claude: added the user huggingface MCP server' }
+      else { Add-Failure 'hf-mcp-claude' 'claude: Hugging Face MCP registration failed; check user settings' }
+    } else { Add-Failure 'hf-mcp-claude' 'claude: user settings or the existing huggingface URL could not be validated; left unchanged' }
+    Log 'claude: verify account MCP tool restrictions before use; registration does not apply per-tool blocks'
   }
 }
 Refresh-Path
@@ -309,9 +377,9 @@ read it with Read-Host -AsSecureString, and it lasts for that window only.
            check:  hf auth whoami     ($env:HF_TOKEN, when set, overrides the stored login)
   HF MCP   codex   codex mcp login huggingface   (over SSH: ssh -t, add --no-browser, open the URL on
                    any machine, paste the redirect URL back)
-           gemini  sends $env:HF_TOKEN as its bearer token; unset, it gets HF's anonymous read-only tools.
-                   Start it with the token hf already stored, so it is never typed or copied to a file:
-                   $env:HF_TOKEN = hf auth token; gemini
+           gemini  sends $env:HF_TOKEN as its bearer token. Set it before starting Gemini.
+                   Set the token at a hidden prompt in your terminal, then start Gemini:
+                   $env:HF_TOKEN = [Net.NetworkCredential]::new('', (Read-Host 'HF token' -AsSecureString)).Password; gemini
                    Gemini loads MCP servers only in folders it trusts (it asks on the first run there).
            claude  the account's Hugging Face connector comes with the claude.ai login (/mcp lists it).
                    Signed in with setup-token or an API key? Rerun this script with -WithClaudeHfMcp,

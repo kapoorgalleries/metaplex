@@ -20,7 +20,7 @@ This guide is current as of 2026-09-24. It covers what is wired in, where it liv
 
 - Nothing that spends money goes ahead without Sanjay's explicit yes.
 - Nothing is published or uploaded to the Hub without his yes.
-- No token is ever written into a file.
+- Tokens are never copied into project files, saved commands, command arguments, logs or chat replies. Interactive sign-in may save credentials in the client's own credential store; the storefront uses the browser storage described below.
 - Gallery photographs, client records, inventory and valuations never go to the Hub.
 
 ## Storefront: Hugging Face as an AI provider
@@ -35,6 +35,8 @@ The provider's own note in the settings panel explains model suffixes (`:provide
 
 This provider is separate from the Trimurti gateway, the `trimurti` provider. The gateway lives in `kapoorgalleries/sb1-vuxiwzek` and was not changed.
 
+The token guidance above applies to the Inference Providers router. Whether a private dedicated Inference Endpoint accepts a Providers-only token is *unverified* (the endpoint docs name no permission; `research_notes/Hugging Face integration/inference_providers.md` §10), so do not broaden the token stored in the browser to reach one: put a trusted proxy that holds the endpoint's credential in Base URL and leave the token blank. Endpoint use remains a separate, reviewed setup.
+
 ## Agent skills (Claude Code, Codex, Gemini CLI)
 
 ### What is vendored
@@ -43,7 +45,7 @@ The skills below come from [`huggingface/skills`](https://github.com/huggingface
 
 How the copy was made and checked:
 
-- Each of the 136 files was fetched from `raw.githubusercontent.com` at that commit. Every one returned HTTP 200 with plain text, not an HTML error page.
+- 135 files were fetched from `raw.githubusercontent.com` at that commit; each returned HTTP 200 with plain text, not an HTML error page. The lock-hash check under "Updating the vendored skills" passed on 2026-09-25 (all 20 skills).
 - Every file's SHA-256 matches the digest in HF's published skills bucket (`hf://buckets/huggingface/skills/distribution/latest/skills.json`). HF built that bucket from the same commit.
 - The five scripts GitHub marks executable are executable here too:
   - `huggingface-llm-trainer/scripts/convert_to_gguf.py`, `estimate_cost.py` and `hf_benchmarks.py`
@@ -159,6 +161,12 @@ Run these from the repo root on a machine that can reach GitHub.
 
 Do not edit the vendored files by hand. A hand edit breaks the hash, and the next update overwrites it anyway.
 
+### Known restrictions in the pinned upstream skills
+
+The pinned examples are reference material and do not override `AGENTS.md`. Some upstream examples put a token in command arguments or ask for a token in chat; use the approved hidden-prompt or environment routes instead.
+
+Agents must not invoke `huggingface-paper-publisher/scripts/paper_manager.py` at this pin. Its `--create-pr` option prints "not yet implemented" and commits directly (`upload_file` is never passed `create_pr`), and its arXiv parser drops the first author (`authors_matches[1:]`, line 368). This is an instruction restriction, not a technical sandbox. Use source-verified paper metadata and separately reviewed publishing commands until both upstream bugs are fixed and a new pin is verified. No vendored bytes were changed for this restriction.
+
 ## Hugging Face MCP server
 
 The server is at `https://huggingface.co/mcp`.
@@ -195,6 +203,8 @@ claude mcp login huggingface        # over SSH: claude mcp login huggingface --n
 
 `ops/network/scripts/bootstrap-ai-clis.sh --with-claude-hf-mcp` runs the first command. `--no-browser` prints the authorization URL, and you paste the redirect URL back (`claude mcp login --help`, 2.1.282).
 
+The project's shell permission rules cover both the Bash and native PowerShell tools. These are separate rule namespaces in [Claude Code permissions](https://code.claude.com/docs/en/permissions#powershell).
+
 `claude mcp add` has no per-server tool filter. On Claude Code the guards are `AGENTS.md`, the account settings above, and the project's `.claude/settings.json`: `permissions.ask` rules for the paid and publishing tools (`hf_jobs`, `dynamic_space`, `create_repo`, the sandboxes, and the `hf jobs`, `hf endpoints`, `hf upload` and similar commands) and a `deny` for `hf auth token`, which prints the token. An ask rule prompts in every permission mode, including `bypassPermissions` (<https://code.claude.com/docs/en/permission-modes>). `.claude/README.md` lists the rules.
 
 ### Codex: `.codex/config.toml`
@@ -212,7 +222,7 @@ The project file defines `huggingface` at `https://huggingface.co/mcp?login`, wi
 2. **Sign in from inside the repo:** `codex mcp login huggingface`, adding `--no-browser` over SSH.
    - Run it inside the repo. Outside, Codex answers "No MCP server named 'huggingface' found."
    - Inside the trusted repo it found the server and went on to OAuth discovery. The sandbox could not reach huggingface.co, so the complete sign-in is *unverified*. HF advertises dynamic client registration, and Codex implements it.
-3. **Every repo at once:** the ops bootstrap appends the same table to `~/.codex/config.toml` at user scope. The project entry has identical values.
+3. **Every repo at once:** the ops bootstrap adds the same table to the user config (`$CODEX_HOME/config.toml`, or `~/.codex/config.toml` by default). It asks Codex to parse a private candidate outside this checkout before changing the user file. A project-only entry cannot satisfy this check. Compatible existing entries stay untouched; incompatible or unsupported configurations produce an `hf-mcp-codex` installation failure and remain unchanged.
 
 Details:
 
@@ -241,9 +251,13 @@ No project file is checked in. On each machine:
 
 Do not install HF's Gemini extension (`gemini extensions install https://github.com/huggingface/skills.git`). It brings all 25 skills, including the SageMaker ones, plus a second MCP server named `huggingface-skills`.
 
+The bootstrap checks the actual `mcpServers.huggingface` entry at user scope, including `GEMINI_CLI_HOME` when set. An unrelated key named `huggingface` does not count. It preserves existing compatible configurations and reports incompatible URLs or missing tool exclusions as an installation failure. Gemini itself accepts JSON comments; the shell validator and Windows PowerShell 5.1's `ConvertFrom-Json` accept plain JSON only (PowerShell 7 also accepts comments), so a commented or otherwise unsupported settings file is left untouched for manual review. A failed registration command or a failed post-registration check makes the overall install incomplete.
+
 ## The `hf` CLI
 
 The ops bootstrap installs `hf` with HF's official installer. It needs Python 3.10 or later, and `--skip-hf` leaves it out.
+
+The shell bootstrap also uses Python 3.10+ on PATH to validate client JSON without printing credentials. If Python is missing, registration stops before touching any client and the run reports `hf-mcp-validation`. PowerShell uses its built-in JSON parser. Successful registration checks configuration only, not OAuth completion, account permissions or live inference.
 
 | System | Installer command |
 | --- | --- |
@@ -255,7 +269,7 @@ The installer also installs the `hf-cli` skill globally (<https://huggingface.co
 | Task | Command |
 | --- | --- |
 | Sign in | `hf auth login`. It prints a URL and a short code: open <https://huggingface.co/oauth/device> on any machine and enter the code |
-| Sign in from a script | `hf auth login --token "$HF_TOKEN"` |
+| Script authentication | Inherit `HF_TOKEN` from a secure environment; do not pass it as a `--token` argument. For an interactive session, use `hf auth login` or the hidden prompt below. |
 | Check | `hf auth whoami` |
 | Update the CLI and the skill | `hf update` |
 
@@ -265,6 +279,14 @@ The installer also installs the `hf-cli` skill globally (<https://huggingface.co
 - Two HF sources are out of date:
   - <https://huggingface.co/docs/hub/agents-cli> still shows `hf skills add --claude --global`. In `hf` 2.0.0 `--claude` is gone and plain `hf skills add` already links the skill for Claude Code.
   - The Homebrew formula is at 1.32.0, behind PyPI's 2.0.0.
+
+For Gemini or a local script, Sanjay can enter a token without putting it in shell history or process arguments. In bash or zsh, in his terminal:
+
+```bash
+printf 'HF token: '; read -rs HF_TOKEN; printf '\n'; export HF_TOKEN
+```
+
+The bootstrap prints the corresponding `Read-Host -AsSecureString` instructions for PowerShell. Use `unset HF_TOKEN` (PowerShell: `Remove-Item Env:HF_TOKEN`) when finished. Do not enable shell tracing while handling credentials.
 
 ## Which token for what
 

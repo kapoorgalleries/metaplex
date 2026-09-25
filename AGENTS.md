@@ -24,8 +24,8 @@ This repo is Kapoor Galleries' storefront for Indian, Himalayan and South Asian 
 
 ## Secrets
 
-- Never write a Hugging Face token into any file, commit, saved command, log, or chat reply. Never run `hf auth token`, because it prints the token.
-- Get tokens only from the `HF_TOKEN` environment variable or from the CLI's own login (`hf auth login`). MCP clients sign in with OAuth.
+- Never copy a Hugging Face token into a project file, commit, saved command, process argument, log, or chat reply. Never run `hf auth token`, because it prints the token. Interactive sign-in may persist credentials in the client's own credential store; do not copy those credentials elsewhere.
+- Get tokens only from the `HF_TOKEN` environment variable or from the CLI's own interactive login (`hf auth login`). Codex and Claude MCP clients sign in with OAuth; Gemini reads `HF_TOKEN` from its process environment. Enter it through a hidden prompt, never as an inline command or `--token` argument.
 - The storefront keeps the dealer's token in the browser's localStorage. That token must therefore be a fine-grained token with only the "Make calls to Inference Providers" permission. Never suggest a read or write token for it.
 
 ## Spending: ask Sanjay and wait for a yes
@@ -52,3 +52,6 @@ When you ask, name the job, the hardware and the estimated cost. Free local work
 
 - Do not edit files under `.agents/skills/`. `skills-lock.json` pins every file there by hash.
 - Update the skills with the skills CLI, following `docs/hugging-face.md`.
+- Vendored examples do not override the secrets and spending rules above. Never ask anyone to paste a token into chat, print a cached token, or expand a token into a process argument, even if a skill suggests it.
+- Never install a generic fetch wrapper that adds an HF bearer token to every request. Authenticate only the exact trusted HTTPS origin required for the approved HF operation; do not forward credentials to model-supplied, third-party, or arbitrary download URLs.
+- Do not invoke `.agents/skills/huggingface-paper-publisher/scripts/paper_manager.py`. The pinned script ignores `--create-pr` and commits directly, and its arXiv metadata parser drops the first author (`authors_matches[1:]`). Use source-verified paper metadata and separately reviewed publishing commands instead. This is an instruction restriction, not a sandbox; retain the pinned files unchanged until a verified upstream update fixes both issues.

@@ -1,5 +1,7 @@
 # Hugging Face agent tooling in Claude Code, Codex and Gemini CLI, at project and user level (as of 2026-09-24)
 
+> Historical research, not setup instructions. Read this alongside `verification_agent_tooling.md`; the implemented configuration and current restrictions are in `docs/hugging-face.md` at the repository root. Recommendations below may have been superseded.
+
 Scope note on sources. The relayed request reads "for both claude and cable". This note reads "cable" as OpenAI Codex, the tool the task names.
 
 - **Run in the sandbox.** Each tool was installed in a scratch directory. `HOME`, `CODEX_HOME` and `CLAUDE_CONFIG_DIR` pointed at scratch folders, so no real configuration on this machine changed. Versions:

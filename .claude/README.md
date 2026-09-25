@@ -80,10 +80,15 @@ claude mcp login huggingface   # --no-browser over SSH
 ### Guarding paid and publishing tools
 
 The server's URL options only change which tools are *advertised*. A direct
-call to any tool still works. Three safeguards are in place:
+call to any tool still works. The guards are:
 
-- The HF account's MCP settings (<https://huggingface.co/settings/mcp>) keep
-  Jobs, Contribute Repos and Sandboxes off.
+- The HF account's MCP settings (<https://huggingface.co/settings/mcp>).
+  Nobody has read that page; what was observed is the claude.ai connector's
+  tool list on 2026-09-24 and 2026-09-25: `hf_fs`, `hf_whoami`,
+  `hub_repo_details`, `hub_repo_search` and `dynamic_space`, with no Jobs,
+  repo-creation or sandbox tool. So Dynamic Spaces appears to be on and
+  should be turned off there; Jobs, Contribute Repos and Sandboxes appear
+  to be off already.
 - Codex removes the risky tools in `.codex/config.toml` (`disabled_tools`).
 - Gemini removes them in its user-level `excludeTools` list, which the ops
   bootstrap writes.
@@ -94,11 +99,15 @@ call to any tool still works. Three safeguards are in place:
     `mcp__*__create_repo` and the three `hf_sandbox*` tools, whatever the
     server is named (`mcp__*__` covers the claude.ai connector and a
     user-scope entry alike);
-  - `permissions.ask` for the shell commands that spend or publish: `hf jobs`,
+  - `permissions.ask` for both Bash and PowerShell commands that spend or publish: `hf jobs`,
     `hf endpoints`, `hf sandbox`, `hf spaces`, `hf repos`, `hf upload`,
     `hf upload-large-folder`, `hf cp`, `hf sync`, `hf buckets`,
     `hf collections`, `hf discussions`, `hf webhooks`;
-  - `permissions.deny` for `hf auth token`, which prints the stored token.
+  - `permissions.deny` in both Bash and PowerShell for `hf auth token`, which
+    prints the stored token. Claude Code treats these as separate tools, so
+    each has its own rules. The deny matches the direct form only, not the
+    program by path or inside a subshell (docs, "What a Bash rule doesn't
+    match"); the rule in `AGENTS.md` is what forbids it.
 
 An ask rule prompts in every permission mode, including `bypassPermissions`
 ([docs](https://code.claude.com/docs/en/permission-modes)). The file declares

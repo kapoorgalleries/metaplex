@@ -1,5 +1,7 @@
 # Hugging Face Inference Providers as a storefront cataloguing provider (as of 2026-09-24)
 
+> Historical research, not setup instructions. Read this alongside `verification_inference_providers.md`; the implemented behavior and current restrictions are in `docs/hugging-face.md` at the repository root. Recommendations below may have been superseded.
+
 Purpose: establish, with sources, every fact needed to add Hugging Face Inference Providers (the OpenAI-compatible "router") as a seventh entry in `js/packages/web/src/ai/providers.ts`, built by the existing `openAiCompatible` factory.
 
 Confidence labels used below:

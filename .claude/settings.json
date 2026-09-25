@@ -19,8 +19,26 @@
       "Bash(hf buckets *)",
       "Bash(hf collections *)",
       "Bash(hf discussions *)",
-      "Bash(hf webhooks *)"
+      "Bash(hf webhooks *)",
+      "PowerShell(hf jobs *)",
+      "PowerShell(hf endpoints *)",
+      "PowerShell(hf sandbox *)",
+      "PowerShell(hf spaces *)",
+      "PowerShell(hf repos *)",
+      "PowerShell(hf upload *)",
+      "PowerShell(hf upload-large-folder *)",
+      "PowerShell(hf cp *)",
+      "PowerShell(hf sync *)",
+      "PowerShell(hf buckets *)",
+      "PowerShell(hf collections *)",
+      "PowerShell(hf discussions *)",
+      "PowerShell(hf webhooks *)"
     ],
-    "deny": ["Bash(hf auth token)", "Bash(hf auth token *)"]
+    "deny": [
+      "Bash(hf auth token)",
+      "Bash(hf auth token *)",
+      "PowerShell(hf auth token)",
+      "PowerShell(hf auth token *)"
+    ]
   }
 }

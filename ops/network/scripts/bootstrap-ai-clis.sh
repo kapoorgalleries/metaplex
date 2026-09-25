@@ -289,61 +289,137 @@ install_hf() {
   have hf || { warn "the hf installer finished, but there is no hf in ~/.local/bin"; return 1; }
 }
 
-# Hugging Face's MCP server, user scope, added only when missing so a hand-made entry is never
-# replaced. The auth follows what each client can do:
-#  - codex:  OAuth (the ?login URL); sign in once with `codex mcp login huggingface`. The table is
-#            appended rather than written by `codex mcp add`, because add starts a browser OAuth
-#            flow as soon as it detects OAuth support and would hang this unattended run
-#            (codex-rs/cli/src/mcp_cmd.rs, rust-v0.156.1). A later `codex mcp add` keeps the table.
-#  - gemini: its OAuth needs a browser and a localhost callback on this machine, which SSH sessions
-#            lack, so it sends `Authorization: Bearer ${HF_TOKEN}`. Gemini expands the variable
-#            when it loads settings; unset, it is empty and HF serves its anonymous read-only tools.
-#  - claude: not by default. A claude.ai login already brings the account's Hugging Face connector,
-#            and a server added in Claude Code at the same URL takes precedence and hides it, while
-#            a different URL loads the same tools twice (code.claude.com/docs/en/mcp, "Use MCP
-#            servers from claude.ai"). --with-claude-hf-mcp is for machines signed in with
-#            `claude setup-token` or an API key, which never fetch connectors.
-# HF's URL presets only choose which tools are advertised, so the tools that create repos or can
-# spend money (hf_jobs, create_repo, dynamic_space, the sandboxes) are removed in each client:
-# disabled_tools (codex), excludeTools (gemini). Claude Code has no per-server filter in `claude mcp add`.
-# Registration does not need hf itself, so it runs even when the install failed.
+# User-scope registration must not mistake this checkout's project entry for the user's.
+# Codex parses a private candidate config outside the checkout before any append. Existing
+# entries are preserved, but an incompatible URL/tool filter is an installation failure.
+# Gemini stores a literal environment reference, never the value of HF_TOKEN, in its settings.
+# Claude is opt-in because a local entry can mask a claude.ai connector.
 HF_MCP_URL="https://huggingface.co/mcp"
 HF_DENY="hf_jobs create_repo dynamic_space hf_sandbox hf_sandbox_exec hf_sandbox_fs"
-register_hf_mcp() {
-  local cfg list="" t out
-  if [ "$SKIP_CODEX" = 0 ] && have codex; then
-    cfg="${CODEX_HOME:-$HOME/.codex}/config.toml"
-    if codex mcp get huggingface >/dev/null 2>&1 || grep -Eqs '^[[:space:]]*\[mcp_servers\."?huggingface"?[[:space:]]*\]' "$cfg"; then
-      log "codex: huggingface MCP server already configured; left as is"
-    else
-      for t in $HF_DENY; do list="${list:+$list, }\"$t\""; done
-      mkdir -p "$(dirname "$cfg")"
-      printf '\n# Hugging Face MCP (ops/network bootstrap). Sign in once: codex mcp login huggingface\n[mcp_servers.huggingface]\nurl = "%s?login"\ndisabled_tools = [%s]\n' "$HF_MCP_URL" "$list" >> "$cfg"
-      log "codex: added the huggingface MCP server"
+
+# JSON checks use Python's standard library; hf itself needs Python 3.10+. No HF network calls.
+json_python() {
+  local p
+  for p in python3 python; do
+    if have "$p" && "$p" -c 'import sys; sys.exit(sys.version_info < (3, 10))' >/dev/null 2>&1; then
+      printf '%s' "$p"; return 0
     fi
+  done
+  return 1
+}
+check_hf_json() {  # codex get --json on stdin
+  local py
+  py="$(json_python)" || return 1
+  "$py" -c 'import json, sys
+try:
+    s = json.load(sys.stdin)
+    required = set("hf_jobs create_repo dynamic_space hf_sandbox hf_sandbox_exec hf_sandbox_fs".split())
+    valid = s.get("transport", {}).get("url") in ("https://huggingface.co/mcp", "https://huggingface.co/mcp?login") and s.get("enabled", True) is not False and required.issubset(s.get("disabled_tools") or [])
+    sys.exit(0 if valid else 1)
+except (ValueError, TypeError, AttributeError):
+    sys.exit(1)'
+}
+register_codex_hf() (
+  # Subshell confines cleanup/traps and config overrides to this operation.
+  local cfg="${CODEX_HOME:-$HOME/.codex}/config.toml" stage list="" t out exists=0
+  stage="$(mktemp -d "${TMPDIR:-/tmp}/trimurti-hf-mcp.XXXXXX")" || { warn "codex: could not create a staging directory under ${TMPDIR:-/tmp}"; return 1; }
+  trap 'rm -rf "$stage"' EXIT
+  if [ -e "$cfg" ]; then
+    cp "$cfg" "$stage/config.toml" && cp "$cfg" "$stage/original.toml" || { warn "codex: cannot read $cfg; left unchanged"; return 1; }
+    exists=1
+  elif [ -L "$cfg" ]; then
+    warn "codex: user config is a dangling symlink; left unchanged"; return 1
   fi
+  # These commands only read config, never start MCP servers or OAuth. The child override
+  # prevents project settings from making a missing user entry look already configured.
+  if ! (cd "$stage" && CODEX_HOME="$stage" codex mcp list --json >/dev/null 2>&1); then
+    warn "codex: user config could not be parsed; left unchanged"; return 1
+  fi
+  if out="$(cd "$stage" && CODEX_HOME="$stage" codex mcp get huggingface --json 2>/dev/null)"; then
+    if printf '%s' "$out" | check_hf_json; then
+      log "codex: compatible user huggingface MCP server already configured; left as is"; return 0
+    fi
+    warn "codex: existing user huggingface entry has an incompatible URL, disabled server, or missing blocked tools; left unchanged"; return 1
+  fi
+  for t in $HF_DENY; do list="${list:+$list, }\"$t\""; done
+  printf '\n# Hugging Face MCP (ops/network bootstrap). Sign in once: codex mcp login huggingface\n[mcp_servers.huggingface]\nurl = "%s?login"\ndisabled_tools = [%s]\n' "$HF_MCP_URL" "$list" > "$stage/addition.toml" || { warn "codex: could not stage the addition; left unchanged"; return 1; }
+  cat "$stage/addition.toml" >> "$stage/config.toml" || { warn "codex: could not stage the addition; left unchanged"; return 1; }
+  if ! out="$(cd "$stage" && CODEX_HOME="$stage" codex mcp get huggingface --json 2>/dev/null)" || ! printf '%s' "$out" | check_hf_json; then
+    warn "codex: cannot safely append to this user config; left unchanged. Add the Hugging Face entry manually."; return 1
+  fi
+  # Preserve all existing bytes, permissions and symlinks; refuse a config changed during validation.
+  if [ "$exists" = 1 ]; then
+    cmp -s "$cfg" "$stage/original.toml" || { warn "codex: user config changed during validation; rerun"; return 1; }
+  elif [ -e "$cfg" ] || [ -L "$cfg" ]; then
+    warn "codex: user config appeared during validation; rerun"; return 1
+  fi
+  mkdir -p "$(dirname "$cfg")" && cat "$stage/addition.toml" >> "$cfg" || { warn "codex: could not write user config"; return 1; }
+  log "codex: added the user huggingface MCP server"
+)
+check_client_hf() {  # client; 0 compatible, 3 absent, 1 unsupported/incompatible; no secret output
+  local py cfg="${GEMINI_CLI_HOME:-$HOME}/.gemini/settings.json"
+  [ "$1" != claude ] || cfg="${CLAUDE_CONFIG_DIR:-$HOME}/.claude.json"
+  py="$(json_python)" || return 1
+  "$py" - "$cfg" "$1" <<'PYJSON'
+import json, pathlib, sys
+p = pathlib.Path(sys.argv[1])
+if not p.exists():
+    sys.exit(3)
+try:
+    settings = json.loads(p.read_text(encoding="utf-8-sig"))
+    servers = settings.get("mcpServers", {})
+    if not isinstance(servers, dict):
+        sys.exit(1)
+    if "huggingface" not in servers:
+        sys.exit(3)
+    s = servers["huggingface"]
+    required = set("hf_jobs create_repo dynamic_space hf_sandbox hf_sandbox_exec hf_sandbox_fs".split())
+    urls = ("https://huggingface.co/mcp", "https://huggingface.co/mcp?login")
+    # Gemini CLI 0.61 writes url + type "http"; older settings carry the deprecated httpUrl. Both count.
+    gemini_url = s.get("httpUrl") if "httpUrl" in s else (s.get("url") if s.get("type") == "http" else None)
+    valid = (s.get("url") in urls and s.get("type") == "http") if sys.argv[2] == "claude" else (gemini_url in urls and required.issubset(s.get("excludeTools") or []))
+    sys.exit(0 if valid else 1)
+except (ValueError, OSError, TypeError, AttributeError):
+    sys.exit(1)
+PYJSON
+}
+register_hf_mcp() {
+  local state
+  if { [ "$SKIP_CODEX" = 0 ] && have codex; } || { [ "$SKIP_GEMINI" = 0 ] && have gemini; } || { [ "$CLAUDE_HF_MCP" = 1 ] && [ "$SKIP_CLAUDE" = 0 ] && have claude; }; then
+    json_python >/dev/null || { warn "Hugging Face MCP validation needs Python 3.10+ on PATH; user configs left unchanged"; failed hf-mcp-validation; return 1; }
+  fi
+  if [ "$SKIP_CODEX" = 0 ] && have codex; then register_codex_hf || failed hf-mcp-codex; fi
   if [ "$SKIP_GEMINI" = 0 ] && have gemini; then
-    if grep -Eqs '"huggingface"[[:space:]]*:' "$HOME/.gemini/settings.json"; then
-      log "gemini: huggingface MCP server already configured; left as is"
-    else
-      # Options go after the two positionals: --exclude-tools takes several values and would swallow them.
-      # shellcheck disable=SC2016,SC2086  # ${HF_TOKEN} is for Gemini to expand; $HF_DENY splits into one value per tool
-      if out="$(gemini mcp add -s user -t http huggingface "$HF_MCP_URL" -H 'Authorization: Bearer ${HF_TOKEN}' --exclude-tools $HF_DENY 2>&1)"; then
-        log "gemini: added the huggingface MCP server"
+    check_client_hf gemini; state=$?
+    if [ "$state" = 0 ]; then
+      log "gemini: compatible user huggingface MCP server already configured; left as is"
+    elif [ "$state" = 3 ]; then
+      # Options follow positionals; --exclude-tools consumes multiple values. Never echo CLI errors:
+      # they may contain interpolated configuration credentials.
+      # shellcheck disable=SC2016,SC2086
+      if gemini mcp add -s user -t http huggingface "$HF_MCP_URL" -H 'Authorization: Bearer ${HF_TOKEN}' --exclude-tools $HF_DENY >/dev/null 2>&1 && check_client_hf gemini; then
+        log "gemini: added the user huggingface MCP server"
       else
-        warn "gemini mcp add failed: $out"
+        warn "gemini: Hugging Face MCP registration failed; check user settings"; failed hf-mcp-gemini
       fi
+    else
+      warn "gemini: user settings need manual review (commented/unsupported JSON, incompatible URL or missing blocked tools); left unchanged"; failed hf-mcp-gemini
     fi
   fi
   if [ "$CLAUDE_HF_MCP" = 1 ] && [ "$SKIP_CLAUDE" = 0 ] && have claude; then
-    if out="$(claude mcp add --scope user --transport http huggingface "$HF_MCP_URL?login" 2>&1)"; then
-      log "claude: added the huggingface MCP server"
+    check_client_hf claude; state=$?
+    if [ "$state" = 0 ]; then
+      log "claude: compatible user huggingface MCP server already configured; left as is"
+    elif [ "$state" = 3 ]; then
+      if claude mcp add --scope user --transport http huggingface "$HF_MCP_URL?login" >/dev/null 2>&1 && check_client_hf claude; then
+        log "claude: added the user huggingface MCP server"
+      else
+        warn "claude: Hugging Face MCP registration failed; check user settings"; failed hf-mcp-claude
+      fi
     else
-      case "$out" in
-        *"already exists"*) log "claude: huggingface MCP server already configured; left as is" ;;
-        *) warn "claude mcp add failed: $out" ;;
-      esac
+      warn "claude: user settings or the existing huggingface URL could not be validated; left unchanged"; failed hf-mcp-claude
     fi
+    log "claude: verify account MCP tool restrictions before use; registration does not apply per-tool blocks"
   fi
 }
 
@@ -406,9 +482,9 @@ the terminal's echo off, and it lasts for that shell only.
            check:  hf auth whoami     (HF_TOKEN in the environment overrides the stored login)
   HF MCP   codex   codex mcp login huggingface   (over SSH: ssh -t, add --no-browser, open the URL on
                    any machine, paste the redirect URL back)
-           gemini  sends $HF_TOKEN as its bearer token; unset, it gets HF's anonymous read-only tools.
-                   Start it with the token hf already stored, so it is never typed or copied to a file:
-                   HF_TOKEN="$(hf auth token)" gemini
+           gemini  sends $HF_TOKEN as its bearer token. Set it before starting Gemini.
+                   Set the token at a hidden prompt in your terminal, then start Gemini:
+                   printf 'HF token: '; read -rs HF_TOKEN; echo; export HF_TOKEN; gemini
                    Gemini loads MCP servers only in folders it trusts (it asks on the first run there).
            claude  the account's Hugging Face connector comes with the claude.ai login (/mcp lists it).
                    Signed in with setup-token or an API key? Rerun this script with --with-claude-hf-mcp,

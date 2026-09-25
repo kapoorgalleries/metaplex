@@ -3556,7 +3556,7 @@ describe('providers — Hugging Face Inference Providers', () => {
     ).toContain('by any provider. Check the model id');
   });
 
-  it("88. the 402 and 422 mappings are Hugging Face's alone; the gateway still reads one shape", () => {
+  it("88. the 402 and 422 mappings and additional error shapes are Hugging Face's alone", () => {
     // Every other provider's 402 and 422 map exactly as they did.
     PROVIDER_IDS.filter(id => id !== 'huggingface').forEach(id => {
       const cfg = cfgFor(PROVIDERS[id], 'k');
@@ -3578,13 +3578,21 @@ describe('providers — Hugging Face Inference Providers', () => {
       expect(coded.message).toBe('nope');
     });
 
-    // A direct provider's front door may answer in the string shape too, and
-    // its line is now kept rather than dropped.
-    expect(
-      thrownAiError(() =>
-        OPENAI.extractText(401, { error: 'Unauthorized' }, openaiCfg('k')),
-      ).message,
-    ).toContain('Unauthorized.');
+    // The legacy providers retain their original parser, including direct
+    // providers whose front door might return a different body shape.
+    PROVIDER_IDS.filter(id => id !== 'huggingface').forEach(id => {
+      const provider = PROVIDERS[id];
+      const cfg = cfgFor(provider, 'k');
+      [
+        { error: 'Platform refusal' },
+        { message: 'Platform refusal' },
+        { detail: 'Platform refusal' },
+      ].forEach(body => {
+        expect(
+          thrownAiError(() => provider.extractText(401, body, cfg)).message,
+        ).not.toContain('Platform refusal');
+      });
+    });
 
     // The gateway is held to the OpenAI shape: a 401 in any other shape is
     // not blamed on the provider key held ON the gateway.
@@ -3885,5 +3893,57 @@ describe('providers — Hugging Face Inference Providers', () => {
         HUGGINGFACE.extractText(422, { error: 'Bad body' }, hf),
       ).message,
     ).toBe('Bad body');
+  });
+
+  it('94. additional HF error shapes never enable a new retry for existing providers', async () => {
+    // Both retry gates the driver has: the schema-in-prompt retry, which
+    // matches a line naming response_format, and the parameter-drift retry,
+    // which matches "does not support". Neither may fire on a line that only
+    // the Hugging Face reader would have surfaced.
+    const schemaMessage = 'response_format json_schema is not supported';
+    const driftMessage =
+      "Unsupported value: 'temperature' does not support 0.2 with this model";
+    for (const message of [schemaMessage, driftMessage]) {
+      const bodies = [
+        { error: message },
+        { message: message },
+        { detail: message },
+      ];
+      for (const id of PROVIDER_IDS) {
+        for (const body of bodies) {
+          const stub = stubFetch([
+            { status: 400, body: body },
+            { status: 200, body: openaiOk(JSON.stringify(recordFixture())) },
+          ]);
+          const run = runCatalogue(
+            id,
+            settingsFixture(id, 'test-key'),
+            dataUrlRequest(),
+            { fetchImpl: stub.impl },
+          );
+          if (id === 'huggingface' && message === schemaMessage) {
+            const result = await run;
+            expect(result.usedFallback).toBe(true);
+            expect(stub.calls).toHaveLength(2);
+            expect(
+              (JSON.parse(String(stub.calls[1].init.body)) as RawNode)
+                .response_format,
+            ).toBeUndefined();
+          } else if (id === 'huggingface') {
+            // driftRetry is off for this entry: the router's line, once.
+            const err = await rejectedAiError(run);
+            expect(stub.calls).toHaveLength(1);
+            expect(err.kind).toBe('bad_request');
+            expect(err.message).toBe(driftMessage);
+          } else {
+            const err = await rejectedAiError(run);
+            expect(stub.calls).toHaveLength(1);
+            expect(err.kind).toBe('bad_request');
+            expect(err.status).toBe(400);
+            expect(err.message).toBe('The provider rejected the request.');
+          }
+        }
+      }
+    }
   });
 });

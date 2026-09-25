@@ -352,12 +352,19 @@ function isContentFilter(body: unknown): boolean {
  * Hugging Face's own client reads them (@huggingface/inference 4.13.30,
  * src/utils/request.ts).
  *
- * The gateway is held to the first shape alone. Its own bodies and
- * everything it relays from a model provider use it, and mapStatus reads any
- * 401 or 403 line from it that is not the gateway's own as a model provider
- * refusing the key held ON the gateway. A platform error from whatever sits
- * in front of the function, in some other shape, would then be blamed on the
- * wrong secret; left unread it gets the plain "check the access key" line.
+ * Every other provider is held to the OpenAI shape alone, as before this
+ * entry existed. Reading the extra shapes for them would hand a platform
+ * error's line to the driver's schema-in-prompt and parameter-drift retries,
+ * which would resend a request the provider had refused once (a Gemini 400
+ * in the string shape made two requests before this was narrowed). Hugging
+ * Face needs the extra shapes; adding them must not change another
+ * provider's retries. The gateway in particular: its own bodies and
+ * everything it relays from a model provider use the OpenAI shape, and
+ * mapStatus reads any 401 or 403 line from it that is not the gateway's own
+ * as a model provider refusing the key held ON the gateway. A platform error
+ * from whatever sits in front of the function, in some other shape, would
+ * then be blamed on the wrong secret; left unread it gets the plain "check
+ * the access key" line.
  */
 export function providerErrorMessage(
   body: unknown,
@@ -379,7 +386,7 @@ export function providerErrorMessage(
   ) {
     return (err as { message: string }).message;
   }
-  if (providerId === 'trimurti') {
+  if (providerId !== 'huggingface') {
     return '';
   }
   if (typeof err === 'string') {
@@ -1274,8 +1281,8 @@ export const HUGGINGFACE: AiProvider = openAiCompatible({
   modelLabel: 'Model',
   keyLabel: 'Access token',
   baseUrlHelp:
-    "A proxy here must accept POST {base}/chat/completions and forward the Authorization header. For a dedicated Inference Endpoint, use its URL plus /v1 (https://<id>.<region>.<cloud>.endpoints.huggingface.cloud/v1) and put the endpoint's name in Model, not a Hub model id; one that has scaled to zero answers 503 until its replica has started.",
-  note: 'Needs a fine-grained Hugging Face access token with the "Make calls to Inference Providers" permission and nothing else: it is saved in this browser\'s local storage, and a read or write token would also open the account\'s repositories. Free accounts get $0.10 of inference credit a month and PRO accounts $2; once it is spent, every run fails with "depleted your monthly included credits" (402) until you buy credit or the month resets. By default Hugging Face routes each run to the fastest provider serving the model — changeable in your Inference Providers settings — unless the model id ends in :provider (for example :deepinfra), :fastest, :cheapest or :preferred. Whether the record shape is strictly enforced depends on the provider that answers, so pin one for steadier results; because that cannot be confirmed from here, the schema is also written into every request (a couple of thousand extra prompt tokens a run), the reply is checked here, and the review panel marks every run as validated here rather than enforced by the endpoint. Models that think by default, such as Qwen3.8 and GLM-5.3-Flash, spend part of "Max output tokens" thinking. A dedicated Inference Endpoint works too, by changing the Base URL.',
+    "A proxy here must accept POST {base}/chat/completions and forward or supply the Authorization header. A private dedicated Inference Endpoint is not confirmed to accept this Providers-only token, so rather than broadening the token kept in this browser, put a trusted proxy that holds the endpoint's own credential in Base URL and leave Access token blank here; the proxy forwards to the endpoint's /v1/chat/completions route (https://<id>.<region>.<cloud>.endpoints.huggingface.cloud/v1) with the endpoint's name in Model, and an endpoint scaled to zero answers 503 until its replica has started.",
+  note: 'Needs a fine-grained Hugging Face access token with the "Make calls to Inference Providers" permission and nothing else: it is saved in this browser\'s local storage, and a read or write token would also open the account\'s repositories. Free accounts get $0.10 of inference credit a month and PRO accounts $2; once it is spent, every run fails with "depleted your monthly included credits" (402) until you buy credit or the month resets. By default Hugging Face routes each run to the fastest provider serving the model — changeable in your Inference Providers settings — unless the model id ends in :provider (for example :deepinfra), :fastest, :cheapest or :preferred. Whether the record shape is strictly enforced depends on the provider that answers, so pin one for steadier results; because that cannot be confirmed from here, the schema is also written into every request (a couple of thousand extra prompt tokens a run), the reply is checked here, and the review panel marks every run as validated here rather than enforced by the endpoint. Models that think by default, such as Qwen3.8 and GLM-5.3-Flash, spend part of "Max output tokens" thinking. A private dedicated Inference Endpoint is not confirmed to accept this Providers-only token; rather than broadening the token stored in this browser, keep an endpoint credential on a trusted proxy.',
   auth: 'bearer',
   primaryMode: 'schema',
   fallbackMode: 'none',
