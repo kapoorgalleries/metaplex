@@ -46,6 +46,7 @@ When you ask, name the job, the hardware and the estimated cost. Free local work
 
 - These need a yes: creating or publishing anything on the Hub (repos, Spaces, datasets, collections, paper pages, discussions, pull requests, webhooks), and uploading any file (`hf upload`, `hf cp` or `hf sync` into a repo or bucket, `create_repo`).
 - Never put these on the Hub or into a Space tool, even with a yes: gallery photographs, client or collector records, inventory, prices or valuations.
+- Never upload agent session transcripts (`~/.claude/projects`, `~/.codex/sessions`, `~/.pi/agent/sessions`) to the Hub, not even to a private repo or bucket. The Hub's "agent traces" viewer invites exactly that, and HF's own page says traces can hold "secrets, private code, and personal data"; the gallery's sessions hold client names, valuations and drafts.
 
 ## Vendored skills
 

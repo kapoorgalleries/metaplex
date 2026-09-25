@@ -295,6 +295,26 @@ Never put a token in this repository, in `.mcp.json`, in `.codex/config.toml`, o
   - Codex `disabled_tools`.
   - The Gemini `excludeTools` list.
 
+## Research material on the Hub
+
+For comparables and provenance work through the vendored `huggingface-datasets` skill (all CC0; figures as of 2026-09-24, from `research_notes/Hugging Face integration/opportunities.md` §4):
+
+| Dataset | What it is | How to use it |
+| --- | --- | --- |
+| `metmuseum/openaccess` | The Met's official Open Access set: 259.9K objects, 58 columns, images embedded (393.5 GB) | Dataset Viewer API only (`/rows`, `/search`, `/filter`); the Viewer timed out twice on it today, so the Met's own API stays primary |
+| `metmuseum/openaccess-embeddings-siglip2` | One 1,152-d L2-normalised SigLIP2 vector per Met object (`objectID` joins the set above), 1.1 GB | Visual nearest-neighbour search against the Met; the proposal for a local comparables index is in the note |
+| `nyuuzyou/ClevelandMuseumArt` | Cleveland Museum of Art open access, 67.9K rows, one 39.9 MB parquet | Download once; trivially queryable |
+| `BDRC/tibetan-ocr-benchmark` | 472 hand-transcribed Tibetan pages with script and legibility metadata; companion to the `BDRC/tibetan-ocr` model and leaderboard | Ground truth if inscription OCR is ever evaluated |
+
+Caveats: `datasets-server.huggingface.co` is unreachable from this repo's cloud sessions, so the skill only works from a gallery machine; the Rubin / Himalayan Art Resources, LACMA and Asian Art Museum collections are not on the Hub. The note's §7 lists twelve papers worth reading with the `huggingface-papers` skill — on cross-cultural metadata inference by VLMs (Appear2Meaning, 2604.07338), retrieval-augmented artwork cataloguing (ArtSeek, 2507.21917), VLMs' weakness at attribution (2508.01408), and Tibetan and Sanskrit OCR (OmniOCR 2602.21042, FTibSuite 2605.26601, 2211.07980).
+
+## What else Hugging Face offers, and what was decided
+
+`research_notes/Hugging Face integration/opportunities.md` assesses every other Hugging Face surface for the gallery, with sources. In short:
+
+- **Skipped:** in-browser OCR of inscriptions (no Transformers.js model reads Devanagari or Tibetan; `BDRC/tibetan-ocr` needs a GPU server), the translation task (nothing usable is live), text-to-image, Hub storage for gallery assets (the no-upload rule), a private Gradio cataloguing Space (duplicates the storefront without its review gate), and uploading agent traces (forbidden in `AGENTS.md`).
+- **Proposed, needing Sanjay's decision:** in-browser background removal for catalogue photographs with Transformers.js (`onnx-community/BiRefNet_lite-ONNX`; the photograph never leaves the browser, but webpack 4 cannot bundle the library, so it would be CDN-loaded at runtime and never enter the Arweave bundle); the single `hf-applications/background-removal` Space as an MCP tool, on already-public images only; a local vision model on the LAN through llama.cpp (`Qwen/Qwen3-VL-8B-Instruct-GGUF`, ~5.8 GB) as a private first pass — far weaker than the 235B default and untested on Tibetan or Ranjana; a dedicated Inference Endpoint (≈ $0.50–1.80 an hour) only if photographs must avoid third-party providers; a local Met comparables index built from the SigLIP2 embeddings above.
+
 ## Not integrated, and why
 
 - **The `hf-cloud-*` skills and `hf-cli`:** see [Deliberately not vendored](#deliberately-not-vendored).
