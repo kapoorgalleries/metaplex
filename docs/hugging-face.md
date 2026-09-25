@@ -165,7 +165,7 @@ Do not edit the vendored files by hand. A hand edit breaks the hash, and the nex
 
 The pinned examples are reference material and do not override `AGENTS.md`. Some upstream examples put a token in command arguments or ask for a token in chat; use the approved hidden-prompt or environment routes instead.
 
-Agents must not invoke `huggingface-paper-publisher/scripts/paper_manager.py` at this pin. Its `--create-pr` option prints "not yet implemented" and commits directly (`upload_file` is never passed `create_pr`), and its arXiv parser drops the first author (`authors_matches[1:]`, line 368). This is an instruction restriction, not a technical sandbox. Use source-verified paper metadata and separately reviewed publishing commands until both upstream bugs are fixed and a new pin is verified. No vendored bytes were changed for this restriction.
+Agents must not invoke `huggingface-paper-publisher/scripts/paper_manager.py` at this pin. Its `--create-pr` option prints "not yet implemented" and commits directly (`upload_file` is never passed `create_pr`), and its arXiv parser drops the first author (`authors_matches[1:]`, line 368), and linking a paper twice into a README that had no YAML frontmatter appends a duplicate block (lines 218-233: the empty frontmatter it writes does not match its own check). This is an instruction restriction, not a technical sandbox. Use source-verified paper metadata and separately reviewed publishing commands until these upstream bugs are fixed and a new pin is verified. No vendored bytes were changed for this restriction.
 
 ## Hugging Face MCP server
 
