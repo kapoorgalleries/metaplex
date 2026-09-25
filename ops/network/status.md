@@ -1,10 +1,10 @@
 # Trimurti network status
 
-Fill this in during the Cowork session. It is the record of what was found and what was changed. `verify.sh` prints the machine table ready to paste.
+Fill this in during the session. It is the record of what was found and what was changed. `verify.sh` prints the machine table ready to paste. Never write a password, token or key here, and never commit this file.
 
 ## What Trimurti is
 
-- [ ] tailnet   - [ ] naming/access convention   - [ ] workgroup/domain   - [ ] a server
+- [ ] AI gateway (`trimurti-gateway`)   - [ ] tailnet   - [ ] naming/access convention   - [ ] workgroup/domain   - [ ] a server
 Notes:
 
 ## Network
@@ -21,7 +21,7 @@ Notes:
 | Wi-Fi nodes in AP mode (list) | | |
 | Rogue DHCP found | | |
 
-Router decisions (each ASK item in `checklists/router-tuning.md`):
+Router decisions (every row of `checklists/router-tuning.md`; each **ASK** row with its own yes):
 
 | Item | Decision | Date |
 |---|---|---|
@@ -41,7 +41,7 @@ Paste the latest `out/verify-*.md` table here and keep it current.
 |---|---|---|---|---|---|---|---|
 | | | | | | | | |
 
-Signed in (per machine: claude / codex / gemini):
+Signed in, checked on each machine (`claude auth status`, `codex login status`, `gemini -p "hi"`); updates from `REBOOT_REQUIRED=`:
 
 | host | claude | codex | gemini | OS updated | rebooted | NAS share | in Trimurti |
 |---|---|---|---|---|---|---|---|

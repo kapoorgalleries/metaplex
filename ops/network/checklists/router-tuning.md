@@ -4,7 +4,7 @@ Rules for this checklist:
 
 - **Back up the router config first** (System / Administration → Backup). Again after.
 - **One change at a time, then verify.** Each item below says how to verify and how to undo.
-- Items marked **ASK** change how the LAN is addressed or secured. The session confirms with Sanjay before each, because a wrong one locks everyone out.
+- **Every row changes the router, so every row needs Sanjay's yes before it is made** (AGENTS.md). He may approve unmarked rows as a named list. Rows marked **ASK** can lock machines out or open the network when wrong: each needs its own yes, asked with its Undo ready. Record every decision in `status.md`.
 - **Firmware last**, at a quiet time, with the backup in hand.
 
 The menus differ per make. Names below are generic; the router's manual maps them.
@@ -22,7 +22,7 @@ The menus differ per make. Names below are generic; the router's manual maps the
 | NTP set, correct time zone | Logs and cert checks depend on it | Administration → Time | Time on the status page is right | n/a |
 | Logging on, log level "warning" or above | Needed to see DHCP conflicts and drops | Administration → Log | Log page shows entries | Off |
 
-## 2. Addressing (ASK before each)
+## 2. Addressing
 
 | Item | Why | Do | Verify | Undo |
 |---|---|---|---|---|
@@ -32,12 +32,12 @@ The menus differ per make. Names below are generic; the router's manual maps the
 | Local hostnames in DNS, where the router can | `ping nas`, `ssh studio-mac` work without hosts files | Only some routers do this. ASUS: LAN → DHCP Server, name each reservation and set a LAN Domain Name. UniFi: Settings → Routing → DNS, local hostnames, with the gateway as DHCP and DNS server. Synology SRM: on by default. Netgear, TP-Link, eero and Google/Nest **cannot**: use mDNS names (`nas.local`) and `scripts/ssh-config-gen.sh`, which needs no router support | `nslookup nas <router-ip>` answers, or `ping nas.local` | Off |
 | **ASK** Router as DNS forwarder, upstream one provider's pair | Fast, consistent answers; the router still adds local names | WAN/Internet → DNS: manual. Pick one pair and do not mix providers or filtered with unfiltered: Quad9 `9.9.9.9` + `149.112.112.112` (blocks known-malicious domains), or Cloudflare `1.1.1.1` + `1.0.0.1` (unfiltered; `1.1.1.2` + `1.0.0.2` for malware blocking). LAN → DHCP: DNS server = router IP (or the Pi-hole if one exists) | `nslookup example.com` from a client shows the router as server and answers quickly | Automatic (ISP) |
 | **ASK** IPv6: properly on or fully off | Half-on IPv6 causes slow first connects | WAN → IPv6: native/DHCPv6-PD if the ISP supports it, else disable. LAN → IPv6: match | https://test-ipv6.com scores 10/10 or reports "no IPv6", never "broken" | Previous setting |
-| No port forwards unless used | Every forward is an open door | Advanced → Port forwarding: delete unknown entries. Keep a list of the ones kept and why | Table matches the list | Re-add |
+| **ASK** No port forwards unless used | Every forward is an open door, and deleting one can cut off a service that needs it | Advanced → Port forwarding: delete unknown entries. Keep a list of the ones kept and why | Table matches the list | Re-add |
 | SIP ALG **off** | Breaks VoIP phones and some video calls | Advanced → NAT passthrough / ALG | Calls stop dropping | On |
 | Hardware NAT / flow acceleration **on**; QoS **off** on a gigabit line | Smart queues disable NAT acceleration and cap throughput at a few hundred Mb/s | Advanced → QoS: off; NAT acceleration: on. Exception, a line under ~300 Mb/s where calls stutter when someone uploads (bufferbloat): turn on the router's smart queue and accept the cap: eero "Optimize for Conferencing and Gaming", ASUS Adaptive QoS (Cake on Merlin firmware), UniFi Smart Queues | Speed test at the line rate; for the exception, waveform.com/tools/bufferbloat grades A or B | Reverse |
 | MTU auto (1500; PPPoE 1492) | Wrong MTU shows as some sites hanging | WAN → MTU | Don't-fragment ping of 1472 bytes passes (payload + 28 = MTU; use 1464 on PPPoE): Linux `ping -M do -s 1472 1.1.1.1`, macOS `ping -D -s 1472 1.1.1.1`, Windows `ping -f -l 1472 1.1.1.1` | Auto |
 
-## 3. Wi-Fi (ASK for the security change)
+## 3. Wi-Fi
 
 | Item | Why | Do | Verify | Undo |
 |---|---|---|---|---|
@@ -50,9 +50,9 @@ The menus differ per make. Names below are generic; the router's manual maps the
 | Band steering / Smart Connect: keep only if roaming behaves | Some clients flap between bands | If devices drop, split into `Kapoor-2G` and `Kapoor-5G` | Devices stay put | Merge again |
 | Guest / IoT SSID with client isolation, no LAN access | Keeps cameras, TVs, visitors off the machines and the NAS | Wireless → Guest network | A guest device cannot ping the NAS | Off |
 | Client / AP isolation **off** on the main SSID | Isolation on the main SSID is why the NAS "vanishes" from Wi-Fi laptops | Wireless → Advanced | Wi-Fi laptop can ping a wired PC | On |
-| Every separate router-class box (old router, standalone extender) in **AP mode** | Otherwise it NATs and hands out its own IPs. Satellites of the same mesh system already bridge to their primary; leave them alone | Its own admin page → Operation mode: Access Point (bridge). Wire the backhaul where possible | netscan sees a single gateway | Router mode |
+| **ASK** Every separate router-class box (old router, standalone extender) in **AP mode** | Otherwise it NATs and hands out its own IPs. Satellites of the same mesh system already bridge to their primary; leave them alone | Its own admin page → Operation mode: Access Point (bridge). Wire the backhaul where possible | netscan sees a single gateway | Router mode |
 
-## 4. Firmware (last)
+## 4. Firmware (last, **ASK**)
 
 0. Is the model still supported? Look up its end-of-life status on the vendor's support page. An EOL router gets no security fixes and is a known hijack target (FBI warning, May 2025): replace it instead of tuning it. If it is supported, turn on automatic firmware updates where the router offers them.
 1. Backup config (again). Note the current version.
@@ -67,4 +67,4 @@ The menus differ per make. Names below are generic; the router's manual maps the
 
 ## 5. Record
 
-Paste into `status.md` → Router: make/model, firmware before → after, every ASK item with the decision, and the reservation table (name → MAC → IP).
+Paste into `status.md` → Router: make/model, firmware before → after, every row's decision (the **ASK** rows each with their own), and the reservation table (name → MAC → IP).

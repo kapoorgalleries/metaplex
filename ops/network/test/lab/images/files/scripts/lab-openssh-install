@@ -1,0 +1,16 @@
+#!/bin/sh
+# lab-openssh-install debian|fedora|arch
+# Installs the OpenSSH built from upstream source (/tmp/lab/openssh.tar) with the lab's
+# sshd_config, the distro-style PAM stack for "sshd", the privilege-separation user and,
+# on systemd images, an sshd.service unit. Only used by the *-fallback images.
+set -eu
+flavor="$1"
+tar -C / --keep-directory-symlink --no-overwrite-dir -xf /tmp/lab/openssh.tar
+install -m 0644 /tmp/lab/openssh/sshd_config /etc/ssh/sshd_config
+mkdir -p /etc/ssh/sshd_config.d
+install -m 0644 "/tmp/lab/pam/sshd-$flavor" /etc/pam.d/sshd
+id sshd >/dev/null 2>&1 || useradd -r -M -d /run/sshd -s /bin/false -c 'sshd privsep' sshd
+if [ -d /usr/lib/systemd/system ] && [ -x /usr/lib/systemd/systemd ]; then
+  install -m 0644 /tmp/lab/openssh/sshd.service /etc/systemd/system/sshd.service
+fi
+/usr/sbin/sshd -V 2>&1 | head -1
