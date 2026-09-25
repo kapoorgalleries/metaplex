@@ -95,7 +95,7 @@ fi
 # 2b. Claude Code.
 if ! have claude; then
   log "Claude Code is not installed; installing it with the kit's bootstrap (Claude only)"
-  run bash "$OPS/scripts/bootstrap-ai-clis.sh" --skip-codex --skip-gemini --skip-node
+  run bash "$OPS/scripts/bootstrap-ai-clis.sh" --skip-codex --skip-gemini --skip-hf --skip-node
   hash -r
 fi
 if [ "$DRY" = 0 ] && ! have claude; then warn "claude is still not on PATH; open a new terminal and rerun"; exit 1; fi
@@ -103,7 +103,7 @@ if [ "$DRY" = 0 ] && ! have claude; then warn "claude is still not on PATH; open
 node_ok() { have node && [ "$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)" -ge 20 ]; }
 if ! node_ok; then
   log "Node.js 20+ is missing; installing it for the trimurti-ops MCP server (Node only)"
-  run bash "$OPS/scripts/bootstrap-ai-clis.sh" --skip-claude --skip-codex --skip-gemini --with-node || warn "the Node.js install reported a problem (see above)"
+  run bash "$OPS/scripts/bootstrap-ai-clis.sh" --skip-claude --skip-codex --skip-gemini --skip-hf --with-node || warn "the Node.js install reported a problem (see above)"
   hash -r
 fi
 if node_ok; then

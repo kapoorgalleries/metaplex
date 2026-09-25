@@ -1,9 +1,9 @@
 <#
 Update this Windows machine: every winget-managed app (Store apps included),
-Windows Update through the PSWindowsUpdate module, and the three AI CLIs.
-Never reboots; prints REBOOT_REQUIRED=yes when one is needed. Run elevated
-(an SSH session as an administrator already is), or push it with
-run-remote.sh --os windows update-all.
+Windows Update through the PSWindowsUpdate module, and the AI CLIs (claude,
+codex, gemini, hf). Never reboots; prints REBOOT_REQUIRED=yes when one is
+needed. Run elevated (an SSH session as an administrator already is), or push
+it with run-remote.sh --os windows update-all.
 
 Windows Update installs security and critical updates only, unless a flag
 widens it. Drivers and feature upgrades (a new Windows version) need Sanjay's
@@ -14,7 +14,7 @@ C:\ProgramData\trimurti\windows-update.log.
 
 Usage: powershell -ExecutionPolicy Bypass -File scripts\update-all.ps1 [-NoOS] [-NoCLIs] [-AllUpdates] [-Drivers] [-FeatureUpgrades]
   -NoOS             skip winget and Windows Update
-  -NoCLIs           skip claude, codex and gemini
+  -NoCLIs           skip claude, codex, gemini and hf
   -AllUpdates       every software update Windows Update offers, not only security and critical ones
   -Drivers          also driver updates (ask Sanjay first)
   -FeatureUpgrades  also feature upgrades to a new Windows version (ask Sanjay first)
@@ -51,6 +51,7 @@ function Log($m)  { Write-Host "==> $m" -ForegroundColor Cyan }
 function Have($c) { return [bool](Get-Command $c -ErrorAction SilentlyContinue) }
 $Failed = New-Object System.Collections.Generic.List[string]
 function Add-Failure([string]$Name, [string]$Why) { Write-Warning $Why; $Failed.Add($Name) }
+$env:HF_HUB_DISABLE_UPDATE_CHECK = '1'   # hf's daily hint goes to stderr ahead of its output; hf update still checks
 # Run a native command with its stderr shown as plain text (Windows PowerShell 5.1 turns redirected
 # stderr into error records). Returns the exit code.
 function Invoke-Native([string]$Exe, [string[]]$ArgList = @()) {
@@ -257,6 +258,10 @@ if (-not $NoCLIs) {
       }
     }
   }
+  if (Have 'hf') {   # installer or pip, whichever it came from; refreshes the hf-cli skill too
+    Log 'Hugging Face CLI'
+    if ((Invoke-Native 'hf' @('update')) -ne 0) { Add-Failure 'hf' "'hf update' failed" }
+  }
 }
 
 # Other reboot signals Windows leaves behind. PendingFileRenameOperations alone is not one: almost
@@ -266,7 +271,7 @@ if (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based S
 $renames = Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager' -Name PendingFileRenameOperations -ErrorAction SilentlyContinue
 
 Log "versions on ${env:COMPUTERNAME}:"
-foreach ($c in 'claude', 'codex', 'gemini', 'node') {
+foreach ($c in 'claude', 'codex', 'gemini', 'hf', 'node') {
   if (Have $c) { $v = Get-CliVersion $c } else { $v = 'missing' }
   Write-Host ("  {0,-7} {1}" -f $c, $v)
 }

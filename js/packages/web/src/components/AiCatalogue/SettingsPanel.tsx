@@ -118,7 +118,7 @@ export const SettingsPanel = (props: {
     });
   };
 
-  /** Replaces one provider's entry, leaving the other four untouched. */
+  /** Replaces one provider's entry, leaving every other one untouched. */
   const withProvider = (id: ProviderId, next: ProviderSettings) => {
     const providers = {} as Record<ProviderId, ProviderSettings>;
     PROVIDER_IDS.forEach(other => {
@@ -175,7 +175,7 @@ export const SettingsPanel = (props: {
       {/* Shown whenever ANY provider holds a key, not just the active one.
           Gated on the active provider alone, the panel told a dealer sitting
           on a proxy-mode provider that "no key is stored in this browser at
-          all" while four other providers' keys sat in local storage. */}
+          all" while other providers' keys sat in local storage. */}
       {(!proxyMode && provider.persistKey) || anyKeyStored ? (
         <div className="ai-key-warning">
           {KEY_WARNING.map((paragraph, i) => (

@@ -38,6 +38,7 @@ import {
   DEEPSEEK,
   GEMINI,
   GITHUB,
+  HUGGINGFACE,
   OPENAI,
   PROVIDERS,
   PROVIDER_IDS,
@@ -1635,6 +1636,7 @@ const OPENAI_DIALECT: AiProvider[] = [
   OPENAI,
   DEEPSEEK,
   GITHUB,
+  HUGGINGFACE,
   AZURE,
   TRIMURTI,
 ];
@@ -1805,7 +1807,11 @@ describe('providers — the wider table', () => {
   });
 
   it('52. every OpenAI-dialect provider shares the one parameter-drift retry', () => {
-    OPENAI_DIALECT.forEach(provider => {
+    // Every one except Hugging Face, whose spec has no max_completion_tokens
+    // for the retry to rename into and no documented temperature refusal;
+    // test 92 covers what it does instead.
+    expect(HUGGINGFACE.retryBody).toBeUndefined();
+    OPENAI_DIALECT.filter(p => p.id !== 'huggingface').forEach(provider => {
       const retry = provider.retryBody;
       expect(retry).toBeDefined();
       if (!retry) {
@@ -1958,15 +1964,17 @@ describe('providers — the wider table', () => {
     const loaded = loadSettings(store);
     expect(loaded.providers.gemini.apiKey).toBe('g');
     expect(loaded.providers.openai.apiKey).toBe('o');
-    // The three that were absent come back at their defaults, fully formed,
-    // rather than undefined — which is what would crash the settings form.
-    ([DEEPSEEK, GITHUB, AZURE, TRIMURTI] as AiProvider[]).forEach(provider => {
-      const cfg = loaded.providers[provider.id];
-      expect(cfg).toBeDefined();
-      expect(cfg.apiKey).toBe('');
-      expect(cfg.model).toBe(provider.defaultModel);
-      expect(cfg.baseUrl).toBe(provider.defaultBaseUrl);
-    });
+    // Every provider that was absent comes back at its defaults, fully
+    // formed, rather than undefined — which is what would crash the form.
+    ([DEEPSEEK, GITHUB, HUGGINGFACE, AZURE, TRIMURTI] as AiProvider[]).forEach(
+      provider => {
+        const cfg = loaded.providers[provider.id];
+        expect(cfg).toBeDefined();
+        expect(cfg.apiKey).toBe('');
+        expect(cfg.model).toBe(provider.defaultModel);
+        expect(cfg.baseUrl).toBe(provider.defaultBaseUrl);
+      },
+    );
   });
 });
 
@@ -2021,12 +2029,17 @@ describe('providers — corrections', () => {
   });
 
   it('58. structuredOutput is declared per provider (test 72 covers what it seeds)', () => {
-    // DeepSeek asks for JSON mode and is never schema-constrained. The
+    // DeepSeek asks for JSON mode and is never schema-constrained. Hugging
+    // Face SENDS the strict directive but cannot say whether the provider
+    // that answers enforces it, so it is declared false too (test 83). The
     // gateway's cataloguing route enforces the schema on GPT and the Claude
     // 5 family and refuses it for free elsewhere, so it is declared true
     // and the per-run fallback decides the rest.
     expect(DEEPSEEK.structuredOutput).toBe(false);
-    PROVIDER_IDS.filter(id => id !== 'deepseek').forEach(id => {
+    expect(HUGGINGFACE.structuredOutput).toBe(false);
+    PROVIDER_IDS.filter(
+      id => id !== 'deepseek' && id !== 'huggingface',
+    ).forEach(id => {
       expect(PROVIDERS[id].structuredOutput).toBe(true);
     });
   });
@@ -3157,5 +3170,780 @@ describe('review regressions', () => {
 
     const upper = await resolveImage(url, 'front', opts('IMAGE/WebP'));
     expect(upper.kind === 'inline' && upper.mimeType).toBe('IMAGE/WebP');
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* Hugging Face Inference Providers                                    */
+/*                                                                     */
+/* Every assertion here mirrors a fact in research_notes/Hugging Face  */
+/* integration/inference_providers.md (2026-09-24). The router itself  */
+/* was unreachable from that session, so the error bodies below are    */
+/* the dated real-world observations the note cites (the account       */
+/* name aside), not bodies captured from this code's own requests.     */
+/* ------------------------------------------------------------------ */
+
+const HF_TOKEN = 'hf_TESTTOKEN0123456789abcdefghijkl';
+
+/** The router's own refusals, as observed: a bare string under `error`. */
+const HF_BAD_TOKEN = { error: 'Invalid credentials in Authorization header' };
+const HF_NO_PERMISSION = {
+  error:
+    'This authentication method does not have sufficient permissions to call Inference Providers on behalf of user example-user',
+};
+const HF_NO_CREDIT = {
+  error:
+    'You have depleted your monthly included credits. Purchase pre-paid credits to continue using Inference Providers. Alternatively, subscribe to PRO to get 20x more included usage.',
+};
+const HF_UNSERVED = {
+  error: {
+    message:
+      "The requested model 'google/gemma-7b-it' is not supported by any provider you have enabled.",
+    type: 'invalid_request_error',
+    param: 'model',
+    code: 'model_not_supported',
+  },
+};
+
+function hfPlanBody(plan: HttpPlan): ParsedOpenAiBody {
+  return JSON.parse(plan.body) as ParsedOpenAiBody;
+}
+
+/** The line an error body carries, in either shape the router uses. */
+function providerErrorLine(body: unknown): string {
+  const wrapper = body as { error: string | { message: string } };
+  return typeof wrapper.error === 'string'
+    ? wrapper.error
+    : wrapper.error.message;
+}
+
+describe('providers — Hugging Face Inference Providers', () => {
+  it('83. posts the router its documented request: bearer token, verbatim model, max_tokens, strict schema', () => {
+    const cfg = cfgFor(HUGGINGFACE, HF_TOKEN);
+    const plan = HUGGINGFACE.buildRequest(twoInlineImages(), cfg);
+
+    expect(plan.url).toBe('https://router.huggingface.co/v1/chat/completions');
+    expect(plan.method).toBe('POST');
+    expect(plan.headers.Authorization).toBe('Bearer ' + HF_TOKEN);
+    expect(plan.headers['api-key']).toBeUndefined();
+
+    const body = hfPlanBody(plan);
+    expect(body.model).toBe('Qwen/Qwen3-VL-235B-A22B-Instruct');
+    // max_tokens is the documented ceiling; max_completion_tokens is not in
+    // Hugging Face's spec, so it is never sent up front.
+    expect(body.max_tokens).toBe(4096);
+    expect('max_completion_tokens' in body).toBe(false);
+    expect(body.temperature).toBe(0.2);
+    expect((JSON.parse(plan.body) as RawNode).stream).toBe(false);
+
+    // Strict json_schema, in the documented shape...
+    expect(body.response_format.type).toBe('json_schema');
+    const jsonSchema = body.response_format.json_schema;
+    expect(jsonSchema && jsonSchema.name).toBe(CATALOGUE_SCHEMA_NAME);
+    expect(jsonSchema && jsonSchema.strict).toBe(true);
+    expect(jsonSchema && jsonSchema.schema).toEqual(CATALOGUE_JSON_SCHEMA);
+    // ...and the schema in the prompt as well, because a provider behind the
+    // router that ignores the directive silently would otherwise leave the
+    // model guessing the field names. That costs prompt tokens on every run,
+    // which the entry's note admits to rather than hides.
+    expect(systemText(body)).toContain(JSON.stringify(CATALOGUE_JSON_SCHEMA));
+    expect(HUGGINGFACE.note).toContain('extra prompt tokens');
+    // The directive is sent, but its enforcement is per provider and
+    // unconfirmed, so the entry does not claim it: every run is disclosed in
+    // the review panel as validated here (test 89 covers the seeding).
+    expect(HUGGINGFACE.structuredOutput).toBe(false);
+    expect(HUGGINGFACE.note).toContain('validated here');
+
+    // Photographs go inline, with no OpenAI-only `detail` field: Hugging
+    // Face's spec types image_url as { url } alone.
+    expect(HUGGINGFACE.supportsRemoteImageUrl).toBe(false);
+    const images = userParts(body).filter(part => part.type === 'image_url');
+    expect(images).toHaveLength(2);
+    images.forEach(part => {
+      const imageUrl = part.image_url;
+      if (!imageUrl) {
+        throw new Error('image part without image_url');
+      }
+      expect(imageUrl.url.indexOf('data:image/jpeg;base64,')).toBe(0);
+      expect('detail' in imageUrl).toBe(false);
+    });
+
+    // The fallback drops the directive and keeps the schema in the prompt.
+    const fallback = JSON.parse(
+      HUGGINGFACE.buildFallbackRequest(twoInlineImages(), cfg).body,
+    ) as RawNode;
+    expect(fallback.response_format).toBeUndefined();
+    expect(
+      String((fallback.messages as { content: unknown }[])[0].content),
+    ).toContain(JSON.stringify(CATALOGUE_JSON_SCHEMA));
+
+    // Proxy mode: no Authorization header at all, never an empty one.
+    expect(
+      'Authorization' in
+        HUGGINGFACE.buildRequest(twoInlineImages(), cfgFor(HUGGINGFACE, ''))
+          .headers,
+    ).toBe(false);
+
+    // The two factory options are Hugging Face's alone: every other dialect
+    // still sends detail 'high', and a strict-schema provider still keeps the
+    // schema out of its prompt.
+    OPENAI_DIALECT.filter(p => p.id !== 'huggingface').forEach(provider => {
+      const other = openaiBody(
+        provider.buildRequest(twoInlineImages(), cfgFor(provider, 'k')),
+      );
+      userParts(other)
+        .filter(part => part.type === 'image_url')
+        .forEach(part => {
+          expect(part.image_url && part.image_url.detail).toBe('high');
+        });
+      if (
+        other.response_format &&
+        other.response_format.type === 'json_schema'
+      ) {
+        expect(systemText(other)).not.toContain(
+          JSON.stringify(CATALOGUE_JSON_SCHEMA),
+        );
+      }
+    });
+  });
+
+  it('84. sends a :fastest, :cheapest or :provider suffix untouched', () => {
+    [
+      'Qwen/Qwen3-VL-235B-A22B-Instruct:fastest',
+      'Qwen/Qwen3-VL-235B-A22B-Instruct:cheapest',
+      'Qwen/Qwen3-VL-235B-A22B-Instruct:preferred',
+      'Qwen/Qwen3-VL-235B-A22B-Instruct:deepinfra',
+      'zai-org/GLM-5.3-Flash:zai-org',
+    ].forEach(model => {
+      const cfg: ProviderSettings = {
+        ...cfgFor(HUGGINGFACE, HF_TOKEN),
+        model: model,
+      };
+      const plan = HUGGINGFACE.buildRequest(twoInlineImages(), cfg);
+      expect(hfPlanBody(plan).model).toBe(model);
+      // The suffix lives in the body, never in the path.
+      expect(plan.url).toBe(
+        'https://router.huggingface.co/v1/chat/completions',
+      );
+      expect(configProblem(cfg, HUGGINGFACE)).toBe('');
+    });
+  });
+
+  it('85. refuses photographs to the text-only families only, suffix or not', () => {
+    const cfg = cfgFor(HUGGINGFACE, HF_TOKEN);
+    // Tagged text-generation on the Hub (hub_repo_details, 2026-09-24).
+    [
+      'openai/gpt-oss-120b',
+      'openai/gpt-oss-120b:groq',
+      'deepseek-ai/DeepSeek-V4-Pro',
+      'deepseek-ai/DeepSeek-R1',
+      'deepseek-ai/DeepSeek-R1-0528:fastest',
+      'zai-org/GLM-5.3',
+      'zai-org/GLM-5.3:together',
+      'moonshotai/Kimi-K2-Instruct-0905',
+      'Qwen/Qwen3-Coder-480B-A35B-Instruct',
+    ].forEach(model => {
+      const refused = thrownAiError(() =>
+        HUGGINGFACE.buildRequest(twoInlineImages(), { ...cfg, model: model }),
+      );
+      expect(refused.kind).toBe('image');
+      expect(refused.providerId).toBe('huggingface');
+      expect(refused.message).toContain(model);
+      // Notes-only work on such a model still goes through.
+      expect(
+        HUGGINGFACE.buildRequest(notesOnlyRequest(), { ...cfg, model: model })
+          .url,
+      ).toContain('/chat/completions');
+    });
+    // Their image-reading near-twins, and every suggestion, are not refused.
+    [
+      'zai-org/GLM-5.3-Flash',
+      'zai-org/GLM-5.3-Flash:zai-org',
+      'deepseek-ai/DeepSeek-V4.1-Flash',
+      'moonshotai/Kimi-K2.5',
+      'moonshotai/Kimi-K3',
+    ]
+      .concat(HUGGINGFACE.modelSuggestions)
+      .forEach(model => {
+        expect(
+          HUGGINGFACE.buildRequest(twoInlineImages(), { ...cfg, model: model })
+            .url,
+        ).toContain('/chat/completions');
+      });
+    // On a dedicated Inference Endpoint the Model field holds a name the
+    // dealer chose, not a Hub id, and 'glm-5.3' may be serving a vision
+    // model. The families are matched under their publisher namespace, as
+    // the router takes them, so a bare name never refuses a photograph —
+    // whichever Base URL it is paired with.
+    const endpoint =
+      'https://jpj7k2q4j805b727.us-east-1.aws.endpoints.huggingface.cloud/v1';
+    [
+      'glm-5.3',
+      'gpt-oss-120b',
+      'deepseek-r1',
+      'Kimi-K2-Instruct',
+      'qwen3-coder',
+    ].forEach(model => {
+      [endpoint, cfg.baseUrl, 'https://gateway.kapoors.com/hf/v1'].forEach(
+        baseUrl => {
+          const plan = HUGGINGFACE.buildRequest(twoInlineImages(), {
+            ...cfg,
+            model: model,
+            baseUrl: baseUrl,
+          });
+          expect(hfPlanBody(plan).model).toBe(model);
+        },
+      );
+    });
+    // And a namespace of the dealer's own is not the publisher's.
+    expect(
+      HUGGINGFACE.buildRequest(twoInlineImages(), {
+        ...cfg,
+        model: 'kapoor/GLM-5.3',
+      }).url,
+    ).toContain('/chat/completions');
+    // Suggestions are Hub repo ids, and the default is one of them.
+    expect(HUGGINGFACE.modelSuggestions).toContain(HUGGINGFACE.defaultModel);
+    HUGGINGFACE.modelSuggestions.forEach(m => {
+      expect(m.indexOf('/')).toBeGreaterThan(0);
+    });
+  });
+
+  it('86. the router and dedicated Inference Endpoints are Hugging Face itself; anything else is a proxy', () => {
+    const own = HUGGINGFACE.isOwnEndpoint;
+    if (!own) {
+      throw new Error('HUGGINGFACE.isOwnEndpoint is required by settings.ts');
+    }
+    expect(own('https://router.huggingface.co/v1')).toBe(true);
+    expect(own('https://ROUTER.HUGGINGFACE.CO/v1/')).toBe(true);
+    // A fully-qualified trailing dot is the same host.
+    expect(own('https://router.huggingface.co./v1')).toBe(true);
+    expect(own('https://router.huggingface.co/v1?x=1')).toBe(true);
+    // A per-provider route on the router is still the router.
+    expect(own('https://router.huggingface.co/cerebras/v1')).toBe(true);
+    expect(
+      own(
+        'https://jpj7k2q4j805b727.us-east-1.aws.endpoints.huggingface.cloud/v1',
+      ),
+    ).toBe(true);
+
+    // Lookalikes, a Space (code its owner wrote) and the dealer's own host.
+    expect(own('https://router.huggingface.co.example.net/v1')).toBe(false);
+    expect(own('https://nothuggingface.co/v1')).toBe(false);
+    expect(own('https://x.endpoints.huggingface.cloud.example.net/v1')).toBe(
+      false,
+    );
+    expect(own('https://kapoor-proxy.hf.space/v1')).toBe(false);
+    expect(own('https://gateway.kapoors.com/hf/v1')).toBe(false);
+    // An unparseable URL is left to configProblem, as Azure's test does.
+    expect(own('not a url')).toBe(true);
+    expect(
+      configProblem(
+        { apiKey: HF_TOKEN, model: 'm', baseUrl: 'not a url' },
+        HUGGINGFACE,
+      ),
+    ).toBe('Base URL is not a valid URL.');
+
+    // A blank token against Hugging Face itself is refused — the dedicated
+    // endpoint included, whose host never equals the default — and named as
+    // the form labels it.
+    const endpoint =
+      'https://jpj7k2q4j805b727.us-east-1.aws.endpoints.huggingface.cloud/v1';
+    expect(
+      isProxyMode(
+        { apiKey: '', model: 'kapoor-qwen-vl', baseUrl: endpoint },
+        HUGGINGFACE,
+      ),
+    ).toBe(false);
+    const blank = configProblem(
+      { apiKey: '', model: 'kapoor-qwen-vl', baseUrl: endpoint },
+      HUGGINGFACE,
+    );
+    expect(blank).toContain('Access token');
+    expect(configProblem(cfgFor(HUGGINGFACE, ''), HUGGINGFACE)).not.toBe('');
+    // A proxy of the dealer's own may hold the token itself.
+    expect(
+      configProblem(
+        {
+          apiKey: '',
+          model: 'm',
+          baseUrl: 'https://gateway.kapoors.com/hf/v1',
+        },
+        HUGGINGFACE,
+      ),
+    ).toBe('');
+
+    // The endpoint name travels in the body, as on the router.
+    const plan = HUGGINGFACE.buildRequest(twoInlineImages(), {
+      apiKey: HF_TOKEN,
+      model: 'kapoor-qwen-vl',
+      baseUrl: endpoint + '/',
+    });
+    expect(plan.url).toBe(endpoint + '/chat/completions');
+    expect(hfPlanBody(plan).model).toBe('kapoor-qwen-vl');
+    expect(HUGGINGFACE.baseUrlHelp).toContain('endpoints.huggingface.cloud/v1');
+  });
+
+  it("87. the router's own string-shaped refusals keep their line, and a 402 says what to do", () => {
+    const cfg = cfgFor(HUGGINGFACE, HF_TOKEN);
+    const says = (status: number, body: unknown) =>
+      thrownAiError(() => HUGGINGFACE.extractText(status, body, cfg));
+
+    const badToken = says(401, HF_BAD_TOKEN);
+    expect(badToken.kind).toBe('auth');
+    // Closed with a full stop so the advice that follows does not run on.
+    expect(badToken.message).toContain(
+      'Invalid credentials in Authorization header. Check the access token',
+    );
+
+    const noPermission = says(403, HF_NO_PERMISSION);
+    expect(noPermission.kind).toBe('auth');
+    expect(noPermission.message).toContain(
+      'does not have sufficient permissions to call Inference Providers',
+    );
+
+    const noCredit = says(402, HF_NO_CREDIT);
+    expect(noCredit.kind).toBe('rate_limit');
+    expect(noCredit.status).toBe(402);
+    expect(noCredit.providerId).toBe('huggingface');
+    expect(noCredit.message).toContain(
+      'depleted your monthly included credits',
+    );
+    expect(noCredit.message).toContain('huggingface.co/settings/billing');
+    // A bare 402 still names the cause.
+    expect(says(402, null).message).toContain('inference credit');
+
+    // An unknown or unserved model is a 400, not a 404: the router's line is
+    // kept, and the dealer is told where providers are enabled.
+    const unserved = says(400, HF_UNSERVED);
+    expect(unserved.kind).toBe('bad_request');
+    expect(unserved.code).toBe('model_not_supported');
+    expect(unserved.message).toContain(
+      'is not supported by any provider you have enabled.',
+    );
+    expect(unserved.message).toContain('Inference Providers');
+    expect(unserved.message).not.toContain('not found');
+
+    // A relayed body in another provider's shape: top-level message or detail.
+    expect(says(503, { message: 'Model is loading' }).message).toContain(
+      'Model is loading.',
+    );
+    expect(says(500, { detail: 'Upstream timed out' }).message).toContain(
+      'Upstream timed out.',
+    );
+    // TGI's own shape, which a dedicated endpoint on TGI answers with.
+    const tgi = says(422, {
+      error:
+        'Input validation error: `inputs` must have less than 4096 tokens.',
+      error_type: 'validation',
+    });
+    expect(tgi.kind).toBe('bad_request');
+    expect(tgi.message).toContain('Input validation error');
+    expect(says(422, null).kind).toBe('bad_request');
+
+    // The OpenAI shape is still read first, and a line in it is terminated
+    // before the advice too, so nothing runs on whichever shape it came in.
+    expect(says(429, { error: { message: 'Rate limited' } }).message).toContain(
+      'Rate limited. Wait and retry',
+    );
+    expect(
+      says(400, {
+        error: {
+          message: "The requested model 'x/y' is not supported by any provider",
+          code: 'model_not_supported',
+        },
+      }).message,
+    ).toContain('by any provider. Check the model id');
+  });
+
+  it("88. the 402 and 422 mappings and additional error shapes are Hugging Face's alone", () => {
+    // Every other provider's 402 and 422 map exactly as they did.
+    PROVIDER_IDS.filter(id => id !== 'huggingface').forEach(id => {
+      const cfg = cfgFor(PROVIDERS[id], 'k');
+      [402, 422].forEach(status => {
+        const err = thrownAiError(() =>
+          PROVIDERS[id].extractText(status, providerError('upstream'), cfg),
+        );
+        expect(err.kind).toBe('server');
+        expect(err.message).toBe('Unexpected status ' + status + '.');
+      });
+      // And a model_not_supported code from anyone else gets no HF advice.
+      const coded = thrownAiError(() =>
+        PROVIDERS[id].extractText(
+          400,
+          { error: { message: 'nope', code: 'model_not_supported' } },
+          cfg,
+        ),
+      );
+      expect(coded.message).toBe('nope');
+    });
+
+    // The legacy providers retain their original parser, including direct
+    // providers whose front door might return a different body shape.
+    PROVIDER_IDS.filter(id => id !== 'huggingface').forEach(id => {
+      const provider = PROVIDERS[id];
+      const cfg = cfgFor(provider, 'k');
+      [
+        { error: 'Platform refusal' },
+        { message: 'Platform refusal' },
+        { detail: 'Platform refusal' },
+      ].forEach(body => {
+        expect(
+          thrownAiError(() => provider.extractText(401, body, cfg)).message,
+        ).not.toContain('Platform refusal');
+      });
+    });
+
+    // The gateway is held to the OpenAI shape: a 401 in any other shape is
+    // not blamed on the provider key held ON the gateway.
+    const trimurti = cfgFor(TRIMURTI, 'k');
+    [{ error: 'Invalid JWT' }, { message: 'Invalid JWT' }].forEach(body => {
+      const err = thrownAiError(() =>
+        TRIMURTI.extractText(401, body, trimurti),
+      );
+      expect(err.kind).toBe('auth');
+      expect(err.message).not.toContain('held on the gateway');
+      expect(err.message).not.toContain('Invalid JWT');
+      expect(err.message).toContain('Check the access key');
+    });
+  });
+
+  it('89. a response_format refusal as a 400 or a 422 is retried once, without the directive', async () => {
+    const record = recordFixture();
+    const refusals: StubResponse[] = [
+      {
+        status: 400,
+        body: providerError(
+          "Invalid parameter: 'response_format' of type 'json_schema' is not supported by this provider.",
+        ),
+      },
+      // The same refusal as a 422 in the router's string shape: read, and
+      // mapped to the 400 that reaches the fallback. Both shapes are
+      // plausible and neither has been observed from the router itself.
+      {
+        status: 422,
+        body: { error: 'json_schema response_format is not supported' },
+      },
+    ];
+    for (let i = 0; i < refusals.length; i++) {
+      const stub = stubFetch([
+        refusals[i],
+        { status: 200, body: openaiOk(JSON.stringify(record)) },
+      ]);
+      const result = await runCatalogue(
+        'huggingface',
+        settingsFixture('huggingface', HF_TOKEN),
+        dataUrlRequest(),
+        { fetchImpl: stub.impl },
+      );
+      expect(stub.calls).toHaveLength(2);
+      expect(result.usedFallback).toBe(true);
+      expect(result.record).toEqual(record);
+      const first = JSON.parse(String(stub.calls[0].init.body)) as RawNode;
+      const second = JSON.parse(String(stub.calls[1].init.body)) as RawNode;
+      expect((first.response_format as RawNode).type).toBe('json_schema');
+      expect(second.response_format).toBeUndefined();
+      expect(
+        String((second.messages as { content: unknown }[])[0].content),
+      ).toContain(JSON.stringify(CATALOGUE_JSON_SCHEMA));
+      expect(stub.calls[1].url).toBe(
+        'https://router.huggingface.co/v1/chat/completions',
+      );
+    }
+
+    // A clean run is one call — and is STILL flagged, seeded from the
+    // entry's structuredOutput: the directive went out, but whether the
+    // provider that answered enforced it is not known, so the review panel
+    // must not present the record as schema-constrained.
+    const clean = stubFetch([
+      { status: 200, body: openaiOk(JSON.stringify(record)) },
+    ]);
+    const direct = await runCatalogue(
+      'huggingface',
+      settingsFixture('huggingface', HF_TOKEN),
+      dataUrlRequest(),
+      { fetchImpl: clean.impl },
+    );
+    expect(direct.usedFallback).toBe(true);
+    expect(direct.providerId).toBe('huggingface');
+    expect(clean.calls).toHaveLength(1);
+    expect(
+      (JSON.parse(String(clean.calls[0].init.body)) as RawNode).response_format,
+    ).toBeDefined();
+    const headers = clean.calls[0].init.headers as Record<string, string>;
+    expect(headers.Authorization).toBe('Bearer ' + HF_TOKEN);
+  });
+
+  it('90. spent credit, an unserved model and an unrelated 422 are never retried', async () => {
+    const cases: { response: StubResponse; kind: AiErrorKind }[] = [
+      { response: { status: 402, body: HF_NO_CREDIT }, kind: 'rate_limit' },
+      { response: { status: 400, body: HF_UNSERVED }, kind: 'bad_request' },
+      {
+        response: {
+          status: 422,
+          body: {
+            error: 'Input validation error: `temperature` must be positive',
+            error_type: 'validation',
+          },
+        },
+        kind: 'bad_request',
+      },
+      { response: { status: 401, body: HF_BAD_TOKEN }, kind: 'auth' },
+    ];
+    for (let i = 0; i < cases.length; i++) {
+      const stub = stubFetch([
+        cases[i].response,
+        { status: 200, body: openaiOk(JSON.stringify(recordFixture())) },
+      ]);
+      const err = await rejectedAiError(
+        runCatalogue(
+          'huggingface',
+          settingsFixture('huggingface', HF_TOKEN),
+          dataUrlRequest(),
+          { fetchImpl: stub.impl },
+        ),
+      );
+      expect(err.kind).toBe(cases[i].kind);
+      expect(err.status).toBe(cases[i].response.status);
+      expect(stub.calls).toHaveLength(1);
+    }
+  });
+
+  it('91. settings, labels and redaction cover the new provider', () => {
+    // In the table, once, beside the other multi-publisher catalogue.
+    expect(PROVIDERS.huggingface).toBe(HUGGINGFACE);
+    expect(PROVIDER_IDS.filter(id => id === 'huggingface')).toHaveLength(1);
+    expect(PROVIDER_IDS.indexOf('huggingface')).toBe(
+      PROVIDER_IDS.indexOf('github') + 1,
+    );
+    expect(HUGGINGFACE.keyLabel).toBe('Access token');
+    expect(HUGGINGFACE.persistKey).toBe(true);
+    expect(HUGGINGFACE.keyUrl).toContain(
+      'ownUserPermissions=inference.serverless.write',
+    );
+    expect(HUGGINGFACE.keyUrl).toContain('tokenType=fineGrained');
+    // The note names the permission, the credit cliff and the suffixes —
+    // and does not present "fastest" as unconditional: the account-level
+    // default is switchable in the dealer's Inference Providers settings
+    // (huggingface_hub 2.0.0, InferenceClient docstring), so an unsuffixed
+    // id follows whatever was set there.
+    expect(HUGGINGFACE.note).toContain('Make calls to Inference Providers');
+    expect(HUGGINGFACE.note).toContain('402');
+    expect(HUGGINGFACE.note).toContain('By default');
+    expect(HUGGINGFACE.note).toContain(
+      'changeable in your Inference Providers settings',
+    );
+    [':provider', ':fastest', ':cheapest', ':preferred'].forEach(suffix => {
+      expect(HUGGINGFACE.note).toContain(suffix);
+    });
+    expect(HUGGINGFACE.note).toContain('checked here');
+
+    // Starts unconfigured at the router, and round-trips with its token kept
+    // (a persisted secret, like every direct provider's).
+    const fresh = defaultSettings().providers.huggingface;
+    expect(fresh).toEqual({
+      apiKey: '',
+      model: HUGGINGFACE.defaultModel,
+      baseUrl: 'https://router.huggingface.co/v1',
+    });
+    const store = fakeStore(null);
+    const next = defaultSettings();
+    next.activeProvider = 'huggingface';
+    next.providers.huggingface = {
+      apiKey: HF_TOKEN,
+      model: 'google/gemma-4-31B-it:deepinfra',
+      baseUrl: 'https://router.huggingface.co/v1/',
+    };
+    saveSettings(next, store);
+    const back = loadSettings(store);
+    expect(back.activeProvider).toBe('huggingface');
+    expect(back.providers.huggingface).toEqual({
+      apiKey: HF_TOKEN,
+      model: 'google/gemma-4-31B-it:deepinfra',
+      baseUrl: 'https://router.huggingface.co/v1',
+    });
+
+    // A Hugging Face token is masked even when it was never configured: a
+    // current one is hf_ plus 34 letters and digits.
+    const masked = redactSecrets(
+      'echoed hf_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789 back',
+      defaultSettings(),
+    );
+    expect(masked).not.toContain('hf_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789');
+    expect(masked).toContain('«redacted»');
+    // An identifier that merely starts with hf_ is not a token — a real one
+    // has no underscore after the prefix — and a relayed error that names
+    // one keeps its diagnosis.
+    const identifiers =
+      'hf_hub_download failed in hf_xet_core (see hf_transfer, HF_HUB_OFFLINE)';
+    expect(redactSecrets(identifiers, defaultSettings())).toBe(identifiers);
+    // The other shapes are untouched by the narrowing.
+    expect(
+      redactSecrets('token ghp_A1b2C3d4E5f6G7h8 leaked', defaultSettings()),
+    ).not.toContain('ghp_A1b2C3d4E5f6G7h8');
+  });
+
+  it("92. gets no parameter-drift retry: a 400 saying 'does not support' is reported, never resent with max_completion_tokens", async () => {
+    /* The shared retry's regexp is loose enough to match a 400 about image
+     * input, and its rewrite would resend the request with a field Hugging
+     * Face's spec does not define (max_completion_tokens) and no reply
+     * ceiling the router recognises — then report THAT call's answer in
+     * place of the real one. The router bills only calls that succeed, so
+     * the retry would be free; it is left out because it would hide the
+     * refusal, not because it would cost. */
+    const refusals: StubResponse[] = [
+      {
+        status: 400,
+        body: providerError('This model does not support image input'),
+      },
+      {
+        status: 400,
+        body: providerError(
+          "Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead.",
+        ),
+      },
+      {
+        status: 422,
+        body: { error: 'Unsupported value: temperature does not support 0.2' },
+      },
+    ];
+    for (let i = 0; i < refusals.length; i++) {
+      const stub = stubFetch([
+        refusals[i],
+        { status: 200, body: openaiOk(JSON.stringify(recordFixture())) },
+      ]);
+      const err = await rejectedAiError(
+        runCatalogue(
+          'huggingface',
+          settingsFixture('huggingface', HF_TOKEN),
+          dataUrlRequest(),
+          { fetchImpl: stub.impl },
+        ),
+      );
+      expect(err.kind).toBe('bad_request');
+      expect(err.status).toBe(refusals[i].status);
+      // The router's own line reaches the dealer, unchanged.
+      expect(err.message).toBe(providerErrorLine(refusals[i].body));
+      expect(stub.calls).toHaveLength(1);
+      const sent = JSON.parse(String(stub.calls[0].init.body)) as RawNode;
+      expect(sent.max_tokens).toBe(4096);
+      expect('max_completion_tokens' in sent).toBe(false);
+    }
+
+    // The rename 400 through GitHub Models, which shares the retry, is still
+    // retried exactly as before: the opt-out is Hugging Face's alone.
+    const shared = stubFetch([
+      refusals[1],
+      { status: 200, body: openaiOk(JSON.stringify(recordFixture())) },
+    ]);
+    await runCatalogue(
+      'github',
+      settingsFixture('github', 'ghp_exampletoken1234567890'),
+      dataUrlRequest(),
+      { fetchImpl: shared.impl },
+    );
+    expect(shared.calls).toHaveLength(2);
+    const resent = JSON.parse(String(shared.calls[1].init.body)) as RawNode;
+    expect(resent.max_completion_tokens).toBe(4096);
+    expect('max_tokens' in resent).toBe(false);
+  });
+
+  it("93. every provider's relayed line is terminated before advice follows it, in either body shape", () => {
+    PROVIDER_IDS.forEach(id => {
+      const provider = PROVIDERS[id];
+      const cfg = cfgFor(provider, 'k');
+      const says = (status: number, body: unknown) =>
+        thrownAiError(() => provider.extractText(status, body, cfg)).message;
+
+      // A line with no closing punctuation gets one; one that has it is
+      // left alone, so nothing is doubled.
+      expect(says(429, providerError('Rate limited'))).toContain(
+        'Rate limited. Wait and retry',
+      );
+      expect(says(429, providerError('Rate limited.'))).toContain(
+        'Rate limited. Wait and retry',
+      );
+      expect(says(429, providerError('Rate limited.'))).not.toContain('..');
+      expect(says(503, providerError('Upstream unavailable'))).toContain(
+        'Upstream unavailable. Try again',
+      );
+      expect(says(413, providerError('Body too large'))).toContain(
+        'Body too large. Lower "Image max edge"',
+      );
+      // The 401 line is followed by advice about a secret: the one in the
+      // form, or — through the gateway, which reads any line that is not
+      // its own as a relayed provider refusal (test 70) — the one it holds.
+      expect(says(401, providerError('Invalid key'))).toContain(
+        'Invalid key. ' +
+          (id === 'trimurti' ? 'That is the provider key' : 'Check the '),
+      );
+      // A bare 400 stands alone, so it is relayed verbatim.
+      expect(says(400, providerError('nope'))).toBe('nope');
+    });
+
+    // The string shapes, where read, are treated the same way.
+    const hf = cfgFor(HUGGINGFACE, HF_TOKEN);
+    expect(
+      thrownAiError(() =>
+        HUGGINGFACE.extractText(503, { error: 'Model is loading' }, hf),
+      ).message,
+    ).toContain('Model is loading. Try again');
+    expect(
+      thrownAiError(() =>
+        HUGGINGFACE.extractText(422, { error: 'Bad body' }, hf),
+      ).message,
+    ).toBe('Bad body');
+  });
+
+  it('94. additional HF error shapes never enable a new retry for existing providers', async () => {
+    // Both retry gates the driver has: the schema-in-prompt retry, which
+    // matches a line naming response_format, and the parameter-drift retry,
+    // which matches "does not support". Neither may fire on a line that only
+    // the Hugging Face reader would have surfaced.
+    const schemaMessage = 'response_format json_schema is not supported';
+    const driftMessage =
+      "Unsupported value: 'temperature' does not support 0.2 with this model";
+    for (const message of [schemaMessage, driftMessage]) {
+      const bodies = [
+        { error: message },
+        { message: message },
+        { detail: message },
+      ];
+      for (const id of PROVIDER_IDS) {
+        for (const body of bodies) {
+          const stub = stubFetch([
+            { status: 400, body: body },
+            { status: 200, body: openaiOk(JSON.stringify(recordFixture())) },
+          ]);
+          const run = runCatalogue(
+            id,
+            settingsFixture(id, 'test-key'),
+            dataUrlRequest(),
+            { fetchImpl: stub.impl },
+          );
+          if (id === 'huggingface' && message === schemaMessage) {
+            const result = await run;
+            expect(result.usedFallback).toBe(true);
+            expect(stub.calls).toHaveLength(2);
+            expect(
+              (JSON.parse(String(stub.calls[1].init.body)) as RawNode)
+                .response_format,
+            ).toBeUndefined();
+          } else if (id === 'huggingface') {
+            // driftRetry is off for this entry: the router's line, once.
+            const err = await rejectedAiError(run);
+            expect(stub.calls).toHaveLength(1);
+            expect(err.kind).toBe('bad_request');
+            expect(err.message).toBe(driftMessage);
+          } else {
+            const err = await rejectedAiError(run);
+            expect(stub.calls).toHaveLength(1);
+            expect(err.kind).toBe('bad_request');
+            expect(err.status).toBe(400);
+            expect(err.message).toBe('The provider rejected the request.');
+          }
+        }
+      }
+    }
   });
 });

@@ -25,7 +25,12 @@ import {
   aiError,
   isAiError,
 } from './types';
-import { PROVIDERS, joinUrl, mapStatus } from './providers';
+import {
+  PROVIDERS,
+  joinUrl,
+  mapStatus,
+  providerErrorMessage,
+} from './providers';
 import { auditRecord, parseCatalogueRecord } from './validate';
 import { redactSecrets } from './settings';
 
@@ -424,14 +429,14 @@ export function probeGateway(
         })
         .then((body: unknown) => {
           if (res.status !== 200) {
-            const wrapper = body as { error?: { message?: unknown } } | null;
-            const message =
-              wrapper &&
-              wrapper.error &&
-              typeof wrapper.error.message === 'string'
-                ? wrapper.error.message
-                : '';
-            throw mapStatus(res.status, message, 'trimurti', cfg.model);
+            /* The same reader a run uses, so /key and a run can never
+             * disagree about which of the gateway's lines reach the dealer. */
+            throw mapStatus(
+              res.status,
+              providerErrorMessage(body, 'trimurti'),
+              'trimurti',
+              cfg.model,
+            );
           }
           const data =
             (body as {

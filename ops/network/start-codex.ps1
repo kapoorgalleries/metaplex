@@ -106,7 +106,7 @@ Add-KnownPaths
 # 1. Codex installed
 if (-not (Have 'codex')) {
   Log "Codex is not installed; installing it with the kit's bootstrap (Codex only)"
-  $flags = @('-SkipClaude', '-SkipGemini'); if (-not $NoMcp) { $flags += '-WithNode' }
+  $flags = @('-SkipClaude', '-SkipGemini', '-SkipHf'); if (-not $NoMcp) { $flags += '-WithNode' }
   $ok = Invoke-Bootstrap $flags
   if ($DryRun) { Write-Host "dry run: codex not found, stopping here"; exit 0 }
   if (-not (Have 'codex')) { [Console]::Error.WriteLine('codex is still not on PATH; open a new terminal and rerun'); exit 1 }
@@ -127,7 +127,7 @@ if ($NoMcp) { Log 'skipping the MCP server (-NoMcp); Codex will call the scripts
 else {
   if ((Get-NodeMajor) -lt 20) {
     Log 'Node 20+ is missing; installing it with the kit''s bootstrap (Node only)'
-    [void](Invoke-Bootstrap @('-SkipClaude', '-SkipCodex', '-SkipGemini', '-WithNode'))
+    [void](Invoke-Bootstrap @('-SkipClaude', '-SkipCodex', '-SkipGemini', '-SkipHf', '-WithNode'))
   }
   if ((Get-NodeMajor) -lt 20 -and -not $DryRun) { Write-Warning 'Node 20+ not found, so the trimurti-ops MCP server is skipped; Codex will call the scripts directly' }
   else {

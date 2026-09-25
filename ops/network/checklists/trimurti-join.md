@@ -81,7 +81,7 @@ Remove-Variable k, s
 Two things to tell Sanjay:
 
 - The storefront code records a gateway cap of 100,000 tokens per day **per address**, and each cataloguing run reserves about 46,000 of them: about two runs a day for the whole gallery. Every machine behind the gallery router shares one public address, so adding machines adds no budget, and one heavy user uses up everyone's allowance.
-- Claude, Codex and Gemini sign in to their own vendors (onboarding step 8) and do not go through the gateway. The gateway speaks the OpenAI chat-completions dialect with publisher-prefixed model ids (`openai/…`, `anthropic/…`, `google/…`), which Claude Code and Gemini CLI do not speak. Routing any CLI through it is his decision; don't set it up unasked.
+- Claude, Codex, Gemini and `hf` sign in to their own vendors (onboarding step 8) and do not go through the gateway. The gateway speaks the OpenAI chat-completions dialect with publisher-prefixed model ids (`openai/…`, `anthropic/…`, `google/…`), which Claude Code and Gemini CLI do not speak. Routing any CLI through it is his decision; don't set it up unasked.
 
 ## Per-machine onboarding (both new computers)
 
@@ -97,7 +97,7 @@ Do these in order; each has a script or a checklist item.
 5. **SSH server on**, run locally this first time: `enable-ssh-server.ps1` (elevated, with `-PublicKey`; see README "Windows") or `enable-ssh-server.sh` as the login user without sudo (it calls sudo itself). On Windows the script also switches the LAN interface (the one with the default route) to Private and allows SSH from the local subnet only. `ssh_port` 22 on the row.
 6. **Admin key**: Sanjay, in a terminal on the admin machine (Git Bash on Windows): `scripts/ssh-keys.sh --host new-pc-1`. It asks for that machine's password once, unless the key already works (`enable-ssh-server.ps1 -PublicKey`). Must print `PASS`.
 7. **`ssh new-pc-1` works**: `scripts/ssh-config-gen.sh`, then try it.
-8. **AI CLIs**: `scripts/run-remote.sh --host new-pc-1 bootstrap-ai-clis`; add `--tty` (Sanjay's terminal) when that machine's sudo asks for a password. It must end `INSTALL OK on <host>`. Then sign in to each of the three on that machine (the bootstrap output says how, including the no-browser routes).
+8. **AI CLIs**: `scripts/run-remote.sh --host new-pc-1 bootstrap-ai-clis`; add `--tty` (Sanjay's terminal) when that machine's sudo asks for a password. It must end `INSTALL OK on <host>`. Then sign in to claude, codex, gemini and hf on that machine, and to Hugging Face's MCP server in Codex with `codex mcp login huggingface` (the bootstrap output says how, including the no-browser routes).
 9. **NAS share** mounted with a named user (nas.md).
 10. **Trimurti join step** for the case ticked above.
 11. **Verify**: `scripts/verify.sh --host new-pc-1` exits 0 (green); set `trimurti=yes`; paste the row into `status.md`.

@@ -49,7 +49,7 @@ export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:/opt/homebrew/bin:/usr/local
 # 1. Codex installed
 if ! have codex; then
   log "Codex is not installed; installing it with the kit's bootstrap (Codex only)"
-  run bash "$OPS/scripts/bootstrap-ai-clis.sh" --skip-claude --skip-gemini || warn "the bootstrap reported a problem (see above)"
+  run bash "$OPS/scripts/bootstrap-ai-clis.sh" --skip-claude --skip-gemini --skip-hf || warn "the bootstrap reported a problem (see above)"
   [ "$DRY" = 1 ] || have codex || { warn "codex still not on PATH; open a new terminal and rerun"; exit 1; }
 fi
 [ "$DRY" = 1 ] && ! have codex && { warn "dry run: codex not found, stopping here"; exit 0; }
@@ -70,7 +70,7 @@ fi
 node_ok() { have node && [ "$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)" -ge 20 ]; }
 if [ "$NO_MCP" = 0 ] && ! node_ok; then
   log "Node.js 20+ is missing; installing it for the trimurti-ops MCP server (Node only)"
-  run bash "$OPS/scripts/bootstrap-ai-clis.sh" --skip-claude --skip-codex --skip-gemini --with-node || warn "the Node.js install reported a problem (see above)"
+  run bash "$OPS/scripts/bootstrap-ai-clis.sh" --skip-claude --skip-codex --skip-gemini --skip-hf --with-node || warn "the Node.js install reported a problem (see above)"
   hash -r
 fi
 if [ "$NO_MCP" = 1 ]; then

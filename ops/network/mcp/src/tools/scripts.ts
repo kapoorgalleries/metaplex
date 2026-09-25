@@ -75,7 +75,7 @@ const RunScriptInput = z
       .max(8)
       .default([])
       .describe(
-        "Arguments for the script, e.g. ['--skip-gemini'] or ['-WithGit']. Refused here, because each needs Sanjay's yes and a run from his terminal: --harden, and update-all's --cleanup, --major-upgrade, -Drivers, -FeatureUpgrades",
+        "Arguments for the script, e.g. ['--skip-gemini'], ['--skip-hf'] or ['-WithGit']. Refused here, because each needs Sanjay's yes and a run from his terminal: --harden, and update-all's --cleanup, --major-upgrade, -Drivers, -FeatureUpgrades",
       ),
   })
   .strict();
@@ -129,6 +129,7 @@ const VerifyRow = z.object({
   claude: z.string(),
   codex: z.string(),
   gemini: z.string(),
+  hf: z.string(),
   node: z.string(),
   os: z.string(),
 });
@@ -163,8 +164,8 @@ export function registerScriptTools(server: McpServer): void {
       description: `Push one of the kit's scripts to every selected inventory host and run it there, choosing the .sh or .ps1 variant per host OS (this is scripts/run-remote.sh). The run happens in the background: you get a job_id at once and poll it with trimurti_get_job, because installs and OS updates take minutes.
 
 Scripts:
-  - bootstrap-ai-clis: Node 20+, Claude Code, Codex CLI, Gemini CLI (args: --skip-claude/--skip-codex/--skip-gemini/--skip-node/--with-node; Windows: -SkipClaude/-SkipCodex/-SkipGemini/-SkipNode/-WithNode/-WithGit)
-  - update-all: OS packages, Homebrew/winget, Windows Update (security and critical by default), the CLIs; never reboots, ends with REBOOT_REQUIRED=yes|no|unknown (args: --no-os/--no-clis; Windows -NoOS/-NoCLIs/-AllUpdates). --cleanup, --major-upgrade, -Drivers and -FeatureUpgrades are refused here: they need Sanjay's yes and a terminal
+  - bootstrap-ai-clis: Node 20+, Claude Code, Codex CLI, Gemini CLI, the Hugging Face CLI (hf, plus Python 3.10+ for it), and Hugging Face's MCP server registered with Codex and Gemini (args: --skip-claude/--skip-codex/--skip-gemini/--skip-node/--with-node/--skip-hf, --with-claude-hf-mcp to register it with Claude Code too, only for machines not signed in with claude.ai; Windows: -SkipClaude/-SkipCodex/-SkipGemini/-SkipNode/-WithNode/-SkipHf/-WithClaudeHfMcp/-WithGit)
+  - update-all: OS packages, Homebrew/winget, Windows Update (security and critical by default), the CLIs including hf; never reboots, ends with REBOOT_REQUIRED=yes|no|unknown (args: --no-os/--no-clis; Windows -NoOS/-NoCLIs/-AllUpdates). --cleanup, --major-upgrade, -Drivers and -FeatureUpgrades are refused here: they need Sanjay's yes and a terminal
   - enable-ssh-server: sshd on + firewall (only useful once a host is already reachable, e.g. -Pwsh7 on Windows). --harden (password logins off) is refused here: it needs Sanjay's yes and a terminal
   - disk-triage: read-only disk and SMART report on that host (for the Hulk drives)
 
@@ -266,12 +267,12 @@ Returns: { job, summary_found, passed[], failed[], reboot_required[], log_tail }
     'trimurti_verify_hosts',
     {
       title: 'Verify the end state',
-      description: `The done-check for the whole network: for each selected host, ping, key-only SSH login, and the installed versions of claude, codex, gemini and node, plus the OS string. Runs scripts/verify.sh and returns the table it saves. Read-only.
+      description: `The done-check for the whole network: for each selected host, ping, key-only SSH login, and the installed versions of claude, codex, gemini, hf and node, plus the OS string. Runs scripts/verify.sh and returns the table it saves. Read-only.
 
 Args: inventory filters (name/os/role/trimurti) and timeout_seconds (default 240).
-Returns: { md_file, exit_code, all_green, key_problem, problems: ['host: what is wrong', ...], rows: [{ host, ping, ssh_key, claude, codex, gemini, node, os }] }.
+Returns: { md_file, exit_code, all_green, key_problem, problems: ['host: what is wrong', ...], rows: [{ host, ping, ssh_key, claude, codex, gemini, hf, node, os }] }.
 
-Every inventory row except the router is listed; only computers (role admin, workstation, new) need the CLIs and count for all_green, other rows show n/a. all_green means every selected computer pings, accepts the key (or is this machine, probed locally), has all three CLIs, and node 20 or newer. Paste rows into status.md.`,
+Every inventory row except the router is listed; only computers (role admin, workstation, new) need the CLIs and count for all_green, other rows show n/a. all_green means every selected computer pings, accepts the key (or is this machine, probed locally), has claude, codex, gemini and hf, and node 20 or newer. Paste rows into status.md.`,
       inputSchema: VerifyInput,
       outputSchema: VerifyOutput,
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
@@ -302,6 +303,7 @@ Every inventory row except the router is listed; only computers (role admin, wor
           claude: row.claude ?? '',
           codex: row.codex ?? '',
           gemini: row.gemini ?? '',
+          hf: row.hf ?? '',
           node: row.node ?? '',
           os: row.os ?? '',
         }));
@@ -314,7 +316,7 @@ Every inventory row except the router is listed; only computers (role admin, wor
           if (row.ping !== 'yes') bad.push('no ping');
           if (row.ssh_key === 'NO') bad.push('key login fails');
           else if (row.ssh_key !== 'yes' && row.ssh_key !== 'n/a') bad.push(row.ssh_key || 'key login not tried');
-          for (const k of ['claude', 'codex', 'gemini', 'node'] as const) {
+          for (const k of ['claude', 'codex', 'gemini', 'hf', 'node'] as const) {
             if (row[k] === 'missing' || row[k] === '-' || row[k] === '') bad.push(`${k} missing`);
             else if (row[k].startsWith('error:')) bad.push(`${k} does not run (${row[k].slice(6).trim()})`);
           }
@@ -332,7 +334,7 @@ Every inventory row except the router is listed; only computers (role admin, wor
             : `${problems.length} problem(s)`;
         const others = rows.filter((row) => !computers.has(row.host)).map((row) => row.host);
         return ok(
-          `${summary} (${md})\n\n${mdTable(rows, ['host', 'ping', 'ssh_key', 'claude', 'codex', 'gemini', 'node', 'os'])}\n\n${problems.map((x) => `- ${x}`).join('\n')}${others.length ? `\nnot counted (not a computer): ${others.join(', ')}` : ''}`,
+          `${summary} (${md})\n\n${mdTable(rows, ['host', 'ping', 'ssh_key', 'claude', 'codex', 'gemini', 'hf', 'node', 'os'])}\n\n${problems.map((x) => `- ${x}`).join('\n')}${others.length ? `\nnot counted (not a computer): ${others.join(', ')}` : ''}`,
           out,
         );
       } catch (e) {

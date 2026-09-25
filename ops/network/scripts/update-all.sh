@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # Update this macOS or Linux machine: OS packages, Homebrew, snap/flatpak if
-# present, and the three AI CLIs. Never reboots; prints REBOOT_REQUIRED=yes
-# when one is needed so you can schedule it. Removes nothing (no autoremove,
-# no Homebrew cleanup) unless --cleanup, and leaves a new major macOS version
-# alone unless --major-upgrade: both need Sanjay's yes. Run on the target, or
-# push it with:  run-remote.sh --os linux --tty update-all   (--tty so sudo can ask).
+# present, and the AI CLIs (claude, codex, gemini, hf). Never reboots; prints
+# REBOOT_REQUIRED=yes when one is needed so you can schedule it. Removes
+# nothing (no autoremove, no Homebrew cleanup) unless --cleanup, and leaves a
+# new major macOS version alone unless --major-upgrade: both need Sanjay's yes.
+# Run on the target, or push it with:  run-remote.sh --os linux --tty update-all
+# (--tty so sudo can ask).
 #
 # Last line: REBOOT_REQUIRED=yes|no|unknown. Exit: 0 every step worked, 1 a step
 # failed (UPDATE_FAILED= names it), 2 bad arguments.
@@ -17,7 +18,7 @@ usage() {
 Usage: update-all.sh [--no-os] [--no-clis] [--cleanup] [--major-upgrade]
 Updates OS packages, Homebrew, snap/flatpak and the AI CLIs. Never reboots.
   --no-os          skip OS packages, Homebrew, App Store, snap and flatpak
-  --no-clis        skip claude, codex and gemini
+  --no-clis        skip claude, codex, gemini and hf
   --cleanup        also remove packages and caches: apt dist-upgrade removals and autoremove,
                    Homebrew cleanup (ask Sanjay first)
   --major-upgrade  macOS: also install a new major macOS version (ask Sanjay first)
@@ -44,6 +45,7 @@ SUDO=""; [ "$(id -u)" -ne 0 ] && have sudo && SUDO="sudo"
 OS="$(uname -s)"; REBOOT=unknown; FAILED=""
 HOST="$(uname -n)"; HOST="${HOST%%.*}"
 export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:/opt/homebrew/bin:/usr/local/bin:$PATH:/usr/local/sbin:/usr/sbin:/sbin"
+export HF_HUB_DISABLE_UPDATE_CHECK=1   # hf's daily hint goes to stderr ahead of --version; hf update still checks
 failed() { FAILED="$FAILED $1"; warn "$1 failed"; }
 
 # Root for package managers: fail fast when sudo would have to ask and cannot.
@@ -201,10 +203,13 @@ if [ "$NO_CLIS" = 0 ]; then
     npm install -g --no-fund --no-audit @google/gemini-cli@latest >/dev/null 2>&1 \
       || { echo "  (npm update of Gemini CLI failed; rerun bootstrap-ai-clis.sh)"; failed gemini; }
   fi
+  if have hf; then   # installer, brew or pip, whichever it came from; refreshes the hf-cli skill too
+    log "Hugging Face CLI"; hf update 2>&1 | tail -2; [ "${PIPESTATUS[0]}" -eq 0 ] || failed hf
+  fi
 fi
 
 log "versions on $HOST:"
-for c in claude codex gemini node; do
+for c in claude codex gemini hf node; do
   if have "$c"; then printf '  %-7s %s\n' "$c" "$("$c" --version 2>&1 | head -1)"; else printf '  %-7s missing\n' "$c"; fi
 done
 f="${FAILED# }"; [ -z "$f" ] || echo "UPDATE_FAILED=${f// /,}"

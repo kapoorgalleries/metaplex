@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # The end-state check. For every selected host: ping, key-only SSH login, and
-# the versions of claude, codex, gemini and node. Prints a table and saves it
-# as Markdown in out/verify-<timestamp>-<pid>.md (the "saved:" line names it)
-# so it can be pasted into status.md.
+# the versions of claude, codex, gemini, hf and node. Prints a table and saves
+# it as Markdown in out/verify-<timestamp>-<pid>.md (the "saved:" line names
+# it) so it can be pasted into status.md.
 #
 # Usage: verify.sh [--host a,b] [--os linux] [--role new] [--trimurti yes]
 # Lists every inventory row except the router. Only computers (role admin,
 # workstation or new) need the CLIs and count for the verdict; other rows show
-# n/a there. A computer is green when it pings, the key logs in, all four
+# n/a there. A computer is green when it pings, the key logs in, all five
 # --version calls succeed and node is 20 or newer. This machine's own row is
 # probed locally when its ssh_port is blank. When the admin key cannot be used
 # (missing, or locked with no ssh-agent holding it) or a login fails, that is
@@ -22,7 +22,8 @@ case "$REST" in *[![:space:]]*) bad_usage "unexpected argument:$REST" ;; esac
 check_inventory
 
 UNIX_PROBE='export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
-for c in claude codex gemini node; do
+export HF_HUB_DISABLE_UPDATE_CHECK=1   # else hf may print its daily hint (stderr) before the version
+for c in claude codex gemini hf node; do
   if ! command -v "$c" >/dev/null 2>&1; then v=missing
   elif o="$("$c" --version 2>&1 </dev/null)"; then v="$(printf "%s\n" "$o" | head -1)"; [ -n "$v" ] || v="error: printed no version"
   else v="error: $(printf "%s\n" "$o" | head -1)"; fi
@@ -35,13 +36,14 @@ printf "os=%s\n" "${os:-$(uname -sr)}"'
 # Fed to "powershell -Command -", which runs stdin one statement at a time and
 # drops an unfinished multi-line statement at EOF: keep each statement on one line.
 WIN_PROBE='$env:Path = "$env:USERPROFILE\.local\bin;$env:LOCALAPPDATA\Programs\OpenAI\Codex\bin;$env:APPDATA\npm;" + $env:Path
-foreach ($c in "claude","codex","gemini","node") { $v = "missing"; if (Get-Command $c -ErrorAction SilentlyContinue) { try { $global:LASTEXITCODE = 0; $o = @(& $c --version 2>&1 | ForEach-Object { "$_" }); $v = "$($o | Select-Object -First 1)"; if ($LASTEXITCODE -ne 0) { $v = "error: $v" } elseif (-not $v) { $v = "error: printed no version" } } catch { $v = "error: " + $_.Exception.Message } }; "$c=$v" }
+$env:HF_HUB_DISABLE_UPDATE_CHECK = "1"
+foreach ($c in "claude","codex","gemini","hf","node") { $v = "missing"; if (Get-Command $c -ErrorAction SilentlyContinue) { try { $global:LASTEXITCODE = 0; $o = @(& $c --version 2>&1 | ForEach-Object { "$_" }); $v = "$($o | Select-Object -First 1)"; if ($LASTEXITCODE -ne 0) { $v = "error: $v" } elseif (-not $v) { $v = "error: printed no version" } } catch { $v = "error: " + $_.Exception.Message } }; "$c=$v" }
 "os=" + (Get-CimInstance Win32_OperatingSystem).Caption'
 WIN_PS="powershell -NoProfile -ExecutionPolicy Bypass -Command -"
 
 MD="$OUT_DIR/verify-$(date +%Y%m%d-%H%M%S)-$$.md"   # $$: two runs in one second get a file each
 {
-  printf '| host | ping | ssh key | claude | codex | gemini | node | os |\n|---|---|---|---|---|---|---|---|\n'
+  printf '| host | ping | ssh key | claude | codex | gemini | hf | node | os |\n|---|---|---|---|---|---|---|---|---|\n'
 } > "$MD"
 
 HOSTS="$(select_hosts all)"; [ -n "$HOSTS" ] || die "no hosts selected from $INVENTORY"
@@ -62,7 +64,7 @@ COMPUTERS=0; NOT_GREEN=""; NG=0; OTHERS=""
 while IFS=, read -r name ip mac os user role port trimurti notes <&3; do
   host="${ip:-$name}"; target="$user@$host"
   if ping_host "$host"; then p="yes"; else p="NO"; fi
-  claude=; codex=; gemini=; node=; osname=; sshok="NO"; out=""; rc=255; loginerr=""
+  claude=; codex=; gemini=; hf=; node=; osname=; sshok="NO"; out=""; rc=255; loginerr=""
   why="$(ssh_skip_reason "$user" "$port")"
   win=0; [ "$(lower "$os")" = "windows" ] && win=1
   if [ -n "$why" ] && [ -n "$ip" ] && case "$LOCAL_IPS" in *" $ip "*) true ;; *) false ;; esac; then
@@ -87,7 +89,7 @@ while IFS=, read -r name ip mac os user role port trimurti notes <&3; do
   while IFS='=' read -r k v; do
     v="${v%$'\r'}"
     case "$k" in
-      claude) claude="$v" ;; codex) codex="$v" ;; gemini) gemini="$v" ;; node) node="$v" ;; os) osname="$v" ;;
+      claude) claude="$v" ;; codex) codex="$v" ;; gemini) gemini="$v" ;; hf) hf="$v" ;; node) node="$v" ;; os) osname="$v" ;;
     esac
   done <<< "$out"
   if is_computer "$role"; then
@@ -95,13 +97,13 @@ while IFS=, read -r name ip mac os user role port trimurti notes <&3; do
     [ "$p" = yes ] || bad="$bad, no ping"
     case "$sshok" in
       yes|n/a)
-        for c in "claude=$claude" "codex=$codex" "gemini=$gemini" "node=$node"; do
+        for c in "claude=$claude" "codex=$codex" "gemini=$gemini" "hf=$hf" "node=$node"; do
           case "${c#*=}" in ""|missing) bad="$bad, ${c%%=*} missing" ;; error:*) bad="$bad, ${c%%=*} does not run (${c#*=error: })" ;; esac
         done
         m="${node#v}"; m="${m%%.*}"
         case "$m" in ''|*[!0-9]*) ;; *) [ "$m" -ge 20 ] || bad="$bad, node $node is too old (need 20+)" ;; esac ;;
       *)  # nothing was probed, so the CLIs are unknown rather than missing
-        claude="?"; codex="?"; gemini="?"; node="?"
+        claude="?"; codex="?"; gemini="?"; hf="?"; node="?"
         case "$sshok" in
           NO) bad="$bad, key login fails${loginerr:+ ($loginerr)}, CLIs not checked" ;;
           *)  bad="$bad, $sshok, CLIs not checked" ;;
@@ -110,10 +112,10 @@ while IFS=, read -r name ip mac os user role port trimurti notes <&3; do
     [ -z "$bad" ] || { NG=$((NG + 1)); NOT_GREEN="$NOT_GREEN
   $name: ${bad#, }"; }
   else
-    claude="n/a"; codex="n/a"; gemini="n/a"; node="n/a"; OTHERS="$OTHERS $name"
+    claude="n/a"; codex="n/a"; gemini="n/a"; hf="n/a"; node="n/a"; OTHERS="$OTHERS $name"
   fi
-  printf '| %s | %s | %s | %s | %s | %s | %s | %s |\n' "$name" "$p" "$(cell "$sshok")" "$(cell "$claude")" "$(cell "$codex")" \
-    "$(cell "$gemini")" "$(cell "$node")" "$(cell "$osname")" >> "$MD"
+  printf '| %s | %s | %s | %s | %s | %s | %s | %s | %s |\n' "$name" "$p" "$(cell "$sshok")" "$(cell "$claude")" "$(cell "$codex")" \
+    "$(cell "$gemini")" "$(cell "$hf")" "$(cell "$node")" "$(cell "$osname")" >> "$MD"
 done 3<<< "$HOSTS"
 
 if have column; then column -t -s'|' "$MD"; else cat "$MD"; fi

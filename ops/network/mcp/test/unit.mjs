@@ -190,7 +190,7 @@ console.log('login names: ok');
 for (const a of ['--cleanup', '--major-upgrade', '-Drivers', '--drivers', '-drivers', '-FeatureUpgrades', '-featureupgrades', '--feature-upgrades', '--MAJOR-UPGRADE', '--cleanup=yes']) {
   assert.ok(HARD_RULE_FLAG.test(a), `refuses ${a}`);
 }
-for (const a of ['--no-os', '--no-clis', '-NoOS', '-NoCLIs', '-AllUpdates', '--all-updates', '--skip-gemini', '-WithGit', '-Pwsh7']) {
+for (const a of ['--no-os', '--no-clis', '-NoOS', '-NoCLIs', '-AllUpdates', '--all-updates', '--skip-gemini', '--skip-hf', '-SkipHf', '--with-claude-hf-mcp', '-WithClaudeHfMcp', '-WithGit', '-Pwsh7']) {
   assert.ok(!HARD_RULE_FLAG.test(a), `allows ${a}`);
   assert.equal(refusedArgs([a], []), '');
 }

@@ -204,9 +204,9 @@ if ($Codex) {
 # 3b. Claude Code.
 if (-not (Have 'claude')) {
   Log "Claude Code is not installed; installing it with the kit's bootstrap (Claude only)"
-  if ($DryRun) { Write-Host '  [dry-run] scripts\bootstrap-ai-clis.ps1 -SkipCodex -SkipGemini -SkipNode' }
+  if ($DryRun) { Write-Host '  [dry-run] scripts\bootstrap-ai-clis.ps1 -SkipCodex -SkipGemini -SkipHf -SkipNode' }
   else {
-    & (Join-Path $Ops 'scripts\bootstrap-ai-clis.ps1') -SkipCodex -SkipGemini -SkipNode
+    & (Join-Path $Ops 'scripts\bootstrap-ai-clis.ps1') -SkipCodex -SkipGemini -SkipHf -SkipNode
     $env:Path = "$env:USERPROFILE\.local\bin;" + [Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' + [Environment]::GetEnvironmentVariable('Path', 'User')
   }
 }

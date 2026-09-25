@@ -1,0 +1,44 @@
+{
+  "permissions": {
+    "ask": [
+      "mcp__*__hf_jobs",
+      "mcp__*__dynamic_space",
+      "mcp__*__create_repo",
+      "mcp__*__hf_sandbox",
+      "mcp__*__hf_sandbox_exec",
+      "mcp__*__hf_sandbox_fs",
+      "Bash(hf jobs *)",
+      "Bash(hf endpoints *)",
+      "Bash(hf sandbox *)",
+      "Bash(hf spaces *)",
+      "Bash(hf repos *)",
+      "Bash(hf upload *)",
+      "Bash(hf upload-large-folder *)",
+      "Bash(hf cp *)",
+      "Bash(hf sync *)",
+      "Bash(hf buckets *)",
+      "Bash(hf collections *)",
+      "Bash(hf discussions *)",
+      "Bash(hf webhooks *)",
+      "PowerShell(hf jobs *)",
+      "PowerShell(hf endpoints *)",
+      "PowerShell(hf sandbox *)",
+      "PowerShell(hf spaces *)",
+      "PowerShell(hf repos *)",
+      "PowerShell(hf upload *)",
+      "PowerShell(hf upload-large-folder *)",
+      "PowerShell(hf cp *)",
+      "PowerShell(hf sync *)",
+      "PowerShell(hf buckets *)",
+      "PowerShell(hf collections *)",
+      "PowerShell(hf discussions *)",
+      "PowerShell(hf webhooks *)"
+    ],
+    "deny": [
+      "Bash(hf auth token)",
+      "Bash(hf auth token *)",
+      "PowerShell(hf auth token)",
+      "PowerShell(hf auth token *)"
+    ]
+  }
+}

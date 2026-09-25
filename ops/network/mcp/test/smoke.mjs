@@ -3,7 +3,8 @@
 // inventory.csv, which holds the gallery's machines), so nothing in the repo is
 // modified and the result does not depend on it. Exercises tool listing,
 // resources, inventory read/merge/remove, the router guard, SSH probes that
-// must fail fast and the job API's error path. Run with `npm test`.
+// must fail fast, verify.sh's table parsing (with the hf column) and the job
+// API's error path. Run with `npm test`.
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import assert from 'node:assert/strict';
@@ -53,6 +54,8 @@ assert.equal(listed.trimurti_run_script.annotations.destructiveHint, true, 'run_
 // the user pattern a client validates against has no flags: it must take "Sanjay Kapoor" and refuse "-x"
 const userPattern = new RegExp(listed.trimurti_upsert_host.inputSchema.properties.user.anyOf?.[0]?.pattern ?? listed.trimurti_upsert_host.inputSchema.properties.user.pattern);
 assert.ok(userPattern.test('Sanjay Kapoor') && !userPattern.test('-x') && !userPattern.test('a,b'));
+assert.match(listed.trimurti_run_script.description, /--skip-hf/, 'bootstrap flags documented');
+assert.ok(listed.trimurti_verify_hosts.outputSchema.properties.rows.items.properties.hf, 'verify rows carry hf');
 
 const resources = (await client.listResources()).resources.map((r) => r.uri).sort();
 assert.ok(resources.includes('trimurti://readme') && resources.includes('trimurti://inventory') && resources.includes('trimurti://agents'));
@@ -165,6 +168,17 @@ assert.deepEqual(
   ['gallery-desk', 'studio-mac', 'new-pc-1', 'new-pc-2', 'new-pc-3', 'desktop-ab12cd', 'h9', 'h10'],
   'no filter: computers only, never the router or the NAS',
 );
+
+// verify.sh end to end. Without an admin key nothing is probed, so every CLI cell reads '?', but
+// the table's hf column is there and is parsed (new-pc-2 has no ip yet, so its ping fails at once).
+r = await client.callTool({ name: 'trimurti_verify_hosts', arguments: { name: 'new-pc-2', timeout_seconds: 60 } });
+assert.equal(r.isError, undefined, 'verify.sh ran and produced a table');
+assert.equal(r.structuredContent.all_green, false);
+assert.match(r.structuredContent.key_problem, /admin key not found/);
+assert.deepEqual(r.structuredContent.rows.map((x) => [x.host, x.ssh_key, x.hf]), [['new-pc-2', 'no admin key', '?']], 'hf column parsed');
+assert.match(r.content[0].text, /\| hf \|/, 'hf column in the table');
+assert.ok(r.structuredContent.problems.some((p) => /^new-pc-2: .*no admin key/.test(p)), r.structuredContent.problems.join('; '));
+console.log('verify:', r.structuredContent.problems.join('; ').slice(0, 90));
 
 for (const [tool, args] of [
   ['trimurti_test_ssh', { role: 'router' }],
