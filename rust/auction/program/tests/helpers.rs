@@ -1,7 +1,9 @@
-use solana_program::{hash::Hash, program_pack::Pack, pubkey::Pubkey, system_instruction};
+use solana_program::{
+    clock::Clock, hash::Hash, program_pack::Pack, pubkey::Pubkey, system_instruction, sysvar,
+};
 use solana_program_test::*;
 use solana_sdk::{
-    account::Account,
+    account::{from_account, Account},
     signature::{Keypair, Signer},
     transaction::Transaction,
     transport::TransportError,
@@ -125,6 +127,11 @@ pub async fn get_token_balance(banks_client: &mut BanksClient, token: &Pubkey) -
     account_info.amount
 }
 
+pub async fn get_clock(banks_client: &mut BanksClient) -> Clock {
+    let account = get_account(banks_client, &sysvar::clock::id()).await;
+    from_account(&account).expect("clock sysvar")
+}
+
 pub async fn get_token_supply(banks_client: &mut BanksClient, mint: &Pubkey) -> u64 {
     let mint_account = banks_client.get_account(*mint).await.unwrap().unwrap();
     let account_info =
@@ -132,6 +139,10 @@ pub async fn get_token_supply(banks_client: &mut BanksClient, mint: &Pubkey) -> 
     account_info.supply
 }
 
+// Threading price_floor through takes this to 8 parameters. Same treatment as place_bid,
+// cancel_bid and claim_bid below: these mirror the instruction's own argument list, and
+// bundling them into a struct would add an indirection to keep in sync by hand.
+#[allow(clippy::too_many_arguments)]
 pub async fn create_auction(
     banks_client: &mut BanksClient,
     program_id: &Pubkey,
@@ -140,6 +151,7 @@ pub async fn create_auction(
     resource: &Pubkey,
     mint_keypair: &Pubkey,
     max_winners: usize,
+    price_floor: PriceFloor,
 ) -> Result<(), TransportError> {
     let transaction = Transaction::new_signed_with_payer(
         &[instruction::create_auction_instruction(
@@ -152,7 +164,7 @@ pub async fn create_auction(
                 resource: *resource,
                 token_mint: *mint_keypair,
                 winners: WinnerLimit::Capped(max_winners),
-                price_floor: PriceFloor::None([0u8; 32]),
+                price_floor,
             },
         )],
         Some(&payer.pubkey()),
@@ -315,10 +327,13 @@ pub async fn claim_bid(
     mint: &Pubkey,
 ) -> Result<(), TransportError> {
     let transaction = Transaction::new_signed_with_payer(
+        // claim_bid_instruction takes (destination, authority) -- the order metaplex's own CPI
+        // uses (metaplex/program/src/processor/claim_bid.rs:36-39). This passed them swapped,
+        // which never mattered while the settlement block in lib.rs could not run.
         &[instruction::claim_bid_instruction(
             *program_id,
-            authority.pubkey(),
             *seller,
+            authority.pubkey(),
             bidder.pubkey(),
             bidder_spl_account.pubkey(),
             *mint,
