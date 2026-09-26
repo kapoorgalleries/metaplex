@@ -329,7 +329,8 @@ function Add-GeminiHf {
     [IO.File]::WriteAllBytes($tmp, [byte[]]($bom + $utf8.GetBytes($after)))
     if ($exists) {
       if (-not (Test-Path -LiteralPath $cfg) -or [Convert]::ToBase64String([IO.File]::ReadAllBytes($cfg)) -cne [Convert]::ToBase64String($original)) { return 2 }
-      [IO.File]::Replace($tmp, $cfg, $null) # Keeps the file's ACL and attributes.
+      # Keeps the file's ACL and attributes. [NullString]: PowerShell would pass `$null as "" (an illegal path).
+      [IO.File]::Replace($tmp, $cfg, [NullString]::Value)
     } else {
       if (Test-Path -LiteralPath $cfg) { return 2 }
       [IO.File]::Move($tmp, $cfg)
