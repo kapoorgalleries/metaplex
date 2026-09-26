@@ -122,9 +122,13 @@ transcripts, counting only calls that change nothing:
 
 - GitHub reads: `pull_request_read`, `search_pull_requests`, `search_code`,
   `search_issues`, `list_pull_requests`, `get_file_contents`;
-- Supabase function metadata: `list_edge_functions`, `get_edge_function`;
-- `Bash(git ls-tree *)`. Claude Code already allows the other read-only git
-  commands without a rule.
+- Supabase function metadata: `list_edge_functions`, `get_edge_function`.
+
+No shell rule is added. `git ls-tree`, the most frequent read-only git
+command Claude Code does not auto-allow, was on the list and was removed on
+Codex's review. In a partial clone it fetches missing objects from the
+promisor remote on demand. With an `ext::` remote allowed, that fetch runs an
+external command. So it is not read-only.
 
 These still prompt: every write, including GitHub comments, PR edits and
 merges, and Supabase `deploy_edge_function`. `execute_sql` also prompts: it
