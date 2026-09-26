@@ -32,8 +32,13 @@ mod helpers;
 mod errors;
 use errors::AuctionError;
 
-/// Asserts that `result` is the auction program rejecting the transaction's only instruction with
-/// `expected`. Every helper that sends an auction instruction sends it alone, at index 0.
+/// Asserts that `result` is the transaction's only instruction (index 0) failing with
+/// `Custom(expected as u32)`. Every helper that sends an auction instruction sends it alone.
+///
+/// Under BPF a program that the auction program CPIs into (SPL Token, System) surfaces its own
+/// custom errors in the same shape, so a low code alone cannot name the program that raised it.
+/// Every rejection asserted in this file is raised by an auction-program check that runs before
+/// any CPI in that instruction.
 fn assert_auction_error(result: Result<(), TransportError>, expected: AuctionError, what: &str) {
     let code = expected.clone() as u32;
     match result {
@@ -304,11 +309,14 @@ async fn test_correct_runs() {
         },
         // Bids below the current top are accepted and ranked; ties go to the earlier bid.
         //
-        // No strategy above ever inserts anywhere but the end of `bids`. This one takes every
-        // branch of BidState::place_bid (processor.rs:259-314): insert at 0 (2000, then 1000),
-        // mid-array (3000 below 4000), and equal-amount (bidder 3's 3000 ranks below bidder 2's
-        // earlier 3000). A "must beat the top bid" rule would reject the second bid; a
-        // push-only insert would rank 1000 above 4000.
+        // No strategy above ever inserts anywhere but the end of `bids`. In
+        // BidState::place_bid (processor.rs:259-314) this one takes insert-at-0 (2000, then
+        // 1000; :291-294), the mid-array insert (3000 below 4000; :269-271), and the tie inserted
+        // just below an equal, earlier bid (bidder 3's 3000 below bidder 2's; :284-287). A "must
+        // beat the top bid" rule would reject the second bid; a push-only insert would rank 1000
+        // above 4000. The three-way-tie strategy below covers the remaining tie branches.
+        // Eviction (:299-301) is not reached by any strategy: it needs more than
+        // max_array_size_for(3) = 8 live bids, and the fixture has five bidders.
         Test {
             actions: vec![
                 Action::Bid(0, 4000),
@@ -326,14 +334,17 @@ async fn test_correct_runs() {
         // A winner cancelling promotes the best retained losing bid into the winner set.
         //
         // This is what the retention buffer (max_array_size_for, processor.rs:247) is for. If
-        // `bids` kept only `max_winners` entries, bidder 3's bid would have evicted bidder 0's,
-        // and after the cancel there would be two winners instead of three.
+        // `bids` kept only `max_winners` entries, bidder 3's and bidder 4's bids would have
+        // evicted the lower ones, and after the cancel there would be two winners instead of
+        // three. Bidder 4's 500 is also retained, so this shows the better of the two (1000) is
+        // the one promoted.
         Test {
             actions: vec![
                 Action::Bid(0, 1000),
                 Action::Bid(1, 2000),
                 Action::Bid(2, 3000),
                 Action::Bid(3, 4000),
+                Action::Bid(4, 500),
                 Action::Cancel(3),
                 Action::End,
             ],
@@ -345,13 +356,29 @@ async fn test_correct_runs() {
         // A bid exactly at the reserve price is accepted, and wins.
         //
         // place_bid.rs:238 rejects `amount < min` since 377f6cd (it was `<=`). This pins that
-        // boundary from the accepting side; test_incorrect_runs pins the rejecting side.
+        // boundary from the accepting side; test_incorrect_runs rejects 4999, one below it.
         Test {
             actions: vec![Action::Bid(0, 5000), Action::Bid(1, 6000), Action::End],
             expect: vec![(0, 5000), (1, 6000)],
             max_winners: 3,
             price_floor: PriceFloor::MinimumPrice([5000, 0, 0, 0]),
             seller_collects: 11000,
+        },
+        // Three equal bids: the earliest ranks highest.
+        //
+        // Covers the tie branches the ranked-insert strategy does not: a tie with the lowest bid
+        // (processor.rs:279-282) and stepping past a run of equal bids (:289).
+        Test {
+            actions: vec![
+                Action::Bid(0, 3000),
+                Action::Bid(1, 3000),
+                Action::Bid(2, 3000),
+                Action::End,
+            ],
+            expect: vec![(2, 3000), (1, 3000), (0, 3000)],
+            max_winners: 3,
+            price_floor: PriceFloor::None([0; 32]),
+            seller_collects: 9000,
         },
     ];
 
@@ -547,7 +574,8 @@ async fn test_correct_runs() {
                 assert_eq!(auction.winner_at(strategy.expect.len()), None);
 
                 // Any bid retained beyond the winner set must rank at or below every winner.
-                // Strategies 1 and 6 end with retained losing bids.
+                // The successive-bids, ranked-insert and promotion strategies end with retained
+                // losing bids.
                 if let Some((_, lowest_winner)) = strategy.expect.first() {
                     for rank in strategy.expect.len()..bids.len() {
                         assert!(auction.bid_state.amount(rank) <= *lowest_winner);
@@ -665,7 +693,8 @@ async fn test_correct_runs() {
                 }
 
                 // A losing bid cannot be claimed: claim_bid refuses with InvalidState before it
-                // moves anything (claim_bid.rs:123-126), and the loser's escrow stays put.
+                // moves anything (claim_bid.rs:123-126). The escrow check follows from the failed
+                // transaction being rolled back; it is kept as a guard on the fixture.
                 for index in losers.iter() {
                     let pot = &bidders[*index].1.pubkey();
                     let escrowed = helpers::get_token_balance(&mut banks_client, pot).await;
@@ -690,6 +719,35 @@ async fn test_correct_runs() {
                         helpers::get_token_balance(&mut banks_client, pot).await,
                         escrowed
                     );
+                }
+
+                // A loser can still withdraw after the end: cancel_bid's guard refuses only
+                // winners, so the loser's escrow goes back to their wallet. Together with the
+                // winner check above, this pins both halves of `ended && is_winner`.
+                for index in losers.iter() {
+                    let wallet = &bidders[*index].0.pubkey();
+                    let pot = &bidders[*index].1.pubkey();
+                    let before = (
+                        helpers::get_token_balance(&mut banks_client, wallet).await,
+                        helpers::get_token_balance(&mut banks_client, pot).await,
+                    );
+                    helpers::cancel_bid(
+                        &mut banks_client,
+                        &recent_blockhash,
+                        &program_id,
+                        &payer,
+                        &bidders[*index].0,
+                        &bidders[*index].1,
+                        &resource,
+                        &mint,
+                    )
+                    .await
+                    .expect("a loser cancelling after the end");
+                    assert_eq!(
+                        helpers::get_token_balance(&mut banks_client, wallet).await,
+                        before.0 + before.1
+                    );
+                    assert_eq!(helpers::get_token_balance(&mut banks_client, pot).await, 0);
                 }
 
                 // Total claimed balance should match what we expect
@@ -831,8 +889,8 @@ async fn try_action(
 #[cfg(feature = "test-bpf")]
 #[tokio::test]
 async fn test_incorrect_runs() {
-    // An auction run that must be rejected: every `setup` action has to succeed, and then
-    // `rejected` has to fail with `error` and move no funds.
+    // An auction run that must be rejected: every `setup` action has to succeed, then (after
+    // warping the clock past the end, if `warp`) `rejected` has to fail with `error`.
     //
     // This used to record only whether any action failed, and stopped at the first failure, so a
     // setup action failing for an unrelated reason passed as the expected rejection. Reverting
@@ -841,6 +899,7 @@ async fn test_incorrect_runs() {
     #[derive(Debug)]
     struct Test {
         setup: Vec<Action>,
+        warp: bool,
         rejected: Action,
         error: AuctionError,
         max_winners: usize,
@@ -848,10 +907,12 @@ async fn test_incorrect_runs() {
     }
 
     let strategies = [
-        // Cancelling a bid that was never placed: the bidder's metadata account does not exist,
-        // so it is not owned by the program (cancel_bid.rs:79).
+        // Cancelling a bid that was never placed. parse_accounts' owner checks reject it: the
+        // first to fail is the bidder's metadata PDA (cancel_bid.rs:79), which does not exist;
+        // the bidder-pot PDA check at :81 would fail with the same code.
         Test {
             setup: vec![],
+            warp: false,
             rejected: Action::Cancel(0),
             error: AuctionError::IncorrectOwner,
             max_winners: 3,
@@ -866,34 +927,53 @@ async fn test_incorrect_runs() {
         // It was green while testing nothing it claimed. Reduced to the rule that actually fired.
         Test {
             setup: vec![Action::Bid(0, 5000), Action::Bid(1, 6000)],
+            warp: false,
             rejected: Action::Bid(0, 7000),
             error: AuctionError::BidAlreadyActive,
             max_winners: 3,
             price_floor: PriceFloor::None([0; 32]),
         },
-        // Bidding below the auction's reserve price (place_bid.rs:231-241).
+        // Bidding one below the auction's reserve price (place_bid.rs:231-241).
         //
         // The original comment here was "Bidding less than any bidder should fail", with no price
         // floor set. The program has no such rule: BidState::place_bid does a ranked insert that
-        // accepts a new lowest bid (the "Inserting at 0" branch, processor.rs:259-314), and when
+        // accepts a new lowest bid (the "Inserting at 0" branch, processor.rs:291-294), and when
         // the array is full it evicts the lowest bid (processor.rs:299-301) rather than refusing
         // one. The amount rule it does have is the price floor, applied at bid time and again at
         // settlement, where is_winner/num_winners/winner_at inject it as `minimum`
         // (processor.rs:155-177). So set one: at a floor of 5000 the 5000 and 6000 bids must be
-        // accepted and the 1000 bid rejected. The boundary is `amount < min` since 377f6cd, so a
-        // bid exactly at the floor is accepted.
+        // accepted and 4999 rejected. With the at-floor strategy in test_correct_runs, that pins
+        // the `amount < min` boundary (377f6cd) from both sides.
         Test {
             setup: vec![Action::Bid(0, 5000), Action::Bid(1, 6000)],
-            rejected: Action::Bid(2, 1000),
+            warp: false,
+            rejected: Action::Bid(2, 4999),
             error: AuctionError::BidTooSmall,
             max_winners: 3,
             price_floor: PriceFloor::MinimumPrice([5000, 0, 0, 0]),
         },
-        // Bidding after the auction has been explicitly ended (place_bid.rs:227-229).
+        // Bidding after the auction has been explicitly ended, in the same second.
+        //
+        // The clock still equals ended_at, so ended(now) is false and place_bid reaches its state
+        // check (place_bid.rs:227-229).
         Test {
             setup: vec![Action::Bid(0, 5000), Action::End],
+            warp: false,
             rejected: Action::Bid(1, 6000),
             error: AuctionError::InvalidState,
+            max_winners: 3,
+            price_floor: PriceFloor::None([0; 32]),
+        },
+        // Bidding after the auction has ended, once the clock has passed ended_at.
+        //
+        // Now ended(now) is true, so place_bid tries to move the auction to Ended
+        // (place_bid.rs:139-145) -- which it already is -- and AuctionState::end refuses the
+        // transition.
+        Test {
+            setup: vec![Action::Bid(0, 5000), Action::End],
+            warp: true,
+            rejected: Action::Bid(1, 6000),
+            error: AuctionError::AuctionTransitionInvalid,
             max_winners: 3,
             price_floor: PriceFloor::None([0; 32]),
         },
@@ -903,7 +983,7 @@ async fn test_incorrect_runs() {
     for strategy in strategies.iter() {
         let (
             program_id,
-            _context,
+            mut context,
             mut banks_client,
             bidders,
             payer,
@@ -935,7 +1015,33 @@ async fn test_incorrect_runs() {
             }
         }
 
-        // The rejected action's bidder: its wallet and pot must not change.
+        // Move the clock past ended_at, as test_correct_runs does before settling.
+        let recent_blockhash = if strategy.warp {
+            let slot = banks_client.get_root_slot().await.unwrap();
+            context.warp_to_slot(slot + 1000).unwrap();
+            let auction: AuctionData = try_from_slice_unchecked(
+                &banks_client
+                    .get_account(auction_pubkey)
+                    .await
+                    .expect("get_account")
+                    .expect("account not found")
+                    .data,
+            )
+            .unwrap();
+            let now = helpers::get_clock(&mut banks_client).await.unix_timestamp;
+            assert!(
+                now > auction
+                    .ended_at
+                    .expect("warp strategies end the auction first"),
+                "warp did not move the clock past ended_at"
+            );
+            context.last_blockhash
+        } else {
+            recent_blockhash
+        };
+
+        // The rejected action's bidder. A failed transaction is rolled back, so these balances
+        // cannot move; the check guards the fixture, e.g. a helper sending a second transaction.
         let bidder = match strategy.rejected {
             Action::Bid(bidder, _) | Action::Cancel(bidder) => &bidders[bidder],
             Action::End => panic!("no strategy expects End to be rejected"),
