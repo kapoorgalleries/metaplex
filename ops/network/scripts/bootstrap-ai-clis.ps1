@@ -216,6 +216,129 @@ function Get-HfClientState([string]$Client) {
     return 0
   } catch { return 1 }
 }
+# Gemini's huggingface entry is spliced into settings.json as text, so no existing byte is rewritten.
+# Never `gemini mcp add` (or `remove`): Gemini 0.61 writes back the whole mcpServers map as loaded,
+# with every ${VAR} already expanded, so another server's secret would be saved in the clear.
+# Byte-for-byte parity with add_gemini_hf in bootstrap-ai-clis.sh; the scanner reads the top level
+# only and refuses anything that is not plain JSON (comments included, which PS 7 would accept).
+function Skip-JsonWs([string]$T, [int]$i) {
+  while ($i -lt $T.Length -and " `t`r`n".IndexOf($T[$i]) -ge 0) { $i++ }
+  return $i
+}
+function Skip-JsonString([string]$T, [int]$i) {
+  $i++
+  while ($i -lt $T.Length) {
+    $c = $T[$i]
+    if ($c -ceq [char]'\') { $i += 2 }
+    elseif ($c -ceq [char]'"') { return $i + 1 }
+    elseif ([int]$c -lt 0x20) { throw 'control character' }
+    else { $i++ }
+  }
+  throw 'unterminated string'
+}
+function Skip-JsonValue([string]$T, [int]$i) {
+  if ($i -ge $T.Length) { throw 'missing value' }
+  $c = $T[$i]
+  if ($c -ceq [char]'"') { return Skip-JsonString $T $i }
+  if ($c -ceq [char]'{' -or $c -ceq [char]'[') {
+    $depth = 0
+    while ($i -lt $T.Length) {
+      $c = $T[$i]
+      if ($c -ceq [char]'"') { $i = Skip-JsonString $T $i; continue }
+      if ($c -ceq [char]'/') { throw 'comment' }
+      if ($c -ceq [char]'{' -or $c -ceq [char]'[') { $depth++ }
+      elseif ($c -ceq [char]'}' -or $c -ceq [char]']') { $depth--; if ($depth -eq 0) { return $i + 1 } }
+      $i++
+    }
+    throw 'unterminated value'
+  }
+  $j = $i
+  while ($j -lt $T.Length -and ",}] `t`r`n/".IndexOf($T[$j]) -lt 0) { $j++ }
+  if ($j -eq $i) { throw 'missing value' }
+  return $j
+}
+function Add-HfToSettingsText([string]$T) {
+  $nl = if ($T.Contains("`r`n")) { "`r`n" } else { "`n" }
+  $tools = @($hfDeny | ForEach-Object { '    "' + $_ + '"' })
+  for ($k = 0; $k -lt $tools.Count - 1; $k++) { $tools[$k] += ',' }
+  # Single quotes keep ${HF_TOKEN} literal.
+  $lines = @('{', ('  "url": "' + $hfUrl + '",'), '  "type": "http",', '  "headers": {',
+    '    "Authorization": "Bearer ${HF_TOKEN}"', '  },', '  "excludeTools": [') + $tools + @('  ]', '}')
+  $body = $lines -join ($nl + '    ')
+  $i = Skip-JsonWs $T 0
+  if ($i -ge $T.Length -or $T[$i] -cne [char]'{') { throw 'root is not an object' }
+  $root = $i; $i = Skip-JsonWs $T ($i + 1)
+  $rootEmpty = $i -lt $T.Length -and $T[$i] -ceq [char]'}'
+  $servers = -1
+  while (-not $rootEmpty) {
+    if ($i -ge $T.Length -or $T[$i] -cne [char]'"') { throw 'expected a key' }
+    $k = Skip-JsonString $T $i
+    $key = ConvertFrom-Json -InputObject $T.Substring($i, $k - $i)
+    $i = Skip-JsonWs $T $k
+    if ($i -ge $T.Length -or $T[$i] -cne [char]':') { throw 'expected a colon' }
+    $v = Skip-JsonWs $T ($i + 1)
+    $i = Skip-JsonWs $T (Skip-JsonValue $T $v)
+    if ($key -ceq 'mcpServers') {
+      if ($servers -ge 0) { throw 'duplicate mcpServers' }
+      $servers = $v
+    }
+    if ($i -lt $T.Length -and $T[$i] -ceq [char]',') { $i = Skip-JsonWs $T ($i + 1) }
+    elseif ($i -lt $T.Length -and $T[$i] -ceq [char]'}') { break }
+    else { throw 'expected a comma' }
+  }
+  if ($servers -lt 0) {
+    $at = $root + 1
+    $add = $nl + '  "mcpServers": {' + $nl + '    "huggingface": ' + $body + $nl + '  }' + $(if ($rootEmpty) { $nl } else { ',' })
+  } else {
+    if ($T[$servers] -cne [char]'{') { throw 'mcpServers is not an object' }
+    $at = $servers + 1
+    $empty = $T[(Skip-JsonWs $T $at)] -ceq [char]'}'
+    $add = $nl + '    "huggingface": ' + $body + $(if ($empty) { $nl + '  ' } else { ',' })
+  }
+  return $T.Substring(0, $at) + $add + $T.Substring($at)
+}
+# 0 added; 1 unsupported layout or unwritable; 2 changed during the edit. Never logs settings text.
+function Add-GeminiHf {
+  $geminiDir = if ($env:GEMINI_CLI_HOME) { $env:GEMINI_CLI_HOME } else { $env:USERPROFILE }
+  $dir = Join-Path $geminiDir '.gemini'
+  $cfg = Join-Path $dir 'settings.json'
+  $tmp = $null
+  try {
+    $utf8 = New-Object Text.UTF8Encoding($false, $true)
+    $exists = Test-Path -LiteralPath $cfg
+    $original = $null; $bom = [byte[]]@(); $text = "{}`n"
+    if ($exists) {
+      # A link would be replaced by a plain file; leave it for manual edit.
+      if ((Get-Item -LiteralPath $cfg -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) { return 1 }
+      $original = [IO.File]::ReadAllBytes($cfg)
+      $start = 0
+      if ($original.Length -ge 3 -and $original[0] -eq 0xEF -and $original[1] -eq 0xBB -and $original[2] -eq 0xBF) { $bom = [byte[]]@(0xEF, 0xBB, 0xBF); $start = 3 }
+      $text = $utf8.GetString($original, $start, $original.Length - $start)
+    }
+    $after = Add-HfToSettingsText $text
+    # The splice must parse, carry exactly this entry, and add nothing else.
+    $was = $text | ConvertFrom-Json -ErrorAction Stop
+    $now = $after | ConvertFrom-Json -ErrorAction Stop
+    $want = '{"url":"' + $hfUrl + '","type":"http","headers":{"Authorization":"Bearer ${HF_TOKEN}"},"excludeTools":[' + (($hfDeny | ForEach-Object { '"' + $_ + '"' }) -join ',') + ']}'
+    if ((ConvertTo-Json -InputObject $now.mcpServers.huggingface -Depth 5 -Compress) -cne $want) { return 1 }
+    $wasTop = @($was.PSObject.Properties).Count; $nowTop = @($now.PSObject.Properties).Count
+    $wasServers = if ($null -ne $was.mcpServers) { @($was.mcpServers.PSObject.Properties).Count } else { 0 }
+    if ($nowTop -ne $wasTop + $(if ($null -eq $was.mcpServers) { 1 } else { 0 }) -or @($now.mcpServers.PSObject.Properties).Count -ne $wasServers + 1) { return 1 }
+    New-Item -ItemType Directory -Force -Path $dir | Out-Null
+    $tmp = Join-Path $dir ('.settings.json.' + [guid]::NewGuid().ToString('N') + '.tmp')
+    [IO.File]::WriteAllBytes($tmp, [byte[]]($bom + $utf8.GetBytes($after)))
+    if ($exists) {
+      if (-not (Test-Path -LiteralPath $cfg) -or [Convert]::ToBase64String([IO.File]::ReadAllBytes($cfg)) -cne [Convert]::ToBase64String($original)) { return 2 }
+      [IO.File]::Replace($tmp, $cfg, $null) # Keeps the file's ACL and attributes.
+    } else {
+      if (Test-Path -LiteralPath $cfg) { return 2 }
+      [IO.File]::Move($tmp, $cfg)
+    }
+    $tmp = $null
+    return 0
+  } catch { return 1 }
+  finally { if ($tmp -and (Test-Path -LiteralPath $tmp)) { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue } }
+}
 # Node 20+ at most once per run; $true when it is on PATH afterwards.
 $NodeOk = $null
 function Install-Node {
@@ -320,10 +443,10 @@ if (-not $SkipHf) {
     $state = Get-HfClientState 'gemini'
     if ($state -eq 0) { Log 'gemini: compatible user huggingface MCP server already configured; left as is' }
     elseif ($state -eq 3) {
-      # Single quotes preserve the placeholder, so neither argv nor settings contain the token value.
-      $r = Invoke-Captured 'gemini' (@('mcp', 'add', '-s', 'user', '-t', 'http', 'huggingface', $hfUrl, '-H', 'Authorization: Bearer ${HF_TOKEN}', '--exclude-tools') + $hfDeny)
-      if ($r.Code -eq 0 -and (Get-HfClientState 'gemini') -eq 0) { Log 'gemini: added the user huggingface MCP server' }
-      else { Add-Failure 'hf-mcp-gemini' 'gemini: Hugging Face MCP registration failed; check user settings' }
+      $rc = Add-GeminiHf
+      if ($rc -eq 0 -and (Get-HfClientState 'gemini') -eq 0) { Log 'gemini: added the user huggingface MCP server' }
+      elseif ($rc -eq 2) { Add-Failure 'hf-mcp-gemini' 'gemini: user settings changed during the edit; left unchanged, rerun' }
+      else { Add-Failure 'hf-mcp-gemini' 'gemini: could not add the Hugging Face entry (unsupported settings layout or unwritable file); left unchanged' }
     } else { Add-Failure 'hf-mcp-gemini' 'gemini: user settings need manual review (commented/unsupported JSON, incompatible URL or missing blocked tools); left unchanged' }
   }
   if ($WithClaudeHfMcp -and -not $SkipClaude -and (Have 'claude')) {

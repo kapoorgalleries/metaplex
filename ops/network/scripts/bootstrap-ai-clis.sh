@@ -292,7 +292,9 @@ install_hf() {
 # User-scope registration must not mistake this checkout's project entry for the user's.
 # Codex parses a private candidate config outside the checkout before any append. Existing
 # entries are preserved, but an incompatible URL/tool filter is an installation failure.
-# Gemini stores a literal environment reference, never the value of HF_TOKEN, in its settings.
+# Gemini gets a literal ${HF_TOKEN} reference, never the value, inserted into its settings as text.
+# Never `gemini mcp add` (or `remove`): Gemini 0.61 writes back the whole mcpServers map as loaded,
+# with every ${VAR} already expanded, so another server's secret would be saved in the clear.
 # Claude is opt-in because a local entry can mask a claude.ai connector.
 HF_MCP_URL="https://huggingface.co/mcp"
 HF_DENY="hf_jobs create_repo dynamic_space hf_sandbox hf_sandbox_exec hf_sandbox_fs"
@@ -383,6 +385,142 @@ except (ValueError, OSError, TypeError, AttributeError):
     sys.exit(1)
 PYJSON
 }
+add_gemini_hf() {  # 0 added; 1 unsupported layout or unwritable; 2 changed during the edit
+  local py cfg="${GEMINI_CLI_HOME:-$HOME}/.gemini/settings.json"
+  py="$(json_python)" || return 1
+  # shellcheck disable=SC2086
+  "$py" - "$cfg" "$HF_MCP_URL" $HF_DENY <<'PYJSON'
+import json, os, pathlib, stat, sys, tempfile
+# Every existing byte is kept, so nothing already in the file is re-serialised: the entry is
+# spliced in as text, as the first member of the top-level mcpServers object (created when
+# absent). Parity with Add-GeminiHf in bootstrap-ai-clis.ps1, which produces the same bytes.
+cfg, url, deny = pathlib.Path(sys.argv[1]), sys.argv[2], sys.argv[3:]
+entry = {"url": url, "type": "http", "headers": {"Authorization": "Bearer ${HF_TOKEN}"}, "excludeTools": deny}
+
+def ws(t, i):
+    while i < len(t) and t[i] in " \t\r\n":
+        i += 1
+    return i
+
+def string_end(t, i):  # t[i] is the opening quote
+    i += 1
+    while i < len(t):
+        if t[i] == "\\":
+            i += 2
+        elif t[i] == '"':
+            return i + 1
+        elif t[i] < " ":
+            raise ValueError("control character")
+        else:
+            i += 1
+    raise ValueError("unterminated string")
+
+def value_end(t, i):
+    if i >= len(t):
+        raise ValueError("missing value")
+    if t[i] == '"':
+        return string_end(t, i)
+    if t[i] in "{[":
+        depth = 0
+        while i < len(t):
+            c = t[i]
+            if c == '"':
+                i = string_end(t, i)
+                continue
+            if c == "/":
+                raise ValueError("comment")
+            if c in "{[":
+                depth += 1
+            elif c in "}]":
+                depth -= 1
+                if depth == 0:
+                    return i + 1
+            i += 1
+        raise ValueError("unterminated value")
+    j = i
+    while j < len(t) and t[j] not in ",}] \t\r\n/":
+        j += 1
+    if j == i:
+        raise ValueError("missing value")
+    return j
+
+def insert(t):
+    nl = "\r\n" if "\r\n" in t else "\n"
+    body = json.dumps(entry, indent=2).replace("\n", nl + "    ")
+    i = ws(t, 0)
+    if i >= len(t) or t[i] != "{":
+        raise ValueError("root is not an object")
+    root, i = i, ws(t, i + 1)
+    root_empty, servers = t[i:i + 1] == "}", None
+    while not root_empty:
+        if t[i:i + 1] != '"':
+            raise ValueError("expected a key")
+        k = string_end(t, i)
+        key, i = json.loads(t[i:k]), ws(t, k)
+        if t[i:i + 1] != ":":
+            raise ValueError("expected a colon")
+        v = ws(t, i + 1)
+        i = ws(t, value_end(t, v))
+        if key == "mcpServers":
+            if servers is not None:
+                raise ValueError("duplicate mcpServers")
+            servers = v
+        if t[i:i + 1] == ",":
+            i = ws(t, i + 1)
+        elif t[i:i + 1] == "}":
+            break
+        else:
+            raise ValueError("expected a comma")
+    if servers is None:
+        at = root + 1
+        add = nl + '  "mcpServers": {' + nl + '    "huggingface": ' + body + nl + "  }" + (nl if root_empty else ",")
+    else:
+        if t[servers] != "{":
+            raise ValueError("mcpServers is not an object")
+        at = servers + 1
+        add = nl + '    "huggingface": ' + body + (nl + "  " if t[ws(t, at)] == "}" else ",")
+    return t[:at] + add + t[at:]
+
+tmp = None
+try:
+    target = pathlib.Path(os.path.realpath(cfg))
+    if cfg.is_symlink() and not target.exists():
+        sys.exit(1)
+    original = target.read_bytes() if target.exists() else None
+    raw = original.decode("utf-8") if original is not None else "{}" + "\n"
+    bom = "﻿" if raw.startswith("﻿") else ""
+    text = raw[len(bom):]
+    before = json.loads(text)
+    if not isinstance(before, dict) or "huggingface" in (before.get("mcpServers") or {}):
+        sys.exit(1)
+    after = insert(text)
+    # The splice must parse to exactly the old settings plus the one entry.
+    expected = json.loads(text)
+    expected.setdefault("mcpServers", {})["huggingface"] = entry
+    if json.loads(after) != expected:
+        sys.exit(1)
+    mode = stat.S_IMODE(target.stat().st_mode) if original is not None else 0o600
+    target.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=".settings.json.", suffix=".tmp", dir=target.parent)
+    with os.fdopen(fd, "wb") as f:
+        f.write((bom + after).encode("utf-8"))
+        f.flush()
+        os.fsync(f.fileno())
+    os.chmod(tmp, mode)
+    if (target.read_bytes() if target.exists() else None) != original:
+        sys.exit(2)
+    os.replace(tmp, target)
+    tmp = None
+except Exception:  # never a traceback: it could quote settings text
+    sys.exit(1)
+finally:
+    if tmp is not None:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+PYJSON
+}
 register_hf_mcp() {
   local state
   if { [ "$SKIP_CODEX" = 0 ] && have codex; } || { [ "$SKIP_GEMINI" = 0 ] && have gemini; } || { [ "$CLAUDE_HF_MCP" = 1 ] && [ "$SKIP_CLAUDE" = 0 ] && have claude; }; then
@@ -394,13 +532,13 @@ register_hf_mcp() {
     if [ "$state" = 0 ]; then
       log "gemini: compatible user huggingface MCP server already configured; left as is"
     elif [ "$state" = 3 ]; then
-      # Options follow positionals; --exclude-tools consumes multiple values. Never echo CLI errors:
-      # they may contain interpolated configuration credentials.
-      # shellcheck disable=SC2016,SC2086
-      if gemini mcp add -s user -t http huggingface "$HF_MCP_URL" -H 'Authorization: Bearer ${HF_TOKEN}' --exclude-tools $HF_DENY >/dev/null 2>&1 && check_client_hf gemini; then
+      add_gemini_hf; state=$?
+      if [ "$state" = 0 ] && check_client_hf gemini; then
         log "gemini: added the user huggingface MCP server"
+      elif [ "$state" = 2 ]; then
+        warn "gemini: user settings changed during the edit; left unchanged, rerun"; failed hf-mcp-gemini
       else
-        warn "gemini: Hugging Face MCP registration failed; check user settings"; failed hf-mcp-gemini
+        warn "gemini: could not add the Hugging Face entry (unsupported settings layout or unwritable file); left unchanged"; failed hf-mcp-gemini
       fi
     else
       warn "gemini: user settings need manual review (commented/unsupported JSON, incompatible URL or missing blocked tools); left unchanged"; failed hf-mcp-gemini

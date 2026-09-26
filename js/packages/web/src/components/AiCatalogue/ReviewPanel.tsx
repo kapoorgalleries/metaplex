@@ -42,11 +42,15 @@ const TITLE_MAX_BYTES = MAX_NAME_BYTES;
 
 const OVERRIDE_LABEL = 'I have checked this myself';
 
-/* Worded for every case that sets usedFallback: an endpoint that refused the
- * schema, one that is never asked for it, and one that is sent it but is not
- * known to enforce it (Hugging Face, where enforcement is per provider). It
- * must not claim "not supported" for the last of those. */
 const FALLBACK_NOTE =
+  'Structured output was not supported by this endpoint — the response was ' +
+  'validated client-side instead.';
+
+/* Hugging Face sets usedFallback on every run, including those where the
+ * schema was sent and quite possibly enforced — enforcement is per provider
+ * behind the router — so it must not be told "not supported". The other
+ * providers keep the line above, word for word. */
+const HF_FALLBACK_NOTE =
   'The endpoint is not known to have enforced the record shape — the ' +
   'response was validated client-side instead.';
 
@@ -311,7 +315,11 @@ export const ReviewPanel = (props: {
         <Alert
           style={{ marginTop: 8 }}
           type="warning"
-          message={FALLBACK_NOTE}
+          message={
+            result.providerId === 'huggingface'
+              ? HF_FALLBACK_NOTE
+              : FALLBACK_NOTE
+          }
         />
       ) : null}
 
