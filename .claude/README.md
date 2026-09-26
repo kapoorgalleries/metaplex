@@ -113,3 +113,23 @@ An ask rule prompts in every permission mode, including `bypassPermissions`
 ([docs](https://code.claude.com/docs/en/permission-modes)). The file declares
 no `extraKnownMarketplaces`: HF's marketplace holds only the `hf-cli` plugin,
 which would duplicate the installer's skill.
+
+## Read-only allowlist (`.claude/settings.json`)
+
+`permissions.allow` lists the read-only tools that agents here call most often,
+so they no longer prompt. It was built on 2026-09-26 from this repo's session
+transcripts, counting only calls that change nothing:
+
+- GitHub reads: `pull_request_read`, `search_pull_requests`, `search_code`,
+  `search_issues`, `list_pull_requests`, `get_file_contents`;
+- Supabase function metadata: `list_edge_functions`, `get_edge_function`;
+- `Bash(git ls-tree *)`. Claude Code already allows the other read-only git
+  commands without a rule.
+
+These still prompt: every write, including GitHub comments, PR edits and
+merges, and Supabase `deploy_edge_function`. `execute_sql` also prompts: it
+runs arbitrary SQL, and only the `read_only=true` URL above stops it
+writing. `query_logs` prompts too, because logs can carry live guest data.
+Interpreters, package runners and `npm run` stay off the list, since any of
+them can run arbitrary code. Claude Code applies deny, then ask, then allow,
+so none of these rules overrides the Hugging Face ask and deny rules above.
