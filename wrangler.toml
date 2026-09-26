@@ -1,0 +1,42 @@
+# Cloudflare Workers (static assets) config for the Metaplex `web` app.
+#
+# This file lives at the REPO ROOT on purpose. Workers Builds runs its deploy
+# command from the configured "Root directory", which for this project is the
+# repo root -- that is why the original failure was:
+#
+#   ✘ [ERROR] Could not detect a directory containing static files
+#             (e.g. html, css and js) for the project
+#
+# wrangler found no config, assumed an assets-only Worker, scanned the root and
+# its immediate children for an index.html, and found none (js/ has no
+# index.html, so the built site under js/build/web was invisible to it).
+#
+# `name` is advisory here: Workers Builds injects WRANGLER_CI_OVERRIDE_NAME and
+# overrides this value with the connected Worker's name, warning but not failing.
+name = "metaplex"
+compatibility_date = "2026-09-06"
+
+# The build. Workers Builds DOES run this: its log shows
+#     [custom build] Running: bash ./js/cf-build.sh
+# ahead of the deploy (build 5d91b1f9, 2026-09-07), despite Cloudflare's docs
+# saying custom builds are not honored. So no dashboard Build command is needed.
+# Do not set one as well -- it would run the same script twice per deploy.
+[build]
+command = "bash ./js/cf-build.sh"
+
+# There is no Worker script: this is an assets-only deployment, so no `main`
+# and no `assets.binding` (binding is only useful alongside `main`).
+[assets]
+# craco.config.js rewrites paths.appBuild to ./../../build/web, so `yarn build`
+# in js/packages/web emits to js/build/web -- NOT to js/packages/web/build.
+directory = "js/build/web"
+
+# The app uses HashRouter (js/packages/web/src/routes.tsx), so every route lives
+# after a `#` and the server only ever needs to serve `/`. Combined with
+# "homepage": "." in js/packages/web/package.json (which emits RELATIVE asset
+# paths like ./static/js/main.js), a single-page-application fallback would
+# return index.html for a URL like /a/b and the browser would then resolve
+# assets against /a/, producing 404s. "none" returns a real 404 instead.
+# If this app is ever migrated to BrowserRouter, change this to
+# "single-page-application" AND change "homepage" to "/".
+not_found_handling = "none"

@@ -1,0 +1,103 @@
+name: Web
+
+# Runs the JS storefront's own checks — the unit tests under
+# packages/web/src/ai and the repository's prettier check — so it only runs
+# when that tree changes. Until this workflow existed, nothing in CI executed
+# those tests: pull-request.yml is scoped to rust/**, and the Cloudflare
+# Workers build compiles the app but runs no tests. The workflow file itself
+# is included so that an edit to the pipeline is exercised by the pipeline.
+on:
+  pull_request:
+    paths:
+      - "js/**"
+      - ".github/workflows/web.yml"
+  push:
+    branches: [master]
+    paths:
+      - "js/**"
+      - ".github/workflows/web.yml"
+
+defaults:
+  run:
+    working-directory: ./js
+
+jobs:
+  web-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v7
+        with:
+          # .node-version at the repo root pins 22, the same runtime
+          # js/cf-build.sh is proven against on Cloudflare.
+          node-version-file: .node-version
+
+      # js/yarn.lock is a v1 lockfile that yarn 4 cannot read, and lerna.json
+      # sets npmClient: yarn. js/package.json declares
+      # "packageManager": "yarn@1.22.22", so with corepack enabled the `yarn`
+      # on PATH resolves to yarn 1 — the same pin js/cf-build.sh relies on.
+      # The fallback covers a runner image without a working corepack. It
+      # installs into a temp prefix and prepends that to PATH, as
+      # cf-build.sh does, rather than `npm install -g`: a global install
+      # collides with a corepack shim already sitting in Node's bin dir.
+      - name: Use yarn 1
+        env:
+          COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
+        run: |
+          corepack enable || true
+          if [ "$(yarn --version 2>/dev/null | cut -d. -f1)" != "1" ]; then
+            YARN_HOME="$(mktemp -d)"
+            npm install --no-save --no-audit --no-fund --prefix "$YARN_HOME" yarn@1.22.22
+            echo "$YARN_HOME/node_modules/.bin" >> "$GITHUB_PATH"
+            export PATH="$YARN_HOME/node_modules/.bin:$PATH"
+          fi
+          echo "node $(node -v) / yarn $(yarn --version)"
+
+      - uses: actions/cache@v6
+        with:
+          path: ~/.cache/yarn
+          key: yarn-${{ hashFiles('js/yarn.lock') }}
+          restore-keys: |
+            yarn-
+
+      # Mirrors the install portion of js/cf-build.sh. lerna is invoked by
+      # path, not via `yarn run`, for the reason documented there.
+      - name: Install
+        run: |
+          yarn install --frozen-lockfile --network-timeout 600000
+          ./node_modules/.bin/lerna link
+          ./node_modules/.bin/lerna bootstrap
+
+      # The prettier half of the root `lint` script. Its eslint half is not
+      # run: the repository carries no eslint config and it exits 2 unrelated
+      # to any change.
+      - name: Format check
+        run: ./node_modules/.bin/prettier -c 'packages/*/{src,test}/**/*.ts'
+
+      # react-scripts' jest, via craco. CI=true makes it run once and exit
+      # rather than enter watch mode. This runs the tests but does NOT
+      # typecheck them or the app — jest here is babel-based and strips types.
+      - name: Unit tests
+        working-directory: ./js/packages/web
+        env:
+          CI: "true"
+        run: yarn test --watchAll=false
+
+      # @oyster/common's package.json main points at dist/lib, which a fresh
+      # checkout does not have, and its components import sibling .css files
+      # that only build-css produces. Both are needed before web resolves
+      # '@oyster/common' at all. NODE_OPTIONS as in js/cf-build.sh: webpack 4
+      # hashes with md4, which OpenSSL 3 removed from the default provider.
+      - name: Build @oyster/common
+        working-directory: ./js/packages/common
+        env:
+          NODE_OPTIONS: --openssl-legacy-provider
+        run: |
+          yarn prepare
+          yarn build-css
+
+      # The real `tsc --strict` pass over the application code. See
+      # packages/web/tsconfig.ci.json for why the tests are excluded here.
+      - name: Typecheck web
+        run: ./node_modules/.bin/tsc --noEmit -p packages/web/tsconfig.ci.json

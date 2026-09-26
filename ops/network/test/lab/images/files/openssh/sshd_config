@@ -1,0 +1,10 @@
+# sshd_config of the trimurti lab's upstream OpenSSH build (fallback images only).
+# Mirrors the Debian defaults: PAM on, passwords allowed, drop-ins first.
+Include /etc/ssh/sshd_config.d/*.conf
+
+KbdInteractiveAuthentication no
+UsePAM yes
+X11Forwarding no
+PrintMotd no
+AcceptEnv LANG LC_*
+Subsystem sftp /usr/lib/openssh/sftp-server

@@ -52,6 +52,11 @@ export enum MetadataCategory {
 
 type FileOrString = File | string;
 
+export interface MetadataAttribute {
+  trait_type: string;
+  value: string;
+}
+
 export interface IMetadataExtension {
   name: string;
   symbol: string;
@@ -64,6 +69,10 @@ export interface IMetadataExtension {
   external_url: string;
 
   seller_fee_basis_points: number;
+
+  /** Catalogue traits, Metaplex/OpenSea convention. Optional, so every
+   *  existing construction site of IMetadataExtension is unaffected. */
+  attributes?: MetadataAttribute[];
 
   properties: {
     files?: FileOrString[];

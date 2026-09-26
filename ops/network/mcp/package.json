@@ -1,0 +1,30 @@
+{
+  "name": "trimurti-ops-mcp-server",
+  "version": "1.0.0",
+  "description": "MCP server that drives the Trimurti network kit (ops/network): inventory, LAN scan, SSH, script fan-out, verification and NAS checks",
+  "type": "module",
+  "private": true,
+  "main": "dist/index.js",
+  "bin": {
+    "trimurti-ops-mcp-server": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.ts",
+    "test": "npm run build && node test/unit.mjs && node test/smoke.mjs",
+    "clean": "rm -rf dist"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.9.0"
+  }
+}

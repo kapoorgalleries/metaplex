@@ -26,3 +26,5 @@ hfuzz_workspace
 **/*.so
 **/.DS_Store
 .cache
+.wrangler/
+ops/network/out/

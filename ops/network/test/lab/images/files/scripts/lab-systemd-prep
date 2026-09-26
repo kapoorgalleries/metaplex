@@ -1,0 +1,22 @@
+#!/bin/sh
+# Mask the units that make no sense in a container or that would reach the Docker host
+# through --privileged (udev, kernel modules, sysctl, binfmt, TTYs, fstrim, first-boot
+# prompts). Masking a unit that does not exist is harmless.
+set -eu
+mkdir -p /etc/systemd/system
+for u in \
+  systemd-udevd.service systemd-udevd-control.socket systemd-udevd-kernel.socket \
+  systemd-udevd-varlink.socket systemd-udev-trigger.service systemd-udev-settle.service \
+  systemd-udev-load-credentials.service systemd-hwdb-update.service \
+  systemd-modules-load.service systemd-sysctl.service systemd-binfmt.service \
+  proc-sys-fs-binfmt_misc.automount proc-sys-fs-binfmt_misc.mount \
+  sys-kernel-config.mount sys-kernel-debug.mount sys-kernel-tracing.mount \
+  sys-fs-fuse-connections.mount dev-hugepages.mount \
+  systemd-remount-fs.service systemd-firstboot.service systemd-journald-audit.socket \
+  getty.target console-getty.service getty@.service serial-getty@.service \
+  systemd-timesyncd.service systemd-networkd-wait-online.service \
+  fstrim.timer fstrim.service e2scrub_all.timer e2scrub_reap.service \
+  systemd-vconsole-setup.service
+do
+  ln -sf /dev/null "/etc/systemd/system/$u"
+done

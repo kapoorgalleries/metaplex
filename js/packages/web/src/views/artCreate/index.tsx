@@ -21,6 +21,7 @@ import './../styles.less';
 import { mintNFT } from '../../actions';
 import {
   MAX_METADATA_LEN,
+  MAX_NAME_LENGTH,
   useConnection,
   useWallet,
   IMetadataExtension,
@@ -38,6 +39,8 @@ import { useHistory, useParams } from 'react-router-dom';
 import { cleanName } from '../../utils/utils';
 import { AmountLabel } from '../../components/AmountLabel';
 import useWindowDimensions from '../../utils/layout';
+import { AiCatalogueAssist } from '../../components/AiCatalogue';
+import { MetadataPatch, utf8ByteLength } from '../../ai/apply';
 
 const { Step } = Steps;
 const { Dragger } = Upload;
@@ -99,6 +102,11 @@ export const ArtCreateView = () => {
       sellerFeeBasisPoints: attributes.seller_fee_basis_points,
       image: fileNames && fileNames?.[0] && fileNames[0],
       external_url: attributes.external_url,
+      // Reads oddly, but is correct: the state variable is `attributes` and
+      // the catalogue-trait field on it is also called `attributes`. Without
+      // this line the traits reach the form and the review UI, look applied,
+      // and are silently absent from the minted metadata.json.
+      attributes: attributes.attributes,
       properties: {
         files: fileNames,
         category: attributes.properties?.category,
@@ -508,6 +516,8 @@ const InfoStep = (props: {
 
   const file = props.attributes.properties.files?.[0];
   const fileName = typeof file === 'string' ? file : file?.name;
+  const titleBytes = utf8ByteLength(props.attributes.name);
+  const titleOverLimit = titleBytes > MAX_NAME_LENGTH;
 
   useEffect(() => {
     setRoyalties(
@@ -525,6 +535,23 @@ const InfoStep = (props: {
           Provide detailed description of your creative process to engage with
           your audience.
         </p>
+      </Row>
+      <Row style={{ marginBottom: 24 }}>
+        <AiCatalogueAssist
+          image={props.attributes.image}
+          primaryFile={props.attributes.properties.files?.[0]}
+          category={props.attributes.properties?.category}
+          onApply={(patch: MetadataPatch) =>
+            // One setAttributes call, not several: `attributes` lives in the
+            // parent view and reaches this step by prop, so two sequential
+            // calls from this handler would both read the same stale props
+            // and the second would silently discard the first.
+            props.setAttributes({
+              ...props.attributes,
+              ...patch,
+            })
+          }
+        />
       </Row>
       <Row className="content-action" justify="space-around">
         <Col>
@@ -545,7 +572,7 @@ const InfoStep = (props: {
             <Input
               autoFocus
               className="input"
-              placeholder="Max 50 characters"
+              placeholder={`Max ${MAX_NAME_LENGTH} bytes`}
               allowClear
               value={props.attributes.name}
               onChange={info =>
@@ -555,6 +582,16 @@ const InfoStep = (props: {
                 })
               }
             />
+            {/* The token-metadata program rejects a name over MAX_NAME_LENGTH
+                with NameTooLong, and the limit is UTF-8 bytes, not characters:
+                IAST diacritics and Devanagari cost two or three each. The old
+                "Max 50 characters" hint enforced nothing and let a title fail
+                at mint with no earlier warning. */}
+            <Text type={titleOverLimit ? 'danger' : 'secondary'}>
+              {titleBytes} / {MAX_NAME_LENGTH} bytes
+              {titleOverLimit &&
+                ' — too long to mint; shorten the title to continue.'}
+            </Text>
           </label>
           {/* <label className="action-field">
             <span className="field-title">Symbol</span>
@@ -610,6 +647,7 @@ const InfoStep = (props: {
         <Button
           type="primary"
           size="large"
+          disabled={titleOverLimit}
           onClick={() => {
             props.setAttributes({
               ...props.attributes,
