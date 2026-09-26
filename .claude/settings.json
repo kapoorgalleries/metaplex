@@ -39,6 +39,9 @@
       "Bash(hf auth token *)",
       "PowerShell(hf auth token)",
       "PowerShell(hf auth token *)"
+    ],
+    "allow": [
+      "mcp__github__pull_request_read"
     ]
   }
 }
