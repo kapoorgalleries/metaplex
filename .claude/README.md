@@ -122,7 +122,12 @@ transcripts, counting only calls that change nothing:
 
 - GitHub reads: `pull_request_read`, `search_pull_requests`, `search_code`,
   `search_issues`, `list_pull_requests`, `get_file_contents`;
-- Supabase function metadata: `list_edge_functions`, `get_edge_function`.
+- Supabase function metadata: `list_edge_functions`, `get_edge_function`;
+- Gmail reads (`search_threads`, `get_thread`, `get_message`) and Opera
+  `tab-content`, added in #21.
+
+Keep a single `allow` key. JSON parsers keep only the last of a duplicated
+key, so a second `allow` block silently discards the first.
 
 No shell rule is added. `git ls-tree`, the most frequent read-only git
 command Claude Code does not auto-allow, was on the list and was removed on

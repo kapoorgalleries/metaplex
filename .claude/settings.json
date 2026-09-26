@@ -1,6 +1,10 @@
 {
   "permissions": {
     "allow": [
+      "mcp__Gmail__search_threads",
+      "mcp__Gmail__get_thread",
+      "mcp__Gmail__get_message",
+      "mcp__Opera__tab-content",
       "mcp__github__pull_request_read",
       "mcp__github__search_pull_requests",
       "mcp__Supabase__list_edge_functions",
