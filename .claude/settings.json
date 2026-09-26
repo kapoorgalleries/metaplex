@@ -1,5 +1,16 @@
 {
   "permissions": {
+    "allow": [
+      "WebSearch",
+      "Bash(shellcheck *)",
+      "mcp__github__search_code",
+      "mcp__github__pull_request_read",
+      "mcp__github__get_file_contents",
+      "WebFetch(domain:learn.microsoft.com)",
+      "WebFetch(domain:code.claude.com)",
+      "WebFetch(domain:tailscale.com)",
+      "WebFetch(domain:kb.synology.com)"
+    ],
     "ask": [
       "mcp__*__hf_jobs",
       "mcp__*__dynamic_space",
