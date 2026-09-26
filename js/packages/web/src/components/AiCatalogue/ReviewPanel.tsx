@@ -42,9 +42,13 @@ const TITLE_MAX_BYTES = MAX_NAME_BYTES;
 
 const OVERRIDE_LABEL = 'I have checked this myself';
 
+/* Worded for every case that sets usedFallback: an endpoint that refused the
+ * schema, one that is never asked for it, and one that is sent it but is not
+ * known to enforce it (Hugging Face, where enforcement is per provider). It
+ * must not claim "not supported" for the last of those. */
 const FALLBACK_NOTE =
-  'Structured output was not supported by this endpoint — the response was ' +
-  'validated client-side instead.';
+  'The endpoint is not known to have enforced the record shape — the ' +
+  'response was validated client-side instead.';
 
 const INSCRIPTION_CAUTION =
   'Verify the transcription and translation before minting — this is machine ' +
@@ -62,11 +66,6 @@ const WORKING_NOTES_HEADING = 'Working notes — not written to the NFT.';
 
 const AMBER = '#f0c674';
 const RED = '#ff7875';
-
-/** Trait rows an un-overridden blocking warning makes unsafe to write. */
-const TRAITS_BLOCKED_BY: Partial<Record<WarningCode, TraitKey[]>> = {
-  'unscaled-dimensions': ['Dimensions'],
-};
 
 /** Traits computed from several record fields, or from the run itself. There
  *  is no single field to write an edit back to, so their cells are read-only;
@@ -237,17 +236,6 @@ export const ReviewPanel = (props: {
   const orderedWarnings: RecordWarning[] = blockWarnings.concat(
     result.warnings.filter(w => w.severity !== 'block'),
   );
-
-  const blockedTraits: TraitKey[] = [];
-  blockWarnings.forEach(w => {
-    if (isOverridden(w.code)) {
-      return;
-    }
-    const keys = TRAITS_BLOCKED_BY[w.code];
-    if (keys) {
-      keys.forEach(key => blockedTraits.push(key));
-    }
-  });
 
   /* --- inscription ---------------------------------------------------- */
 
@@ -498,14 +486,12 @@ export const ReviewPanel = (props: {
           <table className="ai-trait-table">
             <tbody>
               {traitRows.map(key => {
-                const blocked = blockedTraits.indexOf(key) >= 0;
                 const derived = DERIVED_TRAITS.indexOf(key) >= 0;
                 return (
                   <tr className="ai-trait-row" key={key}>
                     <td style={{ width: 32 }}>
                       <Checkbox
                         checked={selection.traitKeys.indexOf(key) >= 0}
-                        disabled={blocked}
                         onChange={e => toggleTrait(key, e.target.checked)}
                       />
                     </td>

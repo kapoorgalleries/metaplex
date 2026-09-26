@@ -1,0 +1,7 @@
+# Line endings for a Windows checkout (Git for Windows defaults to core.autocrlf=true).
+# bash stops at a CR ("$'\r': command not found"), and run-remote.sh copies the .sh
+# files to Linux and macOS hosts as they are. PowerShell reads CRLF natively.
+*.sh            text eol=lf
+*.ps1           text eol=crlf
+inventory.csv   text eol=lf
+test/lab/**     text=auto eol=lf

@@ -1,0 +1,84 @@
+#!/bin/sh
+# Entry point of every trimurti-lab container (PID 1, or the child of docker-init).
+#
+# 1. Writes the per-lab proxy settings into /etc/environment (read by pam_env, so plain
+#    non-interactive SSH sessions get them) and into the package manager config, so that
+#    installs work through the lab's HTTPS proxy on the gateway.
+#    Inputs: LAB_PROXY (http://<gateway>:3128), LAB_NO_PROXY.
+# 2. Starts what the image is: LAB_INIT=systemd | sshd | nas | cmd ("$@").
+#
+# systemd on a cgroup v1/hybrid Docker host: systemd >= 256 refuses cgroup v1, so PID 1
+# moves itself into its own cgroup2 subtree (trimurti-lab/$LAB_CGROUP), enters a new cgroup
+# namespace rooted there and mounts cgroup2 on /sys/fs/cgroup before exec'ing systemd.
+set -eu
+LAB_INIT="${LAB_INIT:-cmd}"
+CA=/usr/local/share/lab/proxy-ca.crt
+
+# ------------------------------------------------------------------ proxy settings
+envf=/etc/environment
+[ -f "$envf" ] || : > "$envf"
+keep="$(grep -v -E '^(https?_proxy|HTTPS?_PROXY|no_proxy|NO_PROXY|NODE_EXTRA_CA_CERTS)=' "$envf" || true)"
+{
+  if [ -n "$keep" ]; then printf '%s\n' "$keep"; fi
+  if [ -n "${LAB_PROXY:-}" ]; then
+    printf 'https_proxy=%s\nHTTPS_PROXY=%s\n' "$LAB_PROXY" "$LAB_PROXY"
+    printf 'no_proxy=%s\nNO_PROXY=%s\n' "${LAB_NO_PROXY:-}" "${LAB_NO_PROXY:-}"
+  fi
+  if [ -f "$CA" ]; then printf 'NODE_EXTRA_CA_CERTS=%s\n' "$CA"; fi
+} > "$envf.lab-new"
+cat "$envf.lab-new" > "$envf"; rm -f "$envf.lab-new"
+
+if [ -d /etc/apt/apt.conf.d ]; then
+  if [ -n "${LAB_PROXY:-}" ]; then
+    printf 'Acquire::https::Proxy "%s";\n' "$LAB_PROXY" > /etc/apt/apt.conf.d/90lab-proxy
+  else
+    rm -f /etc/apt/apt.conf.d/90lab-proxy
+  fi
+fi
+if [ -f /etc/dnf/dnf.conf ]; then
+  sed -i '/^proxy=/d' /etc/dnf/dnf.conf
+  if [ -n "${LAB_PROXY:-}" ]; then sed -i "s#^\[main\]\$#[main]\nproxy=$LAB_PROXY#" /etc/dnf/dnf.conf; fi
+fi
+# pacman (Arch) has no proxy setting of its own: it uses https_proxy from the environment.
+
+# ------------------------------------------------------------------ SSH host keys
+# Images ship without host keys so every container gets its own, like a real machine.
+if [ -e /usr/sbin/sshd ] && command -v ssh-keygen >/dev/null 2>&1; then
+  ssh-keygen -A >/dev/null 2>&1 || true
+fi
+
+# ------------------------------------------------------------------ init
+case "$LAB_INIT" in
+  systemd)
+    sd=/usr/lib/systemd/systemd
+    if [ "$(stat -fc %T /sys/fs/cgroup 2>/dev/null || true)" = cgroup2fs ]; then
+      exec "$sd"                       # pure cgroup v2 host, private cgroup namespace
+    fi
+    m=/run/lab-cgroup2
+    mkdir -p "$m"
+    mount -t cgroup2 cgroup2 "$m"
+    d="$m/trimurti-lab/${LAB_CGROUP:-$(hostname)}"
+    mkdir -p "$d"
+    echo $$ > "$d/cgroup.procs"
+    umount "$m"; rmdir "$m"
+    # shellcheck disable=SC2016  # $0 is expanded by the inner shell
+    exec unshare --cgroup /bin/sh -c \
+      'umount -l /sys/fs/cgroup 2>/dev/null || true; mount -t cgroup2 cgroup2 /sys/fs/cgroup; exec "$0"' "$sd"
+    ;;
+  sshd)
+    mkdir -p /run/sshd; chmod 0755 /run/sshd
+    exec /usr/sbin/sshd -D -e
+    ;;
+  nas)
+    mkdir -p /run/samba /var/log/samba /run/lab-nas
+    if command -v openssl >/dev/null 2>&1; then
+      openssl req -x509 -newkey rsa:2048 -nodes -days 3650 -subj "/CN=$(hostname)" \
+        -keyout /run/lab-nas/key.pem -out /run/lab-nas/cert.pem >/dev/null 2>&1 || true
+    fi
+    python3 /usr/local/lib/lab-nas/dsm.py &
+    exec smbd --foreground --no-process-group --debug-stdout
+    ;;
+  *)
+    exec "$@"
+    ;;
+esac

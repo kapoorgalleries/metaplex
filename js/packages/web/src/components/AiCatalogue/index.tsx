@@ -28,12 +28,6 @@ import './index.less';
 const DETAIL_LABELS = ['detail', 'inscription close-up', 'reverse', 'base'];
 const MAX_DETAIL_IMAGES = 3;
 
-/* Trait rows that a still-standing 'block' warning makes untrustworthy, so
- * they arrive unticked in the review panel. */
-const TRAITS_BLOCKED_BY: { code: WarningCode; trait: TraitKey }[] = [
-  { code: 'unscaled-dimensions', trait: 'Dimensions' },
-];
-
 interface DetailImage {
   file: File;
   label: string;
@@ -202,19 +196,10 @@ export const AiCatalogueAssist = (props: {
         return;
       }
 
-      const blocked = res.warnings
-        .filter(warning => warning.severity === 'block')
-        .map(warning => warning.code);
-      const withheld = TRAITS_BLOCKED_BY.filter(
-        entry => blocked.indexOf(entry.code) >= 0,
-      ).map(entry => entry.trait);
-
       const traitKeys = recordToTraits(res.record, {
         providerId: res.providerId,
         model: res.model,
-      })
-        .map(attribute => attribute.trait_type as TraitKey)
-        .filter(trait => withheld.indexOf(trait) < 0);
+      }).map(attribute => attribute.trait_type as TraitKey);
 
       setResult(res);
       setEdited(res.record);

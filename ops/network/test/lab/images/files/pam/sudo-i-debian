@@ -1,0 +1,7 @@
+#%PAM-1.0
+# Debian's /etc/pam.d/sudo-i.
+session    required   pam_limits.so
+session    required   pam_env.so readenv=1 user_readenv=0
+@include common-auth
+@include common-account
+@include common-session

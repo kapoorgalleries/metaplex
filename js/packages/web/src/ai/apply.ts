@@ -53,13 +53,21 @@ function truncate(text: string, max: number): string {
   return value.slice(0, max).replace(/\s+$/, '') + '…';
 }
 
-/** '' unless both bounds are known; 0 means "not determined". */
+/** '' unless both bounds are known; 0 means "not determined", a negative
+ *  year is BCE: '1400–1500 CE', '300–100 BCE', '100 BCE – 100 CE'. */
 function formatDateRange(earliestYear: number, latestYear: number): string {
   if (earliestYear === 0 || latestYear === 0) {
     return '';
   }
+  const earliestEra = earliestYear < 0 ? 'BCE' : 'CE';
+  const latestEra = latestYear < 0 ? 'BCE' : 'CE';
+  const earliest = Math.abs(earliestYear);
+  const latest = Math.abs(latestYear);
   // En dash, matching catalogue house style.
-  return earliestYear + '–' + latestYear + ' CE';
+  if (earliestEra === latestEra) {
+    return earliest + '–' + latest + ' ' + latestEra;
+  }
+  return earliest + ' ' + earliestEra + ' – ' + latest + ' ' + latestEra;
 }
 
 /** '' unless a scale reference was actually visible: a measurement inferred
@@ -224,18 +232,18 @@ export function utf8ByteLength(s: string): number {
 export function truncateUtf8Bytes(s: string, maxBytes: number): string {
   const trimmed = s.trim();
   let bytes = 0;
-  let i = 0;
-  while (i < trimmed.length) {
-    const code = trimmed.codePointAt(i) as number;
-    const width = code > 0xffff ? 2 : 1;
-    const size = code < 0x80 ? 1 : code < 0x800 ? 2 : code < 0x10000 ? 3 : 4;
+  let out = '';
+  // Iterating a string yields whole code points, so a surrogate pair is one
+  // step and is either kept or dropped together.
+  for (const char of trimmed) {
+    const size = utf8ByteLength(char);
     if (bytes + size > maxBytes) {
       break;
     }
     bytes += size;
-    i += width;
+    out += char;
   }
-  return trimmed.slice(0, i).trim();
+  return out.trim();
 }
 
 /** Structural supertype of the IMetadataExtension fields this feature writes.

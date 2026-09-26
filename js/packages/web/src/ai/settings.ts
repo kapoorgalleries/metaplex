@@ -29,11 +29,17 @@ const REDACTED = '«redacted»';
  * Bare key shapes, for the case where a provider echoes a submitted fragment
  * back inside a 400 body that we never configured ourselves. `sk-` covers
  * OpenAI and DeepSeek, `AIza` Gemini, and the gh* set GitHub's token
- * families. Azure keys are undelimited hex or base64 with no distinguishing
- * prefix, so there is nothing safe to match on: those are covered only by the
- * exact-value pass below, which is why that pass exists.
+ * families. A Hugging Face user access token is `hf_` followed by one
+ * unbroken run of letters and digits (its docs write them `hf_****`; a
+ * current one has 34), never an underscore — which is what keeps this from
+ * eating ordinary identifiers a relayed error may carry, such as
+ * hf_hub_download or hf_xet_core, with the diagnosis in them. Azure keys are
+ * undelimited hex or base64 with no distinguishing prefix, so there is
+ * nothing safe to match on: those are covered only by the exact-value pass
+ * below, which is why that pass exists.
  */
-const KEY_SHAPE = /(sk-|AIza|gh[pousr]_|github_pat_)[A-Za-z0-9_-]{10,}/g;
+const KEY_SHAPE =
+  /(?:(?:sk-|AIza|gh[pousr]_|github_pat_)[A-Za-z0-9_-]{10,}|hf_[A-Za-z0-9]{20,})/g;
 
 /** Every provider starts unconfigured, at its own documented endpoint. Built
  *  from PROVIDER_IDS rather than written out, so adding a provider to the
@@ -212,7 +218,8 @@ export function isProxyMode(
    * because its real endpoint is per-tenant and never equals the default —
    * without this, every genuine Azure configuration would read as proxy mode,
    * suppressing the stored-key warning and accepting a blank key on requests
-   * going straight to Microsoft. */
+   * going straight to Microsoft. Hugging Face does for the same reason: a
+   * dedicated Inference Endpoint has its own hostname, not the router's. */
   if (provider.isOwnEndpoint) {
     return !provider.isOwnEndpoint(cfg.baseUrl);
   }

@@ -1,0 +1,10 @@
+#%PAM-1.0
+# Fedora's /etc/pam.d/sshd without the SELinux, loginuid and namespace lines.
+auth       substack     password-auth
+auth       include      postlogin
+account    required     pam_nologin.so
+account    include      password-auth
+password   include      password-auth
+session    optional     pam_keyinit.so force revoke
+session    include      password-auth
+session    include      postlogin

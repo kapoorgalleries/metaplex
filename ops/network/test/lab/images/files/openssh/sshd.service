@@ -1,0 +1,18 @@
+[Unit]
+Description=OpenSSH Daemon (trimurti lab build of upstream OpenSSH)
+After=network.target
+
+[Service]
+Type=exec
+RuntimeDirectory=sshd
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
+ExecStartPre=/usr/bin/ssh-keygen -A
+ExecStartPre=/usr/sbin/sshd -t
+ExecStart=/usr/sbin/sshd -D
+ExecReload=/bin/kill -HUP $MAINPID
+KillMode=process
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

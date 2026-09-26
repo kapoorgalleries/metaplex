@@ -1,0 +1,13 @@
+# Trimurti network inventory. One row per device. No commas inside a field.
+# os:       windows | macos | linux | nas | other
+# role:     admin | workstation | nas | new | router | printer | iot
+# trimurti: yes | no   (should this machine be a member of Trimurti)
+# Replace the example rows with the real machines. Leave ip and mac blank until
+# netscan fills them in, then set DHCP reservations on the router for every named row.
+name,ip,mac,os,user,role,ssh_port,trimurti,notes
+router,192.168.1.1,,other,admin,router,,no,fill in make and model
+gallery-desk,192.168.1.10,,windows,sanjay,admin,22,yes,the machine Cowork runs on
+studio-mac,192.168.1.11,,macos,sanjay,workstation,22,yes,
+nas,192.168.1.20,,nas,admin,nas,22,no,fill in vendor - Synology / QNAP / TrueNAS / other
+new-pc-1,,,windows,sanjay,new,22,yes,first of the two new machines
+new-pc-2,,,linux,sanjay,new,22,yes,second of the two new machines

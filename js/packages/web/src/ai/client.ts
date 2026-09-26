@@ -25,7 +25,12 @@ import {
   aiError,
   isAiError,
 } from './types';
-import { PROVIDERS, joinUrl, mapStatus } from './providers';
+import {
+  PROVIDERS,
+  joinUrl,
+  mapStatus,
+  providerErrorMessage,
+} from './providers';
 import { auditRecord, parseCatalogueRecord } from './validate';
 import { redactSecrets } from './settings';
 
@@ -35,11 +40,11 @@ import { redactSecrets } from './settings';
  * that has never heard of json_schema) rather than rejecting our content.
  *
  * Every alternative must name a schema token. A bare `not supported` or
- * `Unknown name` would also match OpenAI's parameter-drift 400 ("'max_tokens'
- * is not supported with this model. Use 'max_completion_tokens'"), sending it
- * down this branch and leaving OPENAI.retryBody — written for exactly that
- * message — unreachable, so a reasoning-family model could never succeed.
- * Gemini's own rejection still matches here on `responseSchema`.
+ * `Unsupported value` would also match OpenAI's parameter-rejection 400
+ * ("Unsupported value: 'temperature' does not support 0.2 with this model"),
+ * sending it down this branch and leaving OPENAI.retryBody — written for
+ * exactly that message — unreachable, so a reasoning-family model could never
+ * succeed. Gemini's own rejection still matches here on `responseSchema`.
  */
 const STRUCTURED_OUTPUT_REJECTED =
   /response_format|json_schema|responseSchema|response_schema|structured output/i;
@@ -424,14 +429,14 @@ export function probeGateway(
         })
         .then((body: unknown) => {
           if (res.status !== 200) {
-            const wrapper = body as { error?: { message?: unknown } } | null;
-            const message =
-              wrapper &&
-              wrapper.error &&
-              typeof wrapper.error.message === 'string'
-                ? wrapper.error.message
-                : '';
-            throw mapStatus(res.status, message, 'trimurti', cfg.model);
+            /* The same reader a run uses, so /key and a run can never
+             * disagree about which of the gateway's lines reach the dealer. */
+            throw mapStatus(
+              res.status,
+              providerErrorMessage(body, 'trimurti'),
+              'trimurti',
+              cfg.model,
+            );
           }
           const data =
             (body as {

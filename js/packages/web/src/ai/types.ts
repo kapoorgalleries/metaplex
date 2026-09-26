@@ -15,7 +15,7 @@
  */
 
 /**
- * Six providers, one interface. Five of them speak the OpenAI
+ * Seven providers, one interface. Six of them speak the OpenAI
  * chat/completions dialect and are built by one factory in providers.ts;
  * Gemini has its own request and response shape.
  *
@@ -27,13 +27,17 @@
  * 'azure' is Microsoft's hosting of the OpenAI models (Azure OpenAI, sold
  * inside Microsoft Foundry). 'github' is GitHub Models, which fronts several
  * publishers' models — including Microsoft's own Phi family — behind one
- * GitHub token.
+ * GitHub token. 'huggingface' is Hugging Face Inference Providers: one
+ * OpenAI-compatible router in front of many inference companies serving
+ * open-weight models, behind one Hugging Face access token. The same entry
+ * reaches a dedicated Hugging Face Inference Endpoint by its Base URL.
  */
 export type ProviderId =
   | 'gemini'
   | 'openai'
   | 'deepseek'
   | 'github'
+  | 'huggingface'
   | 'azure'
   | 'trimurti';
 
@@ -213,8 +217,11 @@ export interface CatalogueResult {
    *  contains the request or any header. */
   rawText: string;
   elapsedMs: number;
-  /** True when the structured-output request was rejected and the driver
-   *  fell back to a looser shape. Surfaced in the review panel. */
+  /** True when the endpoint is not known to have enforced the record shape,
+   *  so the shape rests on the prompt and the check here: the directive was
+   *  refused and the driver retried without it, or the provider never asks
+   *  for one (DeepSeek), or it sends one whose enforcement is unconfirmed
+   *  (Hugging Face). Surfaced in the review panel. */
   usedFallback: boolean;
 }
 
@@ -248,14 +255,16 @@ export interface AiProvider {
    *  photograph, so a provider that cannot see one must say so rather than
    *  post images that are silently dropped or rejected. */
   supportsImages: boolean;
-  /** True when buildRequest asks the endpoint to enforce the schema. False
-   *  means the shape is only requested in the prompt and checked here, which
-   *  the review panel must disclose. */
+  /** True when buildRequest asks the endpoint to enforce the schema and the
+   *  endpoint is known to. False means the shape rests on the prompt and the
+   *  check here — whether no directive is sent at all, or one is sent whose
+   *  enforcement is not confirmed — which the review panel must disclose. */
   structuredOutput: boolean;
   /** Models within an otherwise image-capable provider that cannot see a
    *  photograph (DeepSeek's Pro/reasoner family; every DeepSeek slot on the
-   *  deployed gateway; the local Llama slots its unmerged successor adds).
-   *  Matched against the configured model id. */
+   *  deployed gateway; the local Llama slots its unmerged successor adds;
+   *  the text-only families Hugging Face's router also serves). Matched
+   *  against the configured model id. */
   textOnlyModels?: RegExp;
   /** A hard cap the endpoint itself imposes on the longest image edge, in
    *  pixels. The image pipeline takes the smaller of this and the dealer's
@@ -291,7 +300,7 @@ export interface AiProvider {
    *  not an API key, and the distinction decides where you go to mint one. */
   keyLabel: string;
   /** The request shape a self-hosted proxy for THIS provider must accept,
-   *  stated per provider because the five paths genuinely differ. */
+   *  stated per provider because the paths and headers genuinely differ. */
   baseUrlHelp: string;
   /** A provider-specific caveat shown under the form. '' when there is none. */
   note: string;

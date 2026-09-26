@@ -65,6 +65,27 @@ const MAX_SEGMENTS = 24;
 /** A span wider than this is not a date, it is a shrug. */
 const MAX_PLAUSIBLE_SPAN_YEARS = 800;
 
+/** The inline marker the prompt tells the model to use for an unreadable run. */
+const ILLEGIBLE_MARKER = /\[\s*illegible\s*\]/gi;
+
+/**
+ * True when a transcription is nothing but [illegible] markers. There is
+ * nothing to translate, so an empty translation is the honest answer rather
+ * than a schema error.
+ */
+function isWhollyIllegible(transcription: string): boolean {
+  return transcription.replace(ILLEGIBLE_MARKER, '').trim() === '';
+}
+
+/**
+ * 0 is the "not determined" sentinel for a year (see PeriodBlock), so it is
+ * skipped along with anything that is not a finite number. Negative years are
+ * BCE and are checked like any other.
+ */
+function isDated(year: number): boolean {
+  return typeof year === 'number' && isFinite(year) && year !== 0;
+}
+
 /* ------------------------------------------------------------------ */
 /* Narrowing helpers. Every one names the offending path.              */
 /* ------------------------------------------------------------------ */
@@ -201,7 +222,16 @@ function parseCondition(v: unknown): ConditionBlock {
   };
 }
 
-function parseSegment(v: unknown, i: number): InscriptionSegment {
+/**
+ * `illegible` is true when the block's completeness is 'illegible': the model
+ * has declared it could not resolve the writing, so an empty translation is
+ * consistent rather than a lapse. auditRecord still blocks that record.
+ */
+function parseSegment(
+  v: unknown,
+  i: number,
+  illegible: boolean,
+): InscriptionSegment {
   const p = 'inscription.segments[' + i + ']';
   const o = obj(v, p);
   const segment: InscriptionSegment = {
@@ -215,8 +245,10 @@ function parseSegment(v: unknown, i: number): InscriptionSegment {
   };
 
   if (
+    !illegible &&
     segment.transcription.trim() !== '' &&
-    segment.translation.trim() === ''
+    segment.translation.trim() === '' &&
+    !isWhollyIllegible(segment.transcription)
   ) {
     throw aiError(
       'schema',
@@ -242,9 +274,21 @@ function parseSegment(v: unknown, i: number): InscriptionSegment {
   return segment;
 }
 
-function parseInscription(v: unknown): InscriptionBlock {
+/**
+ * `parseNotes` collects working notes for the dealer about model output the
+ * parser had to discard; parseCatalogueRecord appends them to
+ * recommendedExpertChecks, which the review panel shows and apply never
+ * writes to metadata.
+ */
+function parseInscription(v: unknown, parseNotes: string[]): InscriptionBlock {
   const o = obj(v, 'inscription');
   const present = oneOf(o.present, PRESENCE_VALUES, 'inscription.present');
+
+  const completeness = oneOf(
+    o.completeness,
+    COMPLETENESS_VALUES,
+    'inscription.completeness',
+  );
 
   const rawSegments = o.segments;
   if (!Array.isArray(rawSegments)) {
@@ -263,13 +307,10 @@ function parseInscription(v: unknown): InscriptionBlock {
         ' allowed; the response looks like runaway output',
     );
   }
-  const segments: InscriptionSegment[] = rawSegments.map(parseSegment);
-
-  const completeness = oneOf(
-    o.completeness,
-    COMPLETENESS_VALUES,
-    'inscription.completeness',
+  let segments: InscriptionSegment[] = rawSegments.map((s, i) =>
+    parseSegment(s, i, completeness === 'illegible'),
   );
+
   const untranslatedPortions = str(
     o.untranslatedPortions,
     'inscription.untranslatedPortions',
@@ -281,13 +322,25 @@ function parseInscription(v: unknown): InscriptionBlock {
       'inscription.present is "yes" but inscription.segments is empty',
     );
   }
-  if (completeness === 'complete' && untranslatedPortions.trim() !== '') {
-    throw aiError(
-      'schema',
-      'inscription.completeness is "complete" but ' +
-        'inscription.untranslatedPortions is not empty',
+  /* The record declares the piece uninscribed, so segments must not travel
+   * on: the review panel hides the inscription section for present 'no'
+   * while recordToTraits would still mint script and language from
+   * segments[0]. Drop them and tell the dealer the model contradicted
+   * itself. */
+  if (present === 'no' && segments.length > 0) {
+    parseNotes.push(
+      'The model reported no inscription but also returned ' +
+        segments.length +
+        ' inscription segment' +
+        (segments.length === 1 ? '' : 's') +
+        ', which were discarded. Check the piece for an inscription and ' +
+        'run the catalogue again with a close-up if one is present.',
     );
+    segments = [];
   }
+  /* completeness 'complete' alongside a populated untranslatedPortions is
+   * left to auditRecord, which raises the partial-translation block warning
+   * for it, the same as every other incoherent completeness value. */
 
   return { present, segments, completeness, untranslatedPortions };
 }
@@ -320,6 +373,10 @@ function parseConfidence(v: unknown): ConfidenceBlock {
  */
 export function parseCatalogueRecord(raw: unknown): CatalogueRecord {
   const r = obj(raw, 'record');
+  /* Filled by parseInscription; the object literal below evaluates its
+   * properties in source order, so it is complete by the time
+   * recommendedExpertChecks is built. */
+  const parseNotes: string[] = [];
   return {
     objectType: str(r.objectType, 'objectType'),
     title: str(r.title, 'title'),
@@ -329,7 +386,7 @@ export function parseCatalogueRecord(raw: unknown): CatalogueRecord {
     medium: parseMedium(r.medium),
     dimensions: parseDimensions(r.dimensions),
     condition: parseCondition(r.condition),
-    inscription: parseInscription(r.inscription),
+    inscription: parseInscription(r.inscription, parseNotes),
     catalogueDescription: str(r.catalogueDescription, 'catalogueDescription'),
     provenanceNote: str(r.provenanceNote, 'provenanceNote'),
     confidence: parseConfidence(r.confidence),
@@ -337,7 +394,7 @@ export function parseCatalogueRecord(raw: unknown): CatalogueRecord {
     recommendedExpertChecks: strArr(
       r.recommendedExpertChecks,
       'recommendedExpertChecks',
-    ),
+    ).concat(parseNotes),
   };
 }
 
@@ -383,17 +440,20 @@ export function auditRecord(r: CatalogueRecord): RecordWarning[] {
   const d = r.dimensions;
   const hasMeasurement = d.heightCm > 0 || d.widthCm > 0 || d.depthCm > 0;
   if (!d.scaleReferenceVisible && hasMeasurement) {
+    // 'warn', not 'block': formatDimensions() already withholds the Dimensions
+    // trait whenever scaleReferenceVisible is false, so nothing unsafe can be
+    // written and there is no value for the dealer to acknowledge.
     add(
       'unscaled-dimensions',
-      'block',
-      'Dimensions were given with no scale reference visible. Measure the ' +
-        'piece before publishing.',
+      'warn',
+      'Dimensions were given with no scale reference visible and are not ' +
+        'written as a trait. Measure the piece before publishing.',
     );
   }
 
   const earliest = r.period.earliestYear;
   const latest = r.period.latestYear;
-  if (earliest > 0 && latest > 0 && latest < earliest) {
+  if (isDated(earliest) && isDated(latest) && latest < earliest) {
     add(
       'inverted-date-range',
       'warn',
@@ -405,8 +465,8 @@ export function auditRecord(r: CatalogueRecord): RecordWarning[] {
     );
   }
   if (
-    earliest > 0 &&
-    latest > 0 &&
+    isDated(earliest) &&
+    isDated(latest) &&
     latest - earliest > MAX_PLAUSIBLE_SPAN_YEARS
   ) {
     add(
