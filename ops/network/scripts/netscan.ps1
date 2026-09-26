@@ -44,8 +44,10 @@ New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 $Csv = Join-Path $OutDir ("scan-{0}.csv" -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
 
 # ---------------------------------------------------------------- 1. where am I
+# Windows picks the default route with the lowest route metric + interface metric, summed.
 $route   = Get-NetRoute -DestinationPrefix '0.0.0.0/0' -AddressFamily IPv4 -ErrorAction SilentlyContinue |
-           Sort-Object RouteMetric, InterfaceMetric | Select-Object -First 1
+           Sort-Object { [int]$_.RouteMetric + [int](Get-NetIPInterface -InterfaceIndex $_.InterfaceIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue).InterfaceMetric } |
+           Select-Object -First 1
 if (-not $route) { [Console]::Error.WriteLine('no default route: this machine is not on a network'); exit 1 }
 $gw      = $route.NextHop
 $ifIndex = $route.InterfaceIndex
@@ -56,10 +58,22 @@ $adapter = Get-NetAdapter -InterfaceIndex $ifIndex
 $dns     = (Get-DnsClientServerAddress -InterfaceIndex $ifIndex -AddressFamily IPv4).ServerAddresses -join ' '
 $netCat  = (Get-NetConnectionProfile -InterfaceIndex $ifIndex -ErrorAction SilentlyContinue).NetworkCategory
 if (-not $Subnet) { $Subnet = ($myIp -split '\.')[0..2] -join '.' }
+# Every address this machine has on the swept subnet: a second NIC or Wi-Fi on the same LAN is
+# this machine too, not another host.
+$localIf = @{}; $localMac = @{}
+foreach ($a in @(Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -like "$Subnet.*" })) {
+  $ad = Get-NetAdapter -InterfaceIndex $a.InterfaceIndex -ErrorAction SilentlyContinue
+  $localIf[$a.IPAddress] = if ($ad) { $ad.Name } else { "interface $($a.InterfaceIndex)" }
+  $localMac[$a.IPAddress] = if ($ad) { $ad.MacAddress.ToLower().Replace('-', ':') } else { '' }
+}
 
 Write-Host "adapter=$($adapter.Name)  link=$($adapter.LinkSpeed)  ip=$myIp/$prefix  gateway=$gw  profile=$netCat"
 Write-Host "dns servers: $dns"
 if ($adapter.LinkSpeed -match '^100 Mbps') { Warn "link is 100 Mbps: bad cable or a 100 Mb switch port. Gigabit expected." }
+if ($localIf.Count -gt 1) {
+  $list = ($localIf.Keys | Sort-Object { [int]($_ -split '\.')[3] } | ForEach-Object { "$_ ($($localIf[$_]))" }) -join ', '
+  Warn "this machine has $($localIf.Count) connections on $Subnet.x: $list. Two links into one subnet make replies leave by a different card than requests came in on, so connections to this PC stall or drop and the router sees one PC as several. Keep one ($myIp on $($adapter.Name) carries the default route) and unplug or disable the others: ASK first. It gets one inventory row, with that address."
+}
 if ($prefix -ne 24) { Warn "prefix is /$prefix, not /24. The network may be split; pass -Subnet if the sweep looks wrong." }
 if ($netCat -and "$netCat" -ne 'Private' -and "$netCat" -ne 'DomainAuthenticated') {
   Warn "network profile is '$netCat'. On Public, Windows hides this machine and blocks file sharing, discovery and ping; the kit's SSH rule then only works if it includes Public (enable-ssh-server.ps1 moves this LAN to Private)."
@@ -118,11 +132,20 @@ $alive = @($tasks.GetEnumerator() | Where-Object {
 
 # Every neighbour with a MAC, and how fresh the entry is (Stale = not confirmed lately).
 $neigh = @{}; $state = @{}
-Get-NetNeighbor -AddressFamily IPv4 -InterfaceIndex $ifIndex -ErrorAction SilentlyContinue |
+# Every interface on the subnet: a probe may leave by any of them when this machine has more than one.
+$ifs = @(@($ifIndex) + @(Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+  Where-Object { $localIf.ContainsKey($_.IPAddress) } | ForEach-Object { $_.InterfaceIndex }) | Sort-Object -Unique)
+Get-NetNeighbor -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $ifs -contains $_.InterfaceIndex } |
   Where-Object { $_.IPAddress -like "$Subnet.*" -and "$($_.State)" -ne 'Unreachable' -and "$($_.State)" -ne 'Incomplete' -and
                  $_.LinkLayerAddress -and $_.LinkLayerAddress -notmatch '^(00-00-00-00-00-00|FF-FF-FF-FF-FF-FF)$' } |
-  ForEach-Object { $neigh[$_.IPAddress] = $_.LinkLayerAddress.ToLower().Replace('-', ':'); $state[$_.IPAddress] = "$($_.State)" }
-$neigh[$myIp] = $adapter.MacAddress.ToLower().Replace('-', ':')
+  ForEach-Object {
+    # Seen on two interfaces: keep the confirmed entry.
+    if (-not $neigh.ContainsKey($_.IPAddress) -or 'Reachable', 'Permanent' -contains "$($_.State)") {
+      $neigh[$_.IPAddress] = $_.LinkLayerAddress.ToLower().Replace('-', ':'); $state[$_.IPAddress] = "$($_.State)"
+    }
+  }
+foreach ($ip in $localIf.Keys) { $neigh[$ip] = $localMac[$ip] }
+if (-not $localIf.ContainsKey($myIp)) { $neigh[$myIp] = $adapter.MacAddress.ToLower().Replace('-', ':'); $localIf[$myIp] = $adapter.Name }
 foreach ($ip in $alive) { if (-not $neigh.ContainsKey($ip)) { $neigh[$ip] = '' } }
 foreach ($ip in @($neigh.Keys)) { if ($ip -match '\.(0|255)$') { $neigh.Remove($ip) } }
 
@@ -171,13 +194,15 @@ $rows = foreach ($ip in $targets) {
   if ($routers -contains $ip) {
     if ($ip -eq $gw) { $hint += 'gateway/router: not probed; never log in' } else { $hint += 'router (inventory role=router): not probed; never log in' }
   } else {
-    if ($ip -eq $myIp) { $hint += 'this machine' }
+    if ($localIf.ContainsKey($ip)) {
+      if ($localIf.Count -gt 1) { $hint += "this machine ($($localIf[$ip]); one row, see the warning above)" } else { $hint += 'this machine' }
+    }
     if ($p[5000])      { $hint += 'Synology DSM?' }
     if ($p[8080] -and $p[445]) { $hint += 'QNAP?' }
     if ($p[445] -and $hint.Count -eq 0) { $hint += 'SMB host (PC or NAS)' }
     if ($p[22])        { $hint += 'ssh open' }
     if ($hint.Count -eq 0 -and $p[80]) { $hint += 'web only (printer/IoT/AP?)' }
-    $answered = ($alive -contains $ip) -or ($ip -eq $myIp) -or @($Ports | Where-Object { $p[$_] }).Count
+    $answered = ($alive -contains $ip) -or $localIf.ContainsKey($ip) -or @($Ports | Where-Object { $p[$_] }).Count
     if (-not $answered -and 'Reachable', 'Permanent' -notcontains $state[$ip]) { $hint += "stale ARP (not answering; neighbour state $($state[$ip]))" }
   }
   [pscustomobject]@{

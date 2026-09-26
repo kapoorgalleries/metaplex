@@ -31,7 +31,7 @@ Note what is there and whether the NAS already holds a copy (compare a few folde
 | FAILING | no | Retire. **ASK** Wipe if it ever held gallery or client data (section 5) |
 | UNKNOWN | any | Get a real SMART read (bare SATA in a Linux box or a NAS bay, as in §1) before trusting it with anything |
 
-Imaging a FAILING drive (Linux; macOS: `brew install ddrescue`). Two passes, same map file, so it grabs the easy sectors first and only then hammers the bad ones:
+**ASK** Imaging a FAILING drive (Linux; macOS: `brew install ddrescue`): name the source drive and the destination by serial number; a swapped `sdX` overwrites the good disk. Two passes, same map file, so it grabs the easy sectors first and only then hammers the bad ones:
 
 ```bash
 sudo ddrescue -d -n  /dev/sdX /mnt/healthy/hulk-1.img /mnt/healthy/hulk-1.map   # pass 1: no retries, skip bad areas
