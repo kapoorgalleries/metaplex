@@ -26,6 +26,7 @@ This repo is Kapoor Galleries' storefront for Indian, Himalayan and South Asian 
 
 - Never copy a Hugging Face token into a project file, commit, saved command, process argument, log, or chat reply. Never run `hf auth token`, because it prints the token. Interactive sign-in may persist credentials in the client's own credential store; do not copy those credentials elsewhere.
 - Get tokens only from the `HF_TOKEN` environment variable or from the CLI's own interactive login (`hf auth login`). Codex and Claude MCP clients sign in with OAuth; Gemini reads `HF_TOKEN` from its process environment. Enter it through a hidden prompt, never as an inline command or `--token` argument.
+- Never run `gemini mcp add` or `gemini mcp remove` while `HF_TOKEN` (or any variable a Gemini server entry references) is set: they save every `${VAR}` in Gemini's settings as its value. Edit `settings.json` instead, or clear the variables for that command.
 - The storefront keeps the dealer's token in the browser's localStorage. That token must therefore be a fine-grained token with only the "Make calls to Inference Providers" permission. Never suggest a read or write token for it.
 
 ## Spending: ask Sanjay and wait for a yes

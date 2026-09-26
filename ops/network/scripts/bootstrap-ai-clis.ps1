@@ -488,12 +488,13 @@ read it with Read-Host -AsSecureString, and it lasts for that window only.
            API key:  [Net.NetworkCredential]::new('', (Read-Host 'key' -AsSecureString)).Password | codex login --with-api-key
            (setting OPENAI_API_KEY on its own is not a login)
            check:  codex login status     credentials: %USERPROFILE%\.codex\auth.json
-  gemini   run `gemini` and choose "Sign in with Google". Over SSH (with a terminal: ssh -t) set
-           $env:NO_BROWSER = 'true'  first and paste the code back within 5 minutes.
-           Google Workspace account (not personal Gmail): first
-           $env:GOOGLE_CLOUD_PROJECT = '<project-id>'; personal Gmail must leave it unset.
-           API key instead (this window only; https://aistudio.google.com/app/apikey):
+  gemini   "Sign in with Google" on a personal (free individual) account now fails: "This client
+           is no longer supported for Gemini Code Assist for individuals" (seen 2026-09-26). Use an
+           API key (this window only; https://aistudio.google.com/app/apikey), then run `gemini`:
            $env:GEMINI_API_KEY = [Net.NetworkCredential]::new('', (Read-Host 'key' -AsSecureString)).Password
+           Google Workspace account (not retested): $env:GOOGLE_CLOUD_PROJECT = '<project-id>', run
+           `gemini` and choose "Sign in with Google"; over SSH (ssh -t) set $env:NO_BROWSER = 'true'
+           first and paste the code back within 5 minutes. Personal Gmail must leave it unset.
   hf       run `hf auth login` (over SSH: ssh -t). "Log in with your browser" prints a URL and a code:
            open the URL on any machine and enter the code. "Paste an access token" reads a token at a
            hidden prompt: make one per machine at https://huggingface.co/settings/tokens > New token,
@@ -501,9 +502,10 @@ read it with Read-Host -AsSecureString, and it lasts for that window only.
            check:  hf auth whoami     ($env:HF_TOKEN, when set, overrides the stored login)
   HF MCP   codex   codex mcp login huggingface   (over SSH: ssh -t, add --no-browser, open the URL on
                    any machine, paste the redirect URL back)
-           gemini  sends $env:HF_TOKEN as its bearer token. Set it before starting Gemini.
-                   Set the token at a hidden prompt in your terminal, then start Gemini:
-                   $env:HF_TOKEN = [Net.NetworkCredential]::new('', (Read-Host 'HF token' -AsSecureString)).Password; gemini
+           gemini  sends $env:HF_TOKEN as its bearer token. Give it to one Gemini run, from a hidden prompt:
+                   $env:HF_TOKEN = [Net.NetworkCredential]::new('', (Read-Host 'HF token' -AsSecureString)).Password; try { gemini } finally { Remove-Item Env:HF_TOKEN }
+                   Never run `gemini mcp add` or `gemini mcp remove` with HF_TOKEN set: they save
+                   every ${VAR} in its settings file as the value, this token included.
                    Gemini loads MCP servers only in folders it trusts (it asks on the first run there).
            claude  the account's Hugging Face connector comes with the claude.ai login (/mcp lists it).
                    Signed in with setup-token or an API key? Rerun this script with -WithClaudeHfMcp,

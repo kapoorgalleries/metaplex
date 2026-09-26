@@ -236,28 +236,35 @@ Details:
 
 No project file is checked in. On each machine:
 
-1. Register the server with a token header, because Gemini's OAuth needs a local browser callback that SSH sessions lack. The docs say it "will not work in… Remote SSH sessions without X11 forwarding" ([`docs/tools/mcp-server.md`](https://github.com/google-gemini/gemini-cli/blob/main/docs/tools/mcp-server.md)):
+1. Register the server with a token header, because Gemini's OAuth needs a local browser callback that SSH sessions lack. The docs say it "will not work in… Remote SSH sessions without X11 forwarding" ([`docs/tools/mcp-server.md`](https://github.com/google-gemini/gemini-cli/blob/main/docs/tools/mcp-server.md)). `ops/network/scripts/bootstrap-ai-clis.sh` (or `.ps1`) adds this entry under `mcpServers` in `~/.gemini/settings.json`; to do it by hand, edit the file:
 
-   ```bash
-   gemini mcp add -s user -t http huggingface https://huggingface.co/mcp -H 'Authorization: Bearer ${HF_TOKEN}'
+   ```json
+   "huggingface": {
+     "url": "https://huggingface.co/mcp",
+     "type": "http",
+     "headers": { "Authorization": "Bearer ${HF_TOKEN}" },
+     "excludeTools": ["hf_jobs", "create_repo", "dynamic_space", "hf_sandbox", "hf_sandbox_exec", "hf_sandbox_fs"]
+   }
    ```
 
-   - The single quotes keep `${HF_TOKEN}` literal. Gemini expands it when it loads the settings file.
+   - `${HF_TOKEN}` stays literal in the file. Gemini expands it in memory when it loads the settings.
    - If `HF_TOKEN` is unset the header is empty, and HF serves the anonymous, read-only tools.
-   - `ops/network/scripts/bootstrap-ai-clis.sh` does this step.
-2. Make sure `~/.gemini/settings.json` has `"excludeTools": ["hf_jobs", "create_repo", "dynamic_space", "hf_sandbox", "hf_sandbox_exec", "hf_sandbox_fs"]` under `mcpServers.huggingface`, as a list of six separate names. In a test with Gemini CLI 0.61.0, a comma-joined `--exclude-tools a,b,c` was stored as one string.
+   - **Do not use `gemini mcp add` or `gemini mcp remove` for this or any other server while `HF_TOKEN`, or any variable an entry references, is set.** Gemini CLI 0.61.0 writes the whole `mcpServers` map back as it loaded it, with every `${VAR}` already replaced by its value, so the token is saved to `settings.json` in the clear. This was reproduced on 2026-09-26 with synthetic tokens, and it is why Codex's review of PR #18 rejected the bootstrap's earlier `gemini mcp add` call. If you need those commands, run them with the variables cleared (`env -u HF_TOKEN gemini mcp …`, or a PowerShell window where `$env:HF_TOKEN` was never set).
+2. Make sure `excludeTools` is a list of six separate names. In a test with Gemini CLI 0.61.0, a comma-joined `--exclude-tools a,b,c` was stored as one string.
 3. Trust the checkout (`~/.gemini/trustedFolders.json`, or answer the prompt). Otherwise Gemini loads neither MCP servers nor workspace skills.
 4. Have Gemini read `AGENTS.md` by adding `"context": { "fileName": ["AGENTS.md", "GEMINI.md"] }` to `~/.gemini/settings.json`. Gemini reads only `GEMINI.md` by default ([`docs/cli/gemini-md.md`](https://github.com/google-gemini/gemini-cli/blob/main/docs/cli/gemini-md.md), "Customize the context file name").
 
 Do not install HF's Gemini extension (`gemini extensions install https://github.com/huggingface/skills.git`). It brings all 25 skills, including the SageMaker ones, plus a second MCP server named `huggingface-skills`.
 
-The bootstrap checks the actual `mcpServers.huggingface` entry at user scope, including `GEMINI_CLI_HOME` when set. An unrelated key named `huggingface` does not count. It preserves existing compatible configurations and reports incompatible URLs or missing tool exclusions as an installation failure. Gemini itself accepts JSON comments; the shell validator and Windows PowerShell 5.1's `ConvertFrom-Json` accept plain JSON only (PowerShell 7 also accepts comments), so a commented or otherwise unsupported settings file is left untouched for manual review. A failed registration command or a failed post-registration check makes the overall install incomplete.
+The bootstrap checks the actual `mcpServers.huggingface` entry at user scope, including `GEMINI_CLI_HOME` when set. An unrelated key named `huggingface` does not count. It preserves existing compatible configurations and reports incompatible URLs or missing tool exclusions as an installation failure. When the entry is absent it inserts it as text, as the first member of the top-level `mcpServers` object (created if missing), so no existing byte is rewritten and no other entry's `${VAR}` is ever expanded. It keeps the file's line endings, BOM, permissions and (on Linux and macOS) symlink. The result must parse to the old settings plus exactly this entry, and the file is replaced atomically only if it did not change meanwhile. The bash and PowerShell versions produce identical bytes. Gemini itself accepts JSON comments; the bootstrap accepts plain JSON only, so a commented, duplicated or otherwise unsupported settings file is left untouched for manual review. A failed insertion or a failed post-registration check makes the overall install incomplete.
+
+Gemini CLI's own sign-in is separate from all this: on a personal Google account, "Sign in with Google" was refused on 2026-09-26 ("This client is no longer supported for Gemini Code Assist for individuals"). See `ops/network/README.md`, "Sign-in for the AI CLIs", for the API-key route.
 
 ## The `hf` CLI
 
 The ops bootstrap installs `hf` with HF's official installer. It needs Python 3.10 or later, and `--skip-hf` leaves it out.
 
-The shell bootstrap also uses Python 3.10+ on PATH to validate client JSON without printing credentials. If Python is missing, registration stops before touching any client and the run reports `hf-mcp-validation`. PowerShell uses its built-in JSON parser. Successful registration checks configuration only, not OAuth completion, account permissions or live inference.
+The shell bootstrap also uses Python 3.10+ on PATH to validate client JSON, and to insert the Gemini entry, without printing credentials. If Python is missing, registration stops before touching any client and the run reports `hf-mcp-validation`. PowerShell uses its built-in JSON parser. Successful registration checks configuration only, not OAuth completion, account permissions or live inference.
 
 | System | Installer command |
 | --- | --- |
