@@ -330,10 +330,11 @@ register_codex_hf() (
   elif [ -L "$cfg" ]; then
     warn "codex: user config is a dangling symlink; left unchanged"; return 1
   fi
-  # These commands read config and, for each HTTP server in it, perform bounded OAuth-discovery
-  # requests (failures tolerated) and consult Codex's OAuth token store; they start no server and
-  # trigger no login. The child override prevents project settings from making a missing user
-  # entry look already configured.
+  # `codex mcp list --json` reads config and, for each HTTP server in it, performs bounded
+  # OAuth-discovery requests (failures tolerated) and consults Codex's OAuth token store; the
+  # `codex mcp get --json` calls below only read and serialise the one entry (Codex 0.156.1,
+  # mcp_cmd.rs run_list vs run_get). Neither starts a server or triggers a login. The child
+  # override prevents project settings from making a missing user entry look already configured.
   if ! (cd "$stage" && CODEX_HOME="$stage" codex mcp list --json >/dev/null 2>&1); then
     warn "codex: user config could not be parsed; left unchanged"; return 1
   fi

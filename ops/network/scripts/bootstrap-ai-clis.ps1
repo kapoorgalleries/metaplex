@@ -140,9 +140,11 @@ function Test-Python {
   return $false
 }
 # A child process reads a candidate user config in isolation, without this checkout's MCP entry.
-# The parent's CODEX_HOME and working directory are never modified. Codex performs bounded
-# OAuth-discovery requests for each HTTP server in that config (failures tolerated) and consults
-# its OAuth token store; it starts no server and triggers no login.
+# The parent's CODEX_HOME and working directory are never modified. `codex mcp list --json`
+# performs bounded OAuth-discovery requests for each HTTP server in that config (failures
+# tolerated) and consults Codex's OAuth token store; `codex mcp get <name> --json` only reads and
+# serialises that one entry (Codex 0.156.1, mcp_cmd.rs run_list vs run_get). Neither starts a
+# server or triggers a login.
 function Invoke-CodexConfig([string]$Dir, [string]$Action) {
   $quoted = $Dir.Replace("'", "''")
   $cmd = "`$ErrorActionPreference = 'Stop'; `$env:CODEX_HOME = '$quoted'; Set-Location -LiteralPath '$quoted'; try { `$ErrorActionPreference = 'Continue'; `$global:LASTEXITCODE = 1; & codex mcp $Action --json 2>`$null; exit `$LASTEXITCODE } catch { exit 1 }"
