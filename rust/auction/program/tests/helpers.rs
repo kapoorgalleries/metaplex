@@ -1,7 +1,9 @@
-use solana_program::{hash::Hash, program_pack::Pack, pubkey::Pubkey, system_instruction};
+use solana_program::{
+    clock::Clock, hash::Hash, program_pack::Pack, pubkey::Pubkey, system_instruction, sysvar,
+};
 use solana_program_test::*;
 use solana_sdk::{
-    account::Account,
+    account::{from_account, Account},
     signature::{Keypair, Signer},
     transaction::Transaction,
     transport::TransportError,
@@ -123,6 +125,11 @@ pub async fn get_token_balance(banks_client: &mut BanksClient, token: &Pubkey) -
     let account_info: spl_token::state::Account =
         spl_token::state::Account::unpack_from_slice(token_account.data.as_slice()).unwrap();
     account_info.amount
+}
+
+pub async fn get_clock(banks_client: &mut BanksClient) -> Clock {
+    let account = get_account(banks_client, &sysvar::clock::id()).await;
+    from_account(&account).expect("clock sysvar")
 }
 
 pub async fn get_token_supply(banks_client: &mut BanksClient, mint: &Pubkey) -> u64 {
@@ -320,10 +327,13 @@ pub async fn claim_bid(
     mint: &Pubkey,
 ) -> Result<(), TransportError> {
     let transaction = Transaction::new_signed_with_payer(
+        // claim_bid_instruction takes (destination, authority) -- the order metaplex's own CPI
+        // uses (metaplex/program/src/processor/claim_bid.rs:36-39). This passed them swapped,
+        // which never mattered while the settlement block in lib.rs could not run.
         &[instruction::claim_bid_instruction(
             *program_id,
-            authority.pubkey(),
             *seller,
+            authority.pubkey(),
             bidder.pubkey(),
             bidder_spl_account.pubkey(),
             *mint,

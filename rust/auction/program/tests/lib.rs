@@ -34,6 +34,7 @@ async fn setup_auction(
     price_floor: PriceFloor,
 ) -> (
     Pubkey,
+    ProgramTestContext,
     BanksClient,
     Vec<(Keypair, Keypair, Pubkey)>,
     Keypair,
@@ -48,8 +49,12 @@ async fn setup_auction(
     let mut program_test =
         ProgramTest::new("spl_auction", program_id, processor!(process_instruction));
 
-    // Start executing test.
-    let (mut banks_client, payer, recent_blockhash) = program_test.start().await;
+    // Start executing test. With a context rather than plain start(): only the context can warp
+    // the bank ahead, and settlement needs the clock to move -- see test_correct_runs.
+    let context = program_test.start_with_context().await;
+    let mut banks_client = context.banks_client.clone();
+    let payer = Keypair::from_bytes(&context.payer.to_bytes()).unwrap();
+    let recent_blockhash = context.last_blockhash;
 
     // Create a Token mint to mint some test tokens with.
     let (mint_keypair, mint_manager) =
@@ -166,6 +171,7 @@ async fn setup_auction(
 
     return (
         program_id,
+        context,
         banks_client,
         bidders,
         payer,
@@ -273,6 +279,7 @@ async fn test_correct_runs() {
     for strategy in strategies.iter() {
         let (
             program_id,
+            mut context,
             mut banks_client,
             bidders,
             payer,
@@ -452,54 +459,76 @@ async fn test_correct_runs() {
                     }
                 }
 
-                // If the auction has ended, attempt to claim back SPL tokens into a new account.
-                if auction.ended(0).unwrap() {
-                    let collection = Keypair::new();
+                // Settle: claim every winning bid into a fresh account and check what the seller
+                // collects. Every strategy above ends with Action::End, so this always runs.
+                //
+                // It used to be gated on `auction.ended(0)`. With the end/gap pair this program
+                // records after end_auction -- (Some(ended_at), None) -- that is `0 > ended_at`
+                // (processor.rs:148), false for any real clock, so no claim ever ran and
+                // seller_collects was never checked. The assert makes a strategy that forgets
+                // to end its auction fail here instead of skipping settlement silently.
+                assert!(
+                    auction.ended_at.is_some(),
+                    "strategy must end the auction before settlement"
+                );
 
-                    // Generate Collection Pot.
-                    helpers::create_token_account(
+                // claim_bid requires the clock to be strictly past ended_at (claim_bid.rs:129 via
+                // processor.rs:148). program-test 1.6's start() never leaves slot 1 -- its
+                // background task only registers ticks on one bank -- so the clock stays at the
+                // second end_auction recorded and every claim fails with InvalidState. Warp ahead;
+                // then check the clock moved rather than assume it did.
+                let slot = banks_client.get_root_slot().await.unwrap();
+                context.warp_to_slot(slot + 1000).unwrap();
+                let recent_blockhash = context.last_blockhash;
+                let now = helpers::get_clock(&mut banks_client).await.unix_timestamp;
+                assert!(
+                    now > auction.ended_at.unwrap(),
+                    "warp did not move the clock past ended_at"
+                );
+
+                let collection = Keypair::new();
+
+                // Generate Collection Pot.
+                helpers::create_token_account(
+                    &mut banks_client,
+                    &payer,
+                    &recent_blockhash,
+                    &collection,
+                    &mint,
+                    &payer.pubkey(),
+                )
+                .await
+                .unwrap();
+
+                // For each winning bid, claim into auction.
+                for (index, _amount) in strategy.expect.iter() {
+                    let err = helpers::claim_bid(
                         &mut banks_client,
-                        &payer,
                         &recent_blockhash,
-                        &collection,
+                        &program_id,
+                        &payer,
+                        &payer,
+                        &bidders[*index].0,
+                        &bidders[*index].1,
+                        &collection.pubkey(),
+                        &resource,
                         &mint,
-                        &payer.pubkey(),
                     )
-                    .await
-                    .unwrap();
+                    .await;
+                    println!("{:?}", err);
+                    err.expect("claim_bid");
 
-                    // For each winning bid, claim into auction.
-                    for (index, _amount) in strategy.expect.iter() {
-                        let err = helpers::claim_bid(
-                            &mut banks_client,
-                            &recent_blockhash,
-                            &program_id,
-                            &payer,
-                            &payer,
-                            &bidders[*index].0,
-                            &bidders[*index].1,
-                            &collection.pubkey(),
-                            &resource,
-                            &mint,
-                        )
-                        .await;
-                        println!("{:?}", err);
-                        err.expect("claim_bid");
-
-                        // Bid pot should be empty
-                        let balance = helpers::get_token_balance(
-                            &mut banks_client,
-                            &bidders[*index].1.pubkey(),
-                        )
-                        .await;
-                        assert_eq!(balance, 0);
-                    }
-
-                    // Total claimed balance should match what we expect
+                    // Bid pot should be empty
                     let balance =
-                        helpers::get_token_balance(&mut banks_client, &collection.pubkey()).await;
-                    assert_eq!(balance, strategy.seller_collects);
+                        helpers::get_token_balance(&mut banks_client, &bidders[*index].1.pubkey())
+                            .await;
+                    assert_eq!(balance, 0);
                 }
+
+                // Total claimed balance should match what we expect
+                let balance =
+                    helpers::get_token_balance(&mut banks_client, &collection.pubkey()).await;
+                assert_eq!(balance, strategy.seller_collects);
             }
             _ => {}
         }
@@ -695,6 +724,7 @@ async fn test_incorrect_runs() {
     for strategy in strategies.iter() {
         let (
             program_id,
+            _context,
             mut banks_client,
             bidders,
             payer,
