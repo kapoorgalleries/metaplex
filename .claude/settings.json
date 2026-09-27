@@ -9,7 +9,11 @@
       "mcp__github__actions_list",
       "mcp__github__search_issues",
       "Bash(hf version)",
-      "Bash(hf auth whoami)"
+      "Bash(hf auth whoami)",
+      "mcp__Gmail__search_threads",
+      "mcp__Gmail__get_thread",
+      "mcp__Gmail__get_message",
+      "mcp__Opera__tab-content"
     ],
     "ask": [
       "mcp__*__hf_jobs",
