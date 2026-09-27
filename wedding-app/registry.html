@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="description" content="Gifts & blessings for Priya & Sanjay." />
+  <meta name="robots" content="noindex, nofollow" />
+  <link rel="canonical" href="https://sanjaywedspriya.com/app/registry.html" />
+  <meta property="og:type" content="website" />
+  <meta property="og:site_name" content="Priya & Sanjay 2026" />
+  <meta property="og:title" content="Gifts &amp; Blessings · Priya &amp; Sanjay" />
+  <meta property="og:description" content="Gifts & blessings for Priya & Sanjay." />
+  <meta property="og:url" content="https://sanjaywedspriya.com/app/registry.html" />
+  <meta property="og:image" content="https://sanjaywedspriya.com/app/assets/og.jpg" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:title" content="Gifts &amp; Blessings · Priya &amp; Sanjay" />
+  <meta name="twitter:description" content="Gifts & blessings for Priya & Sanjay." />
+  <meta name="twitter:image" content="https://sanjaywedspriya.com/app/assets/og.jpg" />
+  <meta name="theme-color" content="#7A1F23" />
+  <title>Gifts &amp; Blessings · Priya &amp; Sanjay</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,400;0,500;0,600;1,400&family=Marcellus&family=Jost:wght@300;400;500&family=Noto+Serif+Devanagari:wght@400;600&family=Noto+Serif+Kannada:wght@400;600&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="css/styles.css" />
+  <link rel="stylesheet" href="css/registry.css" />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🪔</text></svg>" />
+</head>
+<body>
+  <div id="site-header"></div>
+  <main class="page">
+    <section class="subhero">
+      <p class="subhero__kicker" data-i18n="sub.registry.kicker">With Gratitude</p>
+      <h1 data-i18n="title.registry">Gifts &amp; Blessings</h1>
+      <p data-i18n="sub.registry.intro">Your love and blessings mean the world to us — your presence is the greatest gift of all. We gently request no boxed or wrapped gifts.</p>
+    </section>
+    <section class="section">
+      <div class="registry reveal">
+        <p data-i18n="rg.zelle.p">For those who wish to give, a gift may be sent by Zelle.</p>
+        <div class="zelle__openrow">
+          <button type="button" class="btn btn--solid" id="zelleOpen" aria-expanded="false" aria-controls="zelleReveal" data-i18n="rg.zelle.btn">Click here for Zelle</button>
+        </div>
+        <div class="zelle" id="zelleReveal" hidden>
+          <p class="zelle__eyebrow">Zelle</p>
+          <h3 data-i18n="rg.zelle.modal.t">Send a gift</h3>
+          <img class="zelle__qr" src="assets/zelle-qr.png" alt="Zelle QR code to send Priya &amp; Sanjay a gift" width="342" height="342" loading="lazy" decoding="async" />
+          <p class="zelle__hint"><span data-i18n="rg.zelle.scan">Scan with your banking app.</span> Can’t scan? <a href="mailto:sanjay@kapoors.com?subject=Gift%20details">Email us</a> and we’ll share our details.</p>
+        </div>
+        <p data-i18n="rg.zelle.hint">Or simply speak to the bride or groom, who will gladly help.</p>
+      </div>
+      <div class="registry reveal" style="margin-top:2.5rem">
+        <h3 data-i18n="rg.ty.t">Thank you</h3>
+        <p data-i18n="rg.ty.p">However you choose to celebrate with us — being there, a kind note, or a gift — we're endlessly grateful. 💛</p>
+        <div class="registry__links"><a class="btn btn--outline btn--sm" href="rsvp.html">RSVP</a><a class="btn btn--outline btn--sm" href="guestbook.html">Sign the guestbook</a></div>
+      </div>
+    </section>
+  </main>
+  <div id="site-footer"></div>
+  <script src="js/site.js"></script>
+  <script>
+    /* Zelle reveal: the QR stays behind a click, matching the site. */
+    (function () {
+      "use strict";
+      var btn = document.getElementById("zelleOpen");
+      var panel = document.getElementById("zelleReveal");
+      if (!btn || !panel) return;
+      btn.addEventListener("click", function () {
+        var opening = panel.hidden;
+        panel.hidden = !opening;
+        btn.setAttribute("aria-expanded", opening ? "true" : "false");
+        if (opening && panel.scrollIntoView) panel.scrollIntoView({ behavior: "smooth", block: "nearest" });
+      });
+    })();
+  </script>
+</body>
+</html>
