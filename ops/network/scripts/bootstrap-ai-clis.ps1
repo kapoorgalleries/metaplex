@@ -185,8 +185,36 @@ function Register-CodexHf {
   } catch { Add-Failure 'hf-mcp-codex' "codex: $($_.Exception.Message)" }
   finally { if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force } }
 }
+# Settings files are read as bash reads them (utf-8-sig): a BOM is dropped and invalid UTF-8 throws.
+function Read-Utf8([byte[]]$Bytes) {
+  $n = if ($Bytes.Length -ge 3 -and $Bytes[0] -eq 0xEF -and $Bytes[1] -eq 0xBB -and $Bytes[2] -eq 0xBF) { 3 } else { 0 }
+  return (New-Object Text.UTF8Encoding($false, $true)).GetString($Bytes, $n, $Bytes.Length - $n)
+}
+# Plain JSON only (RFC 8259), the grammar bash's json.loads applies once NaN and Infinity are refused.
+# ConvertFrom-Json cannot be the gatekeeper: Windows PowerShell 5.1's also takes single quotes, bare
+# keys and NaN, PowerShell 7's takes comments. Anything else is left for manual review. The check runs
+# in .NET regexes, since a PowerShell loop over a large .claude.json takes many seconds.
+$jsonString = '"(?:[^"\\\x00-\x1f]|\\(?:["\\/bfnrt]|u[0-9A-Fa-f]{4}))*"'
+$jsonScalar = '-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?|true|false|null'
+$jsonToken = [regex]($jsonString + '|' + $jsonScalar + '|[{}\[\],:]')
+$jsonString = [regex]$jsonString
+$jsonScalar = [regex]$jsonScalar
+$jsonWs = [regex]'[ \t\r\n]+'
+$jsonFold = [regex]'\{(?:":[0"](?:,":[0"])*)?\}|\[(?:[0"](?:,[0"])*)?\]'
+function Test-StrictJson([string]$T) {
+  # Read left to right, every character outside whitespace must belong to a token.
+  if ($jsonWs.Replace($jsonToken.Replace($T, ''), '') -cne '') { return $false }
+  # Then the structure: strings become ", other scalars 0, and well-formed innermost arrays and
+  # objects fold to 0 until a single value is left.
+  $s = $jsonWs.Replace($jsonScalar.Replace($jsonString.Replace($T, '"'), '0'), '')
+  do { $prev = $s; $s = $jsonFold.Replace($s, '0') } while ($s -cne $prev)
+  return $s -ceq '0' -or $s -ceq '"'
+}
+function Skip-JsonWs([string]$T, [int]$i) {
+  while ($i -lt $T.Length -and " `t`r`n".IndexOf($T[$i]) -ge 0) { $i++ }
+  return $i
+}
 # 0 compatible, 3 absent, 1 unsupported/incompatible. Use properties, not a textual key match.
-# PS 5.1 ConvertFrom-Json does not accept comments: preserve those settings for manual review.
 function Get-HfClientState([string]$Client) {
   $geminiDir = if ($env:GEMINI_CLI_HOME) { $env:GEMINI_CLI_HOME } else { $env:USERPROFILE }
   $cfg = Join-Path $geminiDir '.gemini\settings.json'
@@ -196,7 +224,10 @@ function Get-HfClientState([string]$Client) {
   }
   if (-not (Test-Path -LiteralPath $cfg)) { return 3 }
   try {
-    $settings = [IO.File]::ReadAllText($cfg) | ConvertFrom-Json -ErrorAction Stop
+    $raw = Read-Utf8 ([IO.File]::ReadAllBytes($cfg))
+    # The root must be an object: [pscustomobject] is [psobject], which a parsed array also passes.
+    if (-not (Test-StrictJson $raw) -or $raw[(Skip-JsonWs $raw 0)] -cne [char]'{') { return 1 }
+    $settings = $raw | ConvertFrom-Json -ErrorAction Stop
     if ($null -eq $settings -or $settings -isnot [pscustomobject]) { return 1 }
     $servers = $settings.mcpServers
     # A present-but-null mcpServers needs manual review, as in the bash validator; absent means absent.
@@ -220,11 +251,7 @@ function Get-HfClientState([string]$Client) {
 # Never `gemini mcp add` (or `remove`): Gemini 0.61 writes back the whole mcpServers map as loaded,
 # with every ${VAR} already expanded, so another server's secret would be saved in the clear.
 # Byte-for-byte parity with add_gemini_hf in bootstrap-ai-clis.sh; the scanner reads the top level
-# only and refuses anything that is not plain JSON (comments included, which PS 7 would accept).
-function Skip-JsonWs([string]$T, [int]$i) {
-  while ($i -lt $T.Length -and " `t`r`n".IndexOf($T[$i]) -ge 0) { $i++ }
-  return $i
-}
+# only, on text Test-StrictJson has already passed.
 function Skip-JsonString([string]$T, [int]$i) {
   $i++
   while ($i -lt $T.Length) {
@@ -297,6 +324,18 @@ function Add-HfToSettingsText([string]$T) {
   }
   return $T.Substring(0, $at) + $add + $T.Substring($at)
 }
+# A new, empty file carrying $Like's own access list, set at creation: settings text never sits, even
+# briefly, in a file the folder's (possibly wider) access list lets others open. Bash: mkstemp, 0600.
+function New-FileLike([string]$Path, [string]$Like) {
+  $acl = New-Object Security.AccessControl.FileSecurity
+  $acl.SetSecurityDescriptorSddlForm((Get-Acl -LiteralPath $Like).GetSecurityDescriptorSddlForm('Access'))
+  $acl.SetAccessRuleProtection($true, $true)
+  $w = [Security.AccessControl.FileSystemRights]::Write
+  if ($PSVersionTable.PSEdition -ceq 'Core') {
+    return [IO.FileSystemAclExtensions]::Create([IO.FileInfo]$Path, [IO.FileMode]::CreateNew, $w, [IO.FileShare]::None, 4096, [IO.FileOptions]::None, $acl)
+  }
+  return New-Object IO.FileStream($Path, [IO.FileMode]::CreateNew, $w, [IO.FileShare]::None, 4096, [IO.FileOptions]::None, $acl)
+}
 # 0 added; 1 unsupported layout or unwritable; 2 changed during the edit. Never logs settings text.
 function Add-GeminiHf {
   $geminiDir = if ($env:GEMINI_CLI_HOME) { $env:GEMINI_CLI_HOME } else { $env:USERPROFILE }
@@ -311,11 +350,12 @@ function Add-GeminiHf {
       # A link would be replaced by a plain file; leave it for manual edit.
       if ((Get-Item -LiteralPath $cfg -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) { return 1 }
       $original = [IO.File]::ReadAllBytes($cfg)
-      $start = 0
-      if ($original.Length -ge 3 -and $original[0] -eq 0xEF -and $original[1] -eq 0xBB -and $original[2] -eq 0xBF) { $bom = [byte[]]@(0xEF, 0xBB, 0xBF); $start = 3 }
-      $text = $utf8.GetString($original, $start, $original.Length - $start)
+      if ($original.Length -ge 3 -and $original[0] -eq 0xEF -and $original[1] -eq 0xBB -and $original[2] -eq 0xBF) { $bom = [byte[]]@(0xEF, 0xBB, 0xBF) }
+      $text = Read-Utf8 $original
     }
+    if (-not (Test-StrictJson $text)) { return 1 }
     $after = Add-HfToSettingsText $text
+    if (-not (Test-StrictJson $after)) { return 1 }
     # The splice must parse, carry exactly this entry, and add nothing else.
     $was = $text | ConvertFrom-Json -ErrorAction Stop
     $now = $after | ConvertFrom-Json -ErrorAction Stop
@@ -326,14 +366,18 @@ function Add-GeminiHf {
     if ($nowTop -ne $wasTop + $(if ($null -eq $was.mcpServers) { 1 } else { 0 }) -or @($now.mcpServers.PSObject.Properties).Count -ne $wasServers + 1) { return 1 }
     New-Item -ItemType Directory -Force -Path $dir | Out-Null
     $tmp = Join-Path $dir ('.settings.json.' + [guid]::NewGuid().ToString('N') + '.tmp')
-    [IO.File]::WriteAllBytes($tmp, [byte[]]($bom + $utf8.GetBytes($after)))
+    $bytes = [byte[]]($bom + $utf8.GetBytes($after))
     if ($exists) {
+      $fs = New-FileLike $tmp $cfg
+      try { $fs.Write($bytes, 0, $bytes.Length) } finally { $fs.Dispose() }
       if (-not (Test-Path -LiteralPath $cfg) -or [Convert]::ToBase64String([IO.File]::ReadAllBytes($cfg)) -cne [Convert]::ToBase64String($original)) { return 2 }
       # Keeps the file's ACL and attributes. [NullString]: PowerShell would pass `$null as "" (an illegal path).
       [IO.File]::Replace($tmp, $cfg, [NullString]::Value)
     } else {
+      [IO.File]::WriteAllBytes($tmp, $bytes)
       if (Test-Path -LiteralPath $cfg) { return 2 }
-      [IO.File]::Move($tmp, $cfg)
+      # Move refuses an existing name, so a file created meanwhile is never overwritten.
+      try { [IO.File]::Move($tmp, $cfg) } catch { if (Test-Path -LiteralPath $cfg) { return 2 }; throw }
     }
     $tmp = $null
     return 0

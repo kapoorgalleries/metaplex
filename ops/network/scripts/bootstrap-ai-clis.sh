@@ -367,8 +367,10 @@ import json, pathlib, sys
 p = pathlib.Path(sys.argv[1])
 if not p.exists():
     sys.exit(3)
+def reject(constant):  # json.loads alone takes NaN and Infinity; JSON does not
+    raise ValueError(constant)
 try:
-    settings = json.loads(p.read_text(encoding="utf-8-sig"))
+    settings = json.loads(p.read_text(encoding="utf-8-sig"), parse_constant=reject)
     servers = settings.get("mcpServers", {})
     if not isinstance(servers, dict):
         sys.exit(1)
@@ -396,6 +398,12 @@ import json, os, pathlib, stat, sys, tempfile
 # absent). Parity with Add-GeminiHf in bootstrap-ai-clis.ps1, which produces the same bytes.
 cfg, url, deny = pathlib.Path(sys.argv[1]), sys.argv[2], sys.argv[3:]
 entry = {"url": url, "type": "http", "headers": {"Authorization": "Bearer ${HF_TOKEN}"}, "excludeTools": deny}
+
+def reject(constant):  # json.loads alone takes NaN and Infinity; JSON does not
+    raise ValueError(constant)
+
+def strict(t):
+    return json.loads(t, parse_constant=reject)
 
 def ws(t, i):
     while i < len(t) and t[i] in " \t\r\n":
@@ -490,14 +498,14 @@ try:
     raw = original.decode("utf-8") if original is not None else "{}" + "\n"
     bom = "\ufeff" if raw.startswith("\ufeff") else ""
     text = raw[len(bom):]
-    before = json.loads(text)
+    before = strict(text)
     if not isinstance(before, dict) or "huggingface" in (before.get("mcpServers") or {}):
         sys.exit(1)
     after = insert(text)
     # The splice must parse to exactly the old settings plus the one entry.
-    expected = json.loads(text)
+    expected = strict(text)
     expected.setdefault("mcpServers", {})["huggingface"] = entry
-    if json.loads(after) != expected:
+    if strict(after) != expected:
         sys.exit(1)
     mode = stat.S_IMODE(target.stat().st_mode) if original is not None else 0o600
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -507,10 +515,18 @@ try:
         f.flush()
         os.fsync(f.fileno())
     os.chmod(tmp, mode)
-    if (target.read_bytes() if target.exists() else None) != original:
-        sys.exit(2)
-    os.replace(tmp, target)
-    tmp = None
+    if original is None:
+        # link() refuses a name that exists, as File.Move does in the .ps1, so a settings file
+        # created meanwhile is never overwritten. The temporary name is removed below.
+        try:
+            os.link(tmp, target)
+        except FileExistsError:
+            sys.exit(2)
+    else:
+        if (target.read_bytes() if target.exists() else None) != original:
+            sys.exit(2)
+        os.replace(tmp, target)
+        tmp = None
 except Exception:  # never a traceback: it could quote settings text
     sys.exit(1)
 finally:

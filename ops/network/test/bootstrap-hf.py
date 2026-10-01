@@ -246,6 +246,44 @@ failed() { FAILED="$FAILED $1"; }
                 self.assertIn('hf-mcp-gemini', result.stdout)
                 self.assertEqual(p.read_text(), content)
 
+    def test_non_standard_json_refused_by_check_and_by_splice(self):
+        # Plain JSON only: Windows PowerShell 5.1's ConvertFrom-Json and Python's json.loads each
+        # accept some of these, Gemini's parser does not. The .ps1 applies the same strict grammar.
+        contents = ['{"theme":\'light\'}', '{theme: "light"}', '{"a": {b: 1}}', '{"a": NaN}',
+                    '{"a": Infinity}', '{"a": -Infinity}', '{"a": [1,]}', '{"a": 01}', '{"a": "\\x"}']
+        for content in contents:
+            for forced in ['', 'check_client_hf() { return 3; }']:
+                with self.subTest(content=content, forced=forced):
+                    p = self.write('.gemini/settings.json', content)
+                    result = self.run_registration('gemini', forced)
+                    self.assertEqual(result.returncode, 1)
+                    self.assertIn('manual review' if not forced else 'could not add', result.stdout)
+                    self.assertEqual(p.read_text(), content)
+                    self.assertEqual(list((self.root / '.gemini').iterdir()), [p])
+
+    def test_new_settings_file_created_meanwhile_is_not_overwritten(self):
+        # Another process creates settings.json just before the bootstrap's final rename/link.
+        hook = self.root / 'hook'
+        hook.mkdir()
+        (hook / 'sitecustomize.py').write_text(
+            'import os\n'
+            'def race(real):\n'
+            '    def step(src, dst, *a, **k):\n'
+            '        t = os.environ["RACE_TARGET"]\n'
+            '        if not os.path.exists(t):\n'
+            '            with open(t, "w") as f:\n'
+            '                f.write("{\\"created\\": \\"meanwhile\\"}\\n")\n'
+            '        return real(src, dst, *a, **k)\n'
+            '    return step\n'
+            'os.link, os.replace = race(os.link), race(os.replace)\n')
+        target = self.root / '.gemini/settings.json'
+        self.env.update(PYTHONPATH=str(hook), RACE_TARGET=str(target))
+        result = self.run_registration('gemini')
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('changed during the edit', result.stdout)
+        self.assertEqual(target.read_text(), '{"created": "meanwhile"}\n')
+        self.assertEqual(list((self.root / '.gemini').iterdir()), [target])
+
     def test_gemini_symlinked_settings_stay_a_symlink(self):
         real = self.write('dotfiles/gemini-settings.json', '{"theme": "light"}\n')
         link = self.root / '.gemini/settings.json'
