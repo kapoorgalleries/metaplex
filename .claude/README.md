@@ -139,8 +139,13 @@ key, so a second `allow` block silently discards the first.
 clone it fetches missing objects from the promisor remote on demand. With an
 `ext::` remote allowed, that fetch runs an external command.
 
-Everything else prompts, including every write (GitHub comments, PR edits and
+What happens to everything else depends on the permission mode. In the
+default mode it prompts, including every write (GitHub comments, PR edits and
 merges, Supabase `deploy_edge_function`) and `execute_sql`, which runs
 arbitrary SQL that only the `read_only=true` URL above stops from writing.
+In `bypassPermissions` only the `ask` rules in this file still prompt, so
+those writes run unprompted there; `dontAsk` refuses anything not allowed
+instead of asking. A write that must always need a person belongs in `ask`,
+not in this paragraph.
 Claude Code applies deny, then ask, then allow, so nothing here overrides the
 Hugging Face ask and deny rules above.
