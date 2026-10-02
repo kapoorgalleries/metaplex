@@ -185,8 +185,36 @@ function Register-CodexHf {
   } catch { Add-Failure 'hf-mcp-codex' "codex: $($_.Exception.Message)" }
   finally { if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force } }
 }
+# Settings files are read as bash reads them (utf-8-sig): a BOM is dropped and invalid UTF-8 throws.
+function Read-Utf8([byte[]]$Bytes) {
+  $n = if ($Bytes.Length -ge 3 -and $Bytes[0] -eq 0xEF -and $Bytes[1] -eq 0xBB -and $Bytes[2] -eq 0xBF) { 3 } else { 0 }
+  return (New-Object Text.UTF8Encoding($false, $true)).GetString($Bytes, $n, $Bytes.Length - $n)
+}
+# Plain JSON only (RFC 8259), the grammar bash's json.loads applies once NaN and Infinity are refused.
+# ConvertFrom-Json cannot be the gatekeeper: Windows PowerShell 5.1's also takes single quotes, bare
+# keys and NaN, PowerShell 7's takes comments. Anything else is left for manual review. The check runs
+# in .NET regexes, since a PowerShell loop over a large .claude.json takes many seconds.
+$jsonString = '"(?:[^"\\\x00-\x1f]|\\(?:["\\/bfnrt]|u[0-9A-Fa-f]{4}))*"'
+$jsonScalar = '-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?|true|false|null'
+$jsonToken = [regex]($jsonString + '|' + $jsonScalar + '|[{}\[\],:]')
+$jsonString = [regex]$jsonString
+$jsonScalar = [regex]$jsonScalar
+$jsonWs = [regex]'[ \t\r\n]+'
+$jsonFold = [regex]'\{(?:":[0"](?:,":[0"])*)?\}|\[(?:[0"](?:,[0"])*)?\]'
+function Test-StrictJson([string]$T) {
+  # Read left to right, every character outside whitespace must belong to a token.
+  if ($jsonWs.Replace($jsonToken.Replace($T, ''), '') -cne '') { return $false }
+  # Then the structure: strings become ", other scalars 0, and well-formed innermost arrays and
+  # objects fold to 0 until a single value is left.
+  $s = $jsonWs.Replace($jsonScalar.Replace($jsonString.Replace($T, '"'), '0'), '')
+  do { $prev = $s; $s = $jsonFold.Replace($s, '0') } while ($s -cne $prev)
+  return $s -ceq '0' -or $s -ceq '"'
+}
+function Skip-JsonWs([string]$T, [int]$i) {
+  while ($i -lt $T.Length -and " `t`r`n".IndexOf($T[$i]) -ge 0) { $i++ }
+  return $i
+}
 # 0 compatible, 3 absent, 1 unsupported/incompatible. Use properties, not a textual key match.
-# PS 5.1 ConvertFrom-Json does not accept comments: preserve those settings for manual review.
 function Get-HfClientState([string]$Client) {
   $geminiDir = if ($env:GEMINI_CLI_HOME) { $env:GEMINI_CLI_HOME } else { $env:USERPROFILE }
   $cfg = Join-Path $geminiDir '.gemini\settings.json'
@@ -196,7 +224,10 @@ function Get-HfClientState([string]$Client) {
   }
   if (-not (Test-Path -LiteralPath $cfg)) { return 3 }
   try {
-    $settings = [IO.File]::ReadAllText($cfg) | ConvertFrom-Json -ErrorAction Stop
+    $raw = Read-Utf8 ([IO.File]::ReadAllBytes($cfg))
+    # The root must be an object: [pscustomobject] is [psobject], which a parsed array also passes.
+    if (-not (Test-StrictJson $raw) -or $raw[(Skip-JsonWs $raw 0)] -cne [char]'{') { return 1 }
+    $settings = $raw | ConvertFrom-Json -ErrorAction Stop
     if ($null -eq $settings -or $settings -isnot [pscustomobject]) { return 1 }
     $servers = $settings.mcpServers
     # A present-but-null mcpServers needs manual review, as in the bash validator; absent means absent.
@@ -215,6 +246,45 @@ function Get-HfClientState([string]$Client) {
     }
     return 0
   } catch { return 1 }
+}
+# Gemini's settings.json is only ever created, never edited: an existing file (which may hold other
+# servers' settings) is left byte-for-byte as it is and the entry is printed for a manual paste.
+# Never `gemini mcp add` (or `remove`): Gemini 0.61 writes back the whole mcpServers map as loaded,
+# with every ${VAR} already expanded, so another server's secret would be saved in the clear.
+# Parity with add_gemini_hf in bootstrap-ai-clis.sh: same bytes, same return codes.
+# 0 created; 4 settings.json exists: left untouched, snippet printed; 1 could not create.
+function Add-GeminiHf {
+  $geminiDir = if ($env:GEMINI_CLI_HOME) { $env:GEMINI_CLI_HOME } else { $env:USERPROFILE }
+  $dir = Join-Path $geminiDir '.gemini'
+  $cfg = Join-Path $dir 'settings.json'
+  # The entry in the layout of Python's json.dumps(indent=2). Single quotes keep ${HF_TOKEN} literal.
+  $tools = @($hfDeny | ForEach-Object { '    "' + $_ + '"' })
+  for ($k = 0; $k -lt $tools.Count - 1; $k++) { $tools[$k] += ',' }
+  $entry = @('{', ('  "url": "' + $hfUrl + '",'), '  "type": "http",', '  "headers": {',
+    '    "Authorization": "Bearer ${HF_TOKEN}"', '  },', '  "excludeTools": [') + $tools + @('  ]', '}')
+  $doc = (@('{', '  "mcpServers": {', ('    "huggingface": ' + $entry[0])) + @($entry[1..($entry.Count - 1)] | ForEach-Object { '    ' + $_ }) + @('  }', '}')) -join "`n"
+  # GetAttributes sees the name itself, a dangling link included, so nothing is created through one.
+  $taken = { try { [void][IO.File]::GetAttributes($cfg); $true } catch { $false } }
+  if (-not (& $taken)) {
+    try {
+      New-Item -ItemType Directory -Force -Path $dir | Out-Null
+      # Only this user can open the new file, from the moment it exists. CreateNew refuses any
+      # existing name, so a file created meanwhile is never overwritten.
+      $acl = New-Object Security.AccessControl.FileSecurity
+      $acl.SetAccessRuleProtection($true, $false)
+      $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule([Security.Principal.WindowsIdentity]::GetCurrent().User, 'FullControl', 'Allow')))
+      $w = [Security.AccessControl.FileSystemRights]::Write
+      $fs = if ($PSVersionTable.PSEdition -ceq 'Core') {
+        [IO.FileSystemAclExtensions]::Create([IO.FileInfo]$cfg, [IO.FileMode]::CreateNew, $w, [IO.FileShare]::None, 4096, [IO.FileOptions]::None, $acl)
+      } else { New-Object IO.FileStream($cfg, [IO.FileMode]::CreateNew, $w, [IO.FileShare]::None, 4096, [IO.FileOptions]::None, $acl) }
+      try { $bytes = [Text.Encoding]::UTF8.GetBytes($doc + "`n"); $fs.Write($bytes, 0, $bytes.Length); $fs.Flush($true) } finally { $fs.Dispose() }
+      return 0
+    } catch { if (-not (& $taken)) { return 1 } }
+  }
+  Write-Host ("gemini: $cfg already exists and was left unchanged. To finish, add this entry inside its top-level " +
+    '"mcpServers" object (create "mcpServers": { } if it has none), then rerun:')
+  Write-Host ('"huggingface": ' + ($entry -join "`n"))
+  return 4
 }
 # Node 20+ at most once per run; $true when it is on PATH afterwards.
 $NodeOk = $null
@@ -320,10 +390,10 @@ if (-not $SkipHf) {
     $state = Get-HfClientState 'gemini'
     if ($state -eq 0) { Log 'gemini: compatible user huggingface MCP server already configured; left as is' }
     elseif ($state -eq 3) {
-      # Single quotes preserve the placeholder, so neither argv nor settings contain the token value.
-      $r = Invoke-Captured 'gemini' (@('mcp', 'add', '-s', 'user', '-t', 'http', 'huggingface', $hfUrl, '-H', 'Authorization: Bearer ${HF_TOKEN}', '--exclude-tools') + $hfDeny)
-      if ($r.Code -eq 0 -and (Get-HfClientState 'gemini') -eq 0) { Log 'gemini: added the user huggingface MCP server' }
-      else { Add-Failure 'hf-mcp-gemini' 'gemini: Hugging Face MCP registration failed; check user settings' }
+      $rc = Add-GeminiHf
+      if ($rc -eq 0 -and (Get-HfClientState 'gemini') -eq 0) { Log 'gemini: created user settings with the huggingface MCP server' }
+      elseif ($rc -eq 4) { Add-Failure 'hf-mcp-gemini' 'gemini: user settings exist; huggingface entry not added (manual step above)' }
+      else { Add-Failure 'hf-mcp-gemini' 'gemini: could not create user settings; nothing changed' }
     } else { Add-Failure 'hf-mcp-gemini' 'gemini: user settings need manual review (commented/unsupported JSON, incompatible URL or missing blocked tools); left unchanged' }
   }
   if ($WithClaudeHfMcp -and -not $SkipClaude -and (Have 'claude')) {
@@ -364,12 +434,13 @@ read it with Read-Host -AsSecureString, and it lasts for that window only.
            API key:  [Net.NetworkCredential]::new('', (Read-Host 'key' -AsSecureString)).Password | codex login --with-api-key
            (setting OPENAI_API_KEY on its own is not a login)
            check:  codex login status     credentials: %USERPROFILE%\.codex\auth.json
-  gemini   run `gemini` and choose "Sign in with Google". Over SSH (with a terminal: ssh -t) set
-           $env:NO_BROWSER = 'true'  first and paste the code back within 5 minutes.
-           Google Workspace account (not personal Gmail): first
-           $env:GOOGLE_CLOUD_PROJECT = '<project-id>'; personal Gmail must leave it unset.
-           API key instead (this window only; https://aistudio.google.com/app/apikey):
+  gemini   "Sign in with Google" on a personal (free individual) account now fails: "This client
+           is no longer supported for Gemini Code Assist for individuals" (seen 2026-09-26). Use an
+           API key (this window only; https://aistudio.google.com/app/apikey), then run `gemini`:
            $env:GEMINI_API_KEY = [Net.NetworkCredential]::new('', (Read-Host 'key' -AsSecureString)).Password
+           Google Workspace account (not retested): $env:GOOGLE_CLOUD_PROJECT = '<project-id>', run
+           `gemini` and choose "Sign in with Google"; over SSH (ssh -t) set $env:NO_BROWSER = 'true'
+           first and paste the code back within 5 minutes. Personal Gmail must leave it unset.
   hf       run `hf auth login` (over SSH: ssh -t). "Log in with your browser" prints a URL and a code:
            open the URL on any machine and enter the code. "Paste an access token" reads a token at a
            hidden prompt: make one per machine at https://huggingface.co/settings/tokens > New token,
@@ -377,9 +448,10 @@ read it with Read-Host -AsSecureString, and it lasts for that window only.
            check:  hf auth whoami     ($env:HF_TOKEN, when set, overrides the stored login)
   HF MCP   codex   codex mcp login huggingface   (over SSH: ssh -t, add --no-browser, open the URL on
                    any machine, paste the redirect URL back)
-           gemini  sends $env:HF_TOKEN as its bearer token. Set it before starting Gemini.
-                   Set the token at a hidden prompt in your terminal, then start Gemini:
-                   $env:HF_TOKEN = [Net.NetworkCredential]::new('', (Read-Host 'HF token' -AsSecureString)).Password; gemini
+           gemini  sends $env:HF_TOKEN as its bearer token. Give it to one Gemini run, from a hidden prompt:
+                   $env:HF_TOKEN = [Net.NetworkCredential]::new('', (Read-Host 'HF token' -AsSecureString)).Password; try { gemini } finally { Remove-Item Env:HF_TOKEN }
+                   Never run `gemini mcp add` or `gemini mcp remove` with HF_TOKEN set: they save
+                   every ${VAR} in its settings file as the value, this token included.
                    Gemini loads MCP servers only in folders it trusts (it asks on the first run there).
            claude  the account's Hugging Face connector comes with the claude.ai login (/mcp lists it).
                    Signed in with setup-token or an API key? Rerun this script with -WithClaudeHfMcp,

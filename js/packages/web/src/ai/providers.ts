@@ -122,8 +122,10 @@ export function joinUrl(base: string, path: string): string {
 
 /** mapStatus writes its own advice straight after the endpoint's line, so a
  *  line with no closing punctuation would run into it ("Rate limited Wait
- *  and retry"). Applied wherever advice follows, whatever shape the line
- *  arrived in; a line that stands alone is passed through verbatim. */
+ *  and retry"). Applied to Hugging Face's line wherever advice follows,
+ *  whatever shape it arrived in; a line that stands alone is passed through
+ *  verbatim. Every other provider's line is relayed exactly as it was before
+ *  that entry existed, run-on included — test 93 holds them to it. */
 function asSentence(line: string): string {
   const trimmed = line.trim();
   return trimmed === '' || /[.!?]$/.test(trimmed) ? trimmed : trimmed + '.';
@@ -151,9 +153,13 @@ export function mapStatus(
     providerId: providerId,
     ...(providerCode ? { code: providerCode } : {}),
   };
-  /** The endpoint's line, terminated, for the branches that follow it with
-   *  advice of their own. */
-  const detail = providerMessage ? ' ' + asSentence(providerMessage) : '';
+  /** The endpoint's line, for the branches that follow it with advice of
+   *  their own: terminated for Hugging Face, verbatim for everyone else. */
+  const line =
+    providerId === 'huggingface'
+      ? asSentence(providerMessage)
+      : providerMessage;
+  const detail = line ? ' ' + line : '';
 
   if (status === 400) {
     /* Hugging Face's router answers an unknown model, or one that no
@@ -268,8 +274,7 @@ export function mapStatus(
      * the storefront's own 4 MB-per-image ceiling can exceed it. */
     return aiError(
       'bad_request',
-      (asSentence(providerMessage) ||
-        'The endpoint refused the request as too large.') +
+      (line || 'The endpoint refused the request as too large.') +
         ' Lower "Image max edge" in AI settings, or send fewer detail photographs.',
       opts,
     );

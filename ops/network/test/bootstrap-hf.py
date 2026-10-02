@@ -8,6 +8,7 @@ Run: python3 ops/network/test/bootstrap-hf.py
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -47,14 +48,11 @@ if name == 'codex':
     except (KeyError, ValueError):
         sys.exit(1)
 if name == 'gemini':
-    cfg = pathlib.Path(os.environ.get('GEMINI_CLI_HOME', root)) / '.gemini/settings.json'
-    # What gemini 0.61.0 `mcp add -t http` really writes: url + type, not the deprecated httpUrl.
-    s = dict(url=args[args.index('huggingface') + 1], type='http',
-             headers={'Authorization': args[args.index('-H') + 1].split(': ', 1)[1]},
-             excludeTools=args[args.index('--exclude-tools') + 1:])
-else:
-    cfg = pathlib.Path(os.environ.get('CLAUDE_CONFIG_DIR', root)) / '.claude.json'
-    s = dict(type='http', url=args[-1])
+    # The bootstrap must never run `gemini mcp add`/`remove`: Gemini 0.61 writes back the
+    # env-expanded mcpServers map, saving other servers' ${VAR} values in the clear.
+    sys.exit(97)
+cfg = pathlib.Path(os.environ.get('CLAUDE_CONFIG_DIR', root)) / '.claude.json'
+s = dict(type='http', url=args[-1])
 data = json.loads(cfg.read_text()) if cfg.exists() else {}
 data.setdefault('mcpServers', {})['huggingface'] = s
 cfg.parent.mkdir(parents=True, exist_ok=True)
@@ -87,7 +85,7 @@ class BootstrapHf(unittest.TestCase):
         p.write_text(content)
         return p
 
-    def run_registration(self, only=None, extra=''):
+    def run_registration(self, only=None, extra='', **as_user):
         prelude = '''set -u
 log() { printf '%s\\n' "$*"; }
 warn() { printf '%s\\n' "$*"; }
@@ -98,7 +96,7 @@ failed() { FAILED="$FAILED $1"; }
         flags = '\n'.join(f'SKIP_{c.upper()}={int(only is not None and c != only)}' for c in ['claude', 'codex', 'gemini'])
         code = prelude + self.functions + '\n' + flags + '\nCLAUDE_HF_MCP=1\n' + extra + '\nregister_hf_mcp\n[ -z "$FAILED" ] || { echo "INSTALL INCOMPLETE:$FAILED"; exit 1; }\necho "INSTALL OK"\n'
         return subprocess.run(['bash', '-c', code], cwd=self.root / 'project', env=self.env,
-                              text=True, capture_output=True, timeout=15)
+                              text=True, capture_output=True, timeout=15, **as_user)
 
     def test_new_user_registration_and_all_three_repeat_without_rewrite(self):
         first = self.run_registration()
@@ -109,21 +107,12 @@ failed() { FAILED="$FAILED $1"; }
         self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
         self.assertEqual(before, [p.read_bytes() for p in paths])
         calls = [json.loads(x) for x in (self.root / 'calls.jsonl').read_text().splitlines()]
-        for client in ['gemini', 'claude']:
-            self.assertEqual(sum(c[0] == client for c in calls), 1)
+        self.assertEqual(sum(c[0] == 'claude' for c in calls), 1)
+        self.assertEqual(sum(c[0] == 'gemini' for c in calls), 0)
         self.assertNotIn('test-secret-must-not-appear', json.dumps(calls) + first.stdout + second.stdout + ''.join(p.read_text() for p in paths))
         self.assertIn('${HF_TOKEN}', paths[1].read_text())
         self.assertEqual(json.loads(paths[1].read_text())['mcpServers']['huggingface']['type'], 'http')
         self.assertNotIn('PROJECT-SHADOW', paths[0].read_text())
-
-    def test_unrelated_keys_and_other_servers_preserved(self):
-        self.write('.gemini/settings.json', json.dumps({'theme': {'huggingface': True}, 'mcpServers': {'existing': {'command': 'keep-me'}}}))
-        result = self.run_registration('gemini')
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        data = json.loads((self.root / '.gemini/settings.json').read_text())
-        self.assertEqual(data['theme'], {'huggingface': True})
-        self.assertEqual(data['mcpServers']['existing']['command'], 'keep-me')
-        self.assertIn('huggingface', data['mcpServers'])
 
     def test_legacy_gemini_httpurl_entry_is_compatible(self):
         p = self.write('.gemini/settings.json', json.dumps({'mcpServers': {'huggingface': {'httpUrl': URL, 'excludeTools': DENY}}}))
@@ -182,10 +171,123 @@ failed() { FAILED="$FAILED $1"; }
         for client in ['codex', 'gemini', 'claude']:
             with self.subTest(client=client):
                 self.env['FAIL_CLIENT'] = client
+                if client == 'gemini':
+                    self.write('.gemini', 'a file where the settings directory should be')
                 result = self.run_registration(client)
                 self.assertEqual(result.returncode, 1)
                 self.assertIn('hf-mcp-' + client, result.stdout)
                 self.assertNotIn('test-secret-must-not-appear', result.stdout + result.stderr)
+                self.assertNotIn('Traceback', result.stdout + result.stderr)
+
+    ENTRY = {'url': URL, 'type': 'http', 'headers': {'Authorization': 'Bearer ${HF_TOKEN}'}, 'excludeTools': DENY}
+
+    def test_new_settings_file_is_created_private_with_the_exact_entry(self):
+        result = self.run_registration('gemini')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        p = self.root / '.gemini/settings.json'
+        self.assertEqual(p.read_text(), json.dumps({'mcpServers': {'huggingface': self.ENTRY}}, indent=2) + '\n')
+        self.assertEqual(p.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(list(p.parent.iterdir()), [p])
+        self.assertIn('created user settings', result.stdout)
+        self.assertNotIn('test-secret-must-not-appear', p.read_text() + result.stdout + result.stderr)
+        self.assertFalse((self.root / 'calls.jsonl').exists())  # `gemini mcp add` is never run
+
+    def test_existing_settings_are_never_edited_and_the_entry_is_printed(self):
+        # Codex's PR #18 blocker was `gemini mcp add` saving Bearer ${OTHER_TOKEN} as its value. An
+        # existing file is now left byte-for-byte as it is; the entry is printed for a manual paste.
+        self.env['OTHER_TOKEN'] = 'synthetic-other-secret'
+        contents = ['{}',
+                    '{"theme": {"huggingface": true}, "mcpServers": {"existing": {"command": "keep-me"}}}',
+                    '{\n  "mcpServers": {\n    "other": {\n      "url": "https://x.example/mcp",\n'
+                    '      "headers": {"Authorization": "Bearer ${OTHER_TOKEN}"}\n    }\n  }\n}\n',
+                    '\ufeff{\r\n  "theme": "caf\u00e9"\r\n}\r\n']
+        for content in contents:
+            with self.subTest(content=content):
+                shutil.rmtree(self.root / '.gemini', ignore_errors=True)
+                p = self.write('.gemini/settings.json', content)
+                p.chmod(0o640)
+                before = p.read_bytes()
+                result = self.run_registration('gemini')
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn('already exists and was left unchanged', result.stdout)
+                self.assertIn('INSTALL INCOMPLETE: hf-mcp-gemini', result.stdout)
+                self.assertEqual(p.read_bytes(), before)
+                self.assertEqual(p.stat().st_mode & 0o777, 0o640)
+                self.assertEqual(list(p.parent.iterdir()), [p])
+                self.assertNotIn('synthetic-other-secret', result.stdout + result.stderr)
+                self.assertNotIn('test-secret-must-not-appear', result.stdout + result.stderr)
+                self.assertFalse((self.root / 'calls.jsonl').exists())
+                # The printed entry is exactly what to paste into mcpServers.
+                out = result.stdout.splitlines()
+                i = next(k for k, line in enumerate(out) if line.startswith('"huggingface": {'))
+                j = next(k for k in range(i, len(out)) if out[k] == '}')
+                pasted = json.loads('{"mcpServers": {' + '\n'.join(out[i:j + 1]) + '}}')
+                self.assertEqual(pasted['mcpServers']['huggingface'], self.ENTRY)
+
+    def test_unsupported_settings_untouched_even_when_the_check_is_bypassed(self):
+        # Plain JSON only (Windows PowerShell 5.1's ConvertFrom-Json and Python's json.loads each accept
+        # some of these; Gemini's parser does not). The check sends them to manual review, and even
+        # past the check the file is never edited.
+        contents = ['{"theme":\'light\'}', '{theme: "light"}', '{"a": {b: 1}}', '{"a": NaN}', '{"a": Infinity}',
+                    '{"a": -Infinity}', '{"a": [1,]}', '{"a": 01}', '{"a": "\\x"}', '{"mcpServers": null}',
+                    '{"mcpServers": {}, "mcpServers": {"x": {}}}', '{"a": {/* c */ "b": 1}}', '[1, 2]']
+        for content in contents:
+            for forced in ['', 'check_client_hf() { return 3; }']:
+                with self.subTest(content=content, forced=forced):
+                    p = self.write('.gemini/settings.json', content)
+                    result = self.run_registration('gemini', forced)
+                    self.assertEqual(result.returncode, 1)
+                    self.assertTrue('manual review' in result.stdout or 'left unchanged' in result.stdout, result.stdout)
+                    self.assertIn('INSTALL INCOMPLETE: hf-mcp-gemini', result.stdout)
+                    self.assertEqual(p.read_text(), content)
+                    self.assertEqual(list((self.root / '.gemini').iterdir()), [p])
+
+    def test_settings_file_created_meanwhile_is_not_overwritten(self):
+        # Another program creates settings.json between the check and the create.
+        hook = self.root / 'hook'
+        hook.mkdir()
+        (hook / 'sitecustomize.py').write_text(
+            'import os, sys\n'
+            'real = os.open\n'
+            'def racing_open(path, flags, *a, **k):\n'
+            '    if sys.argv[0] == "-" and len(sys.argv) > 3 and flags & os.O_EXCL and not os.path.lexists(path):\n'
+            '        with open(path, "w") as f:\n'
+            '            f.write(\'{"created": "meanwhile"}\\n\')\n'
+            '    return real(path, flags, *a, **k)\n'
+            'os.open = racing_open\n')
+        target = self.root / '.gemini/settings.json'
+        self.env.update(PYTHONPATH=str(hook))
+        result = self.run_registration('gemini')
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn('already exists and was left unchanged', result.stdout)
+        self.assertEqual(target.read_text(), '{"created": "meanwhile"}\n')
+        self.assertEqual(list(target.parent.iterdir()), [target])
+
+    def test_symlinked_settings_are_never_written_through(self):
+        real = self.write('dotfiles/gemini-settings.json', '{"theme": "light"}\n')
+        link = self.root / '.gemini/settings.json'
+        link.parent.mkdir()
+        link.symlink_to(real)
+        result = self.run_registration('gemini')
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn('already exists and was left unchanged', result.stdout)
+        self.assertTrue(link.is_symlink())
+        self.assertEqual(real.read_text(), '{"theme": "light"}\n')
+        link.unlink()
+        link.symlink_to(self.root / 'missing.json')  # dangling: never created through
+        result = self.run_registration('gemini')
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertTrue(link.is_symlink())
+        self.assertFalse((self.root / 'missing.json').exists())
+
+    def test_gemini_results_are_reported(self):
+        for stub, text in [('add_gemini_hf() { return 4; }', 'manual step above'),
+                           ('add_gemini_hf() { return 1; }', 'could not create user settings')]:
+            with self.subTest(stub=stub):
+                result = self.run_registration('gemini', stub)
+                self.assertEqual(result.returncode, 1)
+                self.assertIn(text, result.stdout)
+                self.assertIn('hf-mcp-gemini', result.stdout)
 
     def test_custom_user_config_directories(self):
         self.env['CODEX_HOME'] = str(self.root / 'custom-codex')

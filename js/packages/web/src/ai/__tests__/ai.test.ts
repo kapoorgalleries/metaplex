@@ -3848,40 +3848,53 @@ describe('providers — Hugging Face Inference Providers', () => {
     expect('max_tokens' in resent).toBe(false);
   });
 
-  it("93. every provider's relayed line is terminated before advice follows it, in either body shape", () => {
+  it("93. Hugging Face's relayed line is terminated before advice follows it; every other provider's is relayed exactly as before", () => {
     PROVIDER_IDS.forEach(id => {
       const provider = PROVIDERS[id];
       const cfg = cfgFor(provider, 'k');
       const says = (status: number, body: unknown) =>
         thrownAiError(() => provider.extractText(status, body, cfg)).message;
+      // The six providers that predate Hugging Face keep their pre-existing
+      // copy byte for byte, run-on included: the line is appended after one
+      // space, never trimmed or punctuated. Hugging Face's gets a full stop
+      // when it has none, and nothing is doubled when it has one.
+      const hf = id === 'huggingface';
+      const stop = hf ? '.' : '';
 
-      // A line with no closing punctuation gets one; one that has it is
-      // left alone, so nothing is doubled.
       expect(says(429, providerError('Rate limited'))).toContain(
-        'Rate limited. Wait and retry',
+        ' Rate limited' + stop + ' Wait and retry',
       );
       expect(says(429, providerError('Rate limited.'))).toContain(
-        'Rate limited. Wait and retry',
+        ' Rate limited. Wait and retry',
       );
       expect(says(429, providerError('Rate limited.'))).not.toContain('..');
       expect(says(503, providerError('Upstream unavailable'))).toContain(
-        'Upstream unavailable. Try again',
+        ' Upstream unavailable' + stop + ' Try again',
       );
-      expect(says(413, providerError('Body too large'))).toContain(
-        'Body too large. Lower "Image max edge"',
+      expect(says(413, providerError('Body too large'))).toBe(
+        'Body too large' +
+          stop +
+          ' Lower "Image max edge" in AI settings, or send fewer detail photographs.',
+      );
+      // Surrounding whitespace is the provider's own for the legacy six.
+      expect(says(429, providerError(' Rate limited '))).toContain(
+        hf ? ' Rate limited. Wait and retry' : '  Rate limited  Wait and retry',
       );
       // The 401 line is followed by advice about a secret: the one in the
       // form, or — through the gateway, which reads any line that is not
       // its own as a relayed provider refusal (test 70) — the one it holds.
       expect(says(401, providerError('Invalid key'))).toContain(
-        'Invalid key. ' +
+        (id === 'trimurti' ? ': ' : '). ') +
+          'Invalid key' +
+          stop +
+          ' ' +
           (id === 'trimurti' ? 'That is the provider key' : 'Check the '),
       );
       // A bare 400 stands alone, so it is relayed verbatim.
       expect(says(400, providerError('nope'))).toBe('nope');
     });
 
-    // The string shapes, where read, are treated the same way.
+    // The string shapes, read for Hugging Face only, are treated the same way.
     const hf = cfgFor(HUGGINGFACE, HF_TOKEN);
     expect(
       thrownAiError(() =>
