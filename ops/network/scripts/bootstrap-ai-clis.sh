@@ -392,7 +392,7 @@ add_gemini_hf() {  # 0 added; 1 unsupported layout or unwritable; 2 changed duri
   py="$(json_python)" || return 1
   # shellcheck disable=SC2086
   "$py" - "$cfg" "$HF_MCP_URL" $HF_DENY <<'PYJSON'
-import errno, json, os, pathlib, stat, sys, tempfile
+import errno, json, os, pathlib, stat, sys, tempfile, time
 # Every existing byte is kept, so nothing already in the file is re-serialised: the entry is
 # spliced in as text, as the first member of the top-level mcpServers object (created when
 # absent). Parity with Add-GeminiHf in bootstrap-ai-clis.ps1, which produces the same bytes.
@@ -528,7 +528,8 @@ def copy_access(src, dst):
     if (old.st_uid, old.st_gid) != (new.st_uid, new.st_gid):
         os.chown(dst, old.st_uid, old.st_gid)
     if sys.platform == "darwin":
-        if has_macos_acl(src):
+        # Also dst: the folder may hand new files an inherited ACL that src does not have.
+        if has_macos_acl(src) or has_macos_acl(dst):
             raise OSError("extended ACL")
     elif hasattr(os, "listxattr"):  # Linux keeps a POSIX ACL in the system.posix_acl_access attribute
         try:
@@ -539,6 +540,13 @@ def copy_access(src, dst):
             names = []
         if "system.posix_acl_access" in names:
             os.setxattr(dst, "system.posix_acl_access", os.getxattr(src, "system.posix_acl_access"))
+        else:
+            # A default ACL on the folder gives dst an access ACL that src does not have.
+            try:
+                os.removexattr(dst, "system.posix_acl_access")
+            except OSError as e:
+                if e.errno not in (errno.ENODATA, errno.ENOTSUP, errno.EOPNOTSUPP):
+                    raise
 
 tmp = None
 try:
@@ -579,23 +587,39 @@ try:
             sys.exit(2)
     else:
         # As File.Replace with a backup in the .ps1: the swap keeps whatever version settings.json
-        # had at that moment, and that version is deleted only if it is exactly the one read above.
-        # Any other is put back, so an edit made meanwhile is never lost.
+        # had at that moment. A version other than the one read above is put back, so an edit made
+        # meanwhile is never lost.
         exchange(tmp, target)
         displaced, tmp = tmp, None
         try:
             same = stat.S_ISREG(os.lstat(displaced).st_mode) and pathlib.Path(displaced).read_bytes() == original
         except OSError:
             same = False
-        if same:
-            os.unlink(displaced)
-        else:
+        if not same:
             exchange(displaced, target)
             if pathlib.Path(displaced).read_bytes() == new:
                 tmp = displaced  # this run's text again: removed below
             else:
                 print(f"gemini: kept another version of settings.json at {displaced}", file=sys.stderr)
             sys.exit(2)
+        # The old version is kept, not deleted: a process that opened settings.json before the
+        # swap and writes later writes into it, and that write is then still on disk.
+        stamp, bak = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()), displaced
+        for n in range(1, 100):
+            name = target.with_name(f"{target.name}.{stamp}" + (f"-{n}" if n > 1 else "") + ".bak")
+            try:
+                os.link(displaced, name)  # refuses an existing name, so no file is overwritten
+            except FileExistsError:
+                continue
+            except OSError:
+                break
+            bak = name
+            try:
+                os.unlink(displaced)
+            except OSError:
+                pass
+            break
+        print(f"gemini: previous settings kept at {bak}")
 except Exception:  # never a traceback: it could quote settings text
     sys.exit(1)
 finally:

@@ -347,8 +347,10 @@ function Add-GeminiHf {
     $exists = Test-Path -LiteralPath $cfg
     $original = $null; $bom = [byte[]]@(); $text = "{}`n"
     if ($exists) {
-      # A link would be replaced by a plain file; leave it for manual edit.
-      if ((Get-Item -LiteralPath $cfg -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) { return 1 }
+      # A link would be replaced by a plain file, and an EFS-encrypted file would be staged as
+      # plain text: leave both for manual edit.
+      $attrs = (Get-Item -LiteralPath $cfg -Force).Attributes
+      if ($attrs -band ([IO.FileAttributes]::ReparsePoint -bor [IO.FileAttributes]::Encrypted)) { return 1 }
       $original = [IO.File]::ReadAllBytes($cfg)
       if ($original.Length -ge 3 -and $original[0] -eq 0xEF -and $original[1] -eq 0xBB -and $original[2] -eq 0xBF) { $bom = [byte[]]@(0xEF, 0xBB, 0xBF) }
       $text = Read-Utf8 $original
@@ -371,15 +373,18 @@ function Add-GeminiHf {
       $fs = New-FileLike $tmp $cfg
       try { $fs.Write($bytes, 0, $bytes.Length) } finally { $fs.Dispose() }
       # Replace keeps settings.json's ACL and attributes, and moves the version it displaces to $bak.
-      # That version is deleted only if it is exactly the one read above; any other is put back, so
-      # an edit made meanwhile is never lost. Parity with the exchange in bootstrap-ai-clis.sh.
-      $bak = Join-Path $dir ('.settings.json.' + [guid]::NewGuid().ToString('N') + '.tmp')
+      # A version other than the one read above is put back, so an edit made meanwhile is never
+      # lost. The old version is kept, not deleted: a process that opened settings.json before the
+      # swap and writes later writes into it. Parity with the exchange in bootstrap-ai-clis.sh.
+      $stamp = [DateTime]::UtcNow.ToString("yyyyMMdd'T'HHmmss'Z'")
+      $bak = Join-Path $dir "settings.json.$stamp.bak"
+      for ($n = 2; Test-Path -LiteralPath $bak; $n++) { $bak = Join-Path $dir "settings.json.$stamp-$n.bak" }
       try {
         [IO.File]::Replace($tmp, $cfg, $bak)
         $tmp = $null
         $same = $false
         try { $same = [Convert]::ToBase64String([IO.File]::ReadAllBytes($bak)) -ceq [Convert]::ToBase64String($original) } catch { }
-        if ($same) { Remove-Item -LiteralPath $bak -Force; return 0 }
+        if ($same) { Log "gemini: previous settings kept at $bak"; return 0 }
         $back = Join-Path $dir ('.settings.json.' + [guid]::NewGuid().ToString('N') + '.tmp')
         [IO.File]::Replace($bak, $cfg, $back)
         if ([Convert]::ToBase64String([IO.File]::ReadAllBytes($back)) -ceq [Convert]::ToBase64String($bytes)) { $tmp = $back }  # this run's text: removed below

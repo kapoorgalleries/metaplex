@@ -86,6 +86,13 @@ class BootstrapHf(unittest.TestCase):
         p.write_text(content)
         return p
 
+    def only_backup(self, p):
+        # After an edit of an existing file the folder holds it and exactly one dated backup.
+        rest = sorted(set(p.parent.iterdir()) - {p})
+        self.assertEqual(len(rest), 1, rest)
+        self.assertRegex(rest[0].name, r'^' + p.name.replace('.', r'\.') + r'\.\d{8}T\d{6}Z(-\d+)?\.bak$')
+        return rest[0]
+
     def run_registration(self, only=None, extra='', **as_user):
         prelude = '''set -u
 log() { printf '%s\\n' "$*"; }
@@ -213,7 +220,11 @@ failed() { FAILED="$FAILED $1"; }
             'url': URL, 'type': 'http', 'headers': {'Authorization': 'Bearer ${HF_TOKEN}'}, 'excludeTools': DENY})
         self.assertEqual(list(data['mcpServers']), ['huggingface', 'other'])
         self.assertFalse((self.root / 'calls.jsonl').exists())
-        self.assertEqual(list((self.root / '.gemini').iterdir()), [p])  # no temporary file left
+        # No temporary file left; the previous version is kept, with its own mode.
+        bak = self.only_backup(p)
+        self.assertEqual(bak.read_text(), original)
+        self.assertEqual(bak.stat().st_mode & 0o777, 0o640)
+        self.assertIn(f'previous settings kept at {bak}', result.stdout)
 
     def test_gemini_insertion_layouts_and_refusals(self):
         entry = {'url': URL, 'type': 'http', 'headers': {'Authorization': 'Bearer ${HF_TOKEN}'}, 'excludeTools': DENY}
@@ -341,7 +352,40 @@ os.replace = once(os.replace)
         self.assertEqual((after.st_uid, after.st_gid, after.st_mode & 0o7777), (1, 2, before.st_mode & 0o7777))
         self.assertEqual(os.getxattr(p, 'system.posix_acl_access'), acl)
         self.assertIn('huggingface', json.loads(p.read_text())['mcpServers'])
-        self.assertEqual(list((self.root / '.gemini').iterdir()), [p])
+        bak = self.only_backup(p)  # the old file itself: same owner, group, mode and ACL
+        self.assertEqual((bak.stat().st_uid, bak.stat().st_gid, bak.stat().st_mode & 0o7777), (1, 2, before.st_mode & 0o7777))
+        self.assertEqual(bak.read_text(), '{"theme": "light"}\n')
+
+    def test_gemini_edit_drops_an_acl_inherited_from_the_folder(self):
+        # The folder got a default ACL after settings.json was written: a new file inherits
+        # user:65534:r--, which the old file never had and chmod 0640 would make effective.
+        if os.geteuid() != 0:
+            self.skipTest('needs root to set a default ACL')
+        p = self.write('.gemini/settings.json', '{"theme": "light"}\n')
+        p.chmod(0o640)
+        default = struct.pack('<I', 2) + b''.join(struct.pack('<HHI', *e) for e in [
+            (0x01, 7, 0xFFFFFFFF), (0x02, 4, 65534), (0x04, 0, 0xFFFFFFFF), (0x10, 4, 0xFFFFFFFF), (0x20, 0, 0xFFFFFFFF)])
+        try:
+            os.setxattr(p.parent, 'system.posix_acl_default', default)
+        except OSError:
+            self.skipTest('filesystem without POSIX ACLs')
+        result = self.run_registration('gemini')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn('system.posix_acl_access', os.listxattr(p))
+        self.assertEqual(p.stat().st_mode & 0o777, 0o640)
+        self.assertIn('huggingface', json.loads(p.read_text())['mcpServers'])
+
+    def test_write_through_a_handle_opened_before_the_edit_is_kept(self):
+        # A process opened settings.json before the swap and writes after the bootstrap is done:
+        # the write lands in the old file, which must still be on disk.
+        p = self.write('.gemini/settings.json', '{"theme": "light"}\n')
+        with open(p, 'r+') as late:
+            result = self.run_registration('gemini')
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            late.seek(0)
+            late.write('{"theme": "dark"} ')
+        self.assertIn('huggingface', json.loads(p.read_text())['mcpServers'])
+        self.assertEqual(self.only_backup(p).read_text(), '{"theme": "dark"} \n')
 
     def test_gemini_edit_refused_when_group_cannot_be_kept(self):
         if os.geteuid() != 0:
