@@ -7,11 +7,11 @@ use solana_sdk::program_pack::Pack;
 use solana_sdk::{
     account::Account,
     hash::Hash,
-    instruction::{AccountMeta, Instruction},
+    instruction::{AccountMeta, Instruction, InstructionError},
     pubkey::Pubkey,
     signature::{Keypair, Signer},
     system_instruction, system_program,
-    transaction::Transaction,
+    transaction::{Transaction, TransactionError},
     transport::TransportError,
 };
 use spl_auction::{
@@ -26,13 +26,42 @@ use std::mem;
 
 mod helpers;
 
+// The program's error enum. Its module is private to the crate, so it is compiled into this test
+// from the same source file instead of being copied here as numeric codes that could drift.
+#[path = "../src/errors.rs"]
+mod errors;
+use errors::AuctionError;
+
+/// Asserts that `result` is the transaction's only instruction (index 0) failing with
+/// `Custom(expected as u32)`. Every helper that sends an auction instruction sends it alone.
+///
+/// Under BPF a program that the auction program CPIs into (SPL Token, System) surfaces its own
+/// custom errors in the same shape, so a low code alone cannot name the program that raised it.
+/// Every rejection asserted in this file is raised by an auction-program check that runs before
+/// any CPI in that instruction.
+fn assert_auction_error(result: Result<(), TransportError>, expected: AuctionError, what: &str) {
+    let code = expected.clone() as u32;
+    match result {
+        Err(TransportError::TransactionError(TransactionError::InstructionError(
+            0,
+            InstructionError::Custom(actual),
+        ))) if actual == code => {}
+        other => panic!(
+            "{}: expected {:?} (Custom({})), got {:?}",
+            what, expected, code, other
+        ),
+    }
+}
+
 /// Initialize an auction with a random resource, and generate bidders with tokens that can be used
 /// for testing.
 async fn setup_auction(
     start: bool,
     max_winners: usize,
+    price_floor: PriceFloor,
 ) -> (
     Pubkey,
+    ProgramTestContext,
     BanksClient,
     Vec<(Keypair, Keypair, Pubkey)>,
     Keypair,
@@ -47,8 +76,12 @@ async fn setup_auction(
     let mut program_test =
         ProgramTest::new("spl_auction", program_id, processor!(process_instruction));
 
-    // Start executing test.
-    let (mut banks_client, payer, recent_blockhash) = program_test.start().await;
+    // Start executing test. With a context rather than plain start(): only the context can warp
+    // the bank ahead, and settlement needs the clock to move -- see test_correct_runs.
+    let context = program_test.start_with_context().await;
+    let mut banks_client = context.banks_client.clone();
+    let payer = Keypair::from_bytes(&context.payer.to_bytes()).unwrap();
+    let recent_blockhash = context.last_blockhash;
 
     // Create a Token mint to mint some test tokens with.
     let (mint_keypair, mint_manager) =
@@ -70,6 +103,7 @@ async fn setup_auction(
         &resource,
         &mint_keypair.pubkey(),
         max_winners,
+        price_floor,
     )
     .await
     .unwrap();
@@ -77,9 +111,12 @@ async fn setup_auction(
     // Attach useful Accounts for testing.
     let mut bidders = vec![];
     for n in 0..5 {
-        // Bidder SPL Account, with Minted Tokens
+        // Bidder SPL Account, with Minted Tokens. The same keypair is also the bidder's signing
+        // wallet (helpers::place_bid passes it as both), so these tests cannot tell the wallet
+        // from the source token account apart.
         let bidder = Keypair::new();
-        // PDA in the auction for the Bidder to deposit their funds to.
+        // SPL token account, owned by the auction, that escrows this bidder's funds (the pot
+        // token account; place_bid.rs:202-204 checks the owner). A plain keypair, not a PDA.
         let auction_spl_pot = Keypair::new();
 
         // Generate User SPL Wallet Account
@@ -94,7 +131,8 @@ async fn setup_auction(
         .await
         .unwrap();
 
-        // Owner via pot PDA.
+        // BidderPot PDA: the state account that records which SPL account is this bidder's pot
+        // (place_bid.rs:264-272). It owns nothing.
         let (bid_pot_pubkey, pot_bump) = Pubkey::find_program_address(
             &[
                 PREFIX.as_bytes(),
@@ -148,6 +186,9 @@ async fn setup_auction(
     assert_eq!(auction.last_bid, None);
     assert_eq!(auction.state as i32, AuctionState::create() as i32);
     assert_eq!(auction.end_auction_at, None);
+    // WinnerLimit::Capped must produce an English auction. test_correct_runs checks winners and
+    // settles only through the EnglishAuction variant, so a different variant has to fail here.
+    assert_eq!(auction.bid_state, BidState::new_english(max_winners));
 
     // Start Auction.
     if start {
@@ -164,6 +205,7 @@ async fn setup_auction(
 
     return (
         program_id,
+        context,
         banks_client,
         bidders,
         payer,
@@ -182,7 +224,6 @@ enum Action {
     Cancel(usize),
     End,
 }
-/* Commenting out for now
 #[cfg(feature = "test-bpf")]
 #[tokio::test]
 async fn test_correct_runs() {
@@ -208,7 +249,7 @@ async fn test_correct_runs() {
                 Action::End,
             ],
             max_winners: 3,
-            price_floor: PriceFloor::None,
+            price_floor: PriceFloor::None([0; 32]),
             seller_collects: 9000,
             expect: vec![(1, 2000), (2, 3000), (3, 4000)],
         },
@@ -222,7 +263,7 @@ async fn test_correct_runs() {
             ],
             expect: vec![(0, 4000)],
             max_winners: 3,
-            price_floor: PriceFloor::None,
+            price_floor: PriceFloor::None([0; 32]),
             seller_collects: 4000,
         },
         // The top bidder when cancelling should allow room for lower bidders.
@@ -239,7 +280,7 @@ async fn test_correct_runs() {
             ],
             expect: vec![(2, 5500), (1, 6000), (3, 7000)],
             max_winners: 3,
-            price_floor: PriceFloor::None,
+            price_floor: PriceFloor::None([0; 32]),
             seller_collects: 18500,
         },
         // An auction where everyone cancels should still succeed, with no winners.
@@ -255,7 +296,7 @@ async fn test_correct_runs() {
             ],
             expect: vec![],
             max_winners: 3,
-            price_floor: PriceFloor::None,
+            price_floor: PriceFloor::None([0; 32]),
             seller_collects: 0,
         },
         // An auction where no one bids should still succeed.
@@ -263,8 +304,81 @@ async fn test_correct_runs() {
             actions: vec![Action::End],
             expect: vec![],
             max_winners: 3,
-            price_floor: PriceFloor::None,
+            price_floor: PriceFloor::None([0; 32]),
             seller_collects: 0,
+        },
+        // Bids below the current top are accepted and ranked; ties go to the earlier bid.
+        //
+        // No strategy above ever inserts anywhere but the end of `bids`. In
+        // BidState::place_bid (processor.rs:259-314) this one takes insert-at-0 (2000, then
+        // 1000; :291-294), the mid-array insert (3000 below 4000; :269-271), and the tie inserted
+        // just below an equal, earlier bid (bidder 3's 3000 below bidder 2's; :284-287). A "must
+        // beat the top bid" rule would reject the second bid; a push-only insert would rank 1000
+        // above 4000. The three-way-tie strategy below covers the remaining tie branches.
+        // Eviction (:299-301) is not reached by any strategy: it needs more than
+        // max_array_size_for(3) = 8 live bids, and the fixture has five bidders.
+        Test {
+            actions: vec![
+                Action::Bid(0, 4000),
+                Action::Bid(1, 2000),
+                Action::Bid(2, 3000),
+                Action::Bid(3, 3000),
+                Action::Bid(4, 1000),
+                Action::End,
+            ],
+            expect: vec![(3, 3000), (2, 3000), (0, 4000)],
+            max_winners: 3,
+            price_floor: PriceFloor::None([0; 32]),
+            seller_collects: 10000,
+        },
+        // A winner cancelling promotes the best retained losing bid into the winner set.
+        //
+        // This is what the retention buffer (max_array_size_for, processor.rs:247) is for. If
+        // `bids` kept only `max_winners` entries, bidder 3's and bidder 4's bids would have
+        // evicted the lower ones, and after the cancel there would be two winners instead of
+        // three. Bidder 4's 500 is also retained, so this shows the better of the two (1000) is
+        // the one promoted.
+        Test {
+            actions: vec![
+                Action::Bid(0, 1000),
+                Action::Bid(1, 2000),
+                Action::Bid(2, 3000),
+                Action::Bid(3, 4000),
+                Action::Bid(4, 500),
+                Action::Cancel(3),
+                Action::End,
+            ],
+            expect: vec![(0, 1000), (1, 2000), (2, 3000)],
+            max_winners: 3,
+            price_floor: PriceFloor::None([0; 32]),
+            seller_collects: 6000,
+        },
+        // A bid exactly at the reserve price is accepted, and wins.
+        //
+        // place_bid.rs:238 rejects `amount < min` since 377f6cd (it was `<=`). This pins that
+        // boundary from the accepting side; test_incorrect_runs rejects 4999, one below it.
+        Test {
+            actions: vec![Action::Bid(0, 5000), Action::Bid(1, 6000), Action::End],
+            expect: vec![(0, 5000), (1, 6000)],
+            max_winners: 3,
+            price_floor: PriceFloor::MinimumPrice([5000, 0, 0, 0]),
+            seller_collects: 11000,
+        },
+        // Three equal bids: the earliest ranks highest.
+        //
+        // Covers the tie branches the ranked-insert strategy does not: a tie with the lowest bid
+        // (processor.rs:279-282) and stepping past a run of equal bids (:289).
+        Test {
+            actions: vec![
+                Action::Bid(0, 3000),
+                Action::Bid(1, 3000),
+                Action::Bid(2, 3000),
+                Action::End,
+            ],
+            expect: vec![(2, 3000), (1, 3000), (0, 3000)],
+            max_winners: 3,
+            price_floor: PriceFloor::None([0; 32]),
+            seller_collects: 9000,
         },
     ];
 
@@ -272,6 +386,7 @@ async fn test_correct_runs() {
     for strategy in strategies.iter() {
         let (
             program_id,
+            mut context,
             mut banks_client,
             bidders,
             payer,
@@ -280,7 +395,7 @@ async fn test_correct_runs() {
             mint_authority,
             auction_pubkey,
             recent_blockhash,
-        ) = setup_auction(true, strategy.max_winners).await;
+        ) = setup_auction(true, strategy.max_winners, strategy.price_floor.clone()).await;
 
         // Interpret test actions one by one.
         for action in strategy.actions.iter() {
@@ -396,6 +511,7 @@ async fn test_correct_runs() {
                     .unwrap();
 
                     assert!(auction.ended_at.is_some());
+                    assert_eq!(auction.state, AuctionState::Ended);
                 }
             }
         }
@@ -412,81 +528,247 @@ async fn test_correct_runs() {
         )
         .unwrap();
 
-        // Verify BidState, all winners should be as expected
+        // Verify BidState, all winners should be as expected.
+        //
+        // Asserted through num_winners/winner_at/amount rather than by walking `bids` directly.
+        // These are the accessors metaplex settles through: winner_at, per the note at
+        // metaplex/program/src/processor/redeem_bid.rs:40-44 ("Auction specifically does not
+        // expose internal state workings as it may change someday, but it does expose a point
+        // get-winner-at-index method"), and num_winners and amount in
+        // empty_payment_account.rs. Reading `bids` positionally is what made this assertion
+        // wrong twice over: winners are the LAST `max` entries, and the array now also retains
+        // losing bids (max_array_size_for, processor.rs:247).
         match auction.bid_state {
-            BidState::EnglishAuction { ref bids, .. } => {
-                // Zip internal bid state with the expected indices this strategy expects winners
-                // to result in.
-                let results: Vec<(_, _)> = strategy.expect.iter().zip(bids).collect();
-                for (index, bid) in results.iter() {
-                    let bidder = &bidders[index.0];
-                    let amount = index.1;
+            BidState::EnglishAuction { ref bids, ref max } => {
+                assert_eq!(*max, strategy.max_winners);
 
-                    // Winners should match the keypair indices we expected.
-                    // bid.0 is the pubkey.
-                    // bidder.2 is the derived potkey we expect Bid.0 to be.
-                    assert_eq!(bid.0, bidder.2);
-                    // Must have bid the amount we expected.
-                    // bid.1 is the amount.
-                    assert_eq!(bid.1, amount);
+                // The winner set is exactly the size expected -- no extras. The old zip() could
+                // not catch an extra winner, because zip stops at the shorter side.
+                assert_eq!(auction.num_winners(), strategy.expect.len() as u64);
+
+                // `expect` lists winners in ascending amount; winner_at(0) is the top bid
+                // (processor.rs:383-397 indexes from the end), so walk `expect` in reverse.
+                for (rank, (index, amount)) in strategy.expect.iter().rev().enumerate() {
+                    let bidder = &bidders[*index];
+
+                    // Bid identity is the bidder's own signing wallet, not either pot key.
+                    // place_bid.rs:321 records Bid(*accounts.bidder.key, ..) with the bidder
+                    // asserted as signer at place_bid.rs:112, and metaplex's common_redeem_checks
+                    // (metaplex/program/src/utils.rs:393 and :476-484) passes one key to both
+                    // is_winner() and the bidder_metadata derivation -- which only type-checks as
+                    // the wallet. bidder.1/bidder.2 are the pot token account and pot PDA. (The
+                    // fixture reuses the wallet as the source token account -- see setup_auction
+                    // -- so this rules out the pot keys, not bidder_token.)
+                    assert_eq!(auction.winner_at(rank), Some(bidder.0.pubkey()));
+                    assert_eq!(auction.bid_state.amount(rank), *amount);
+                    assert_eq!(auction.is_winner(&bidder.0.pubkey()), Some(rank));
                 }
 
-                // If the auction has ended, attempt to claim back SPL tokens into a new account.
-                if auction.ended(0) {
-                    let collection = Keypair::new();
+                // Everyone outside the expected winner set lost: no rank, and no winner past the
+                // last expected one.
+                for (index, bidder) in bidders.iter().enumerate() {
+                    if strategy.expect.iter().all(|(winner, _)| *winner != index) {
+                        assert_eq!(auction.is_winner(&bidder.0.pubkey()), None);
+                    }
+                }
+                assert_eq!(auction.winner_at(strategy.expect.len()), None);
 
-                    // Generate Collection Pot.
-                    helpers::create_token_account(
+                // Any bid retained beyond the winner set must rank at or below every winner.
+                // The successive-bids, ranked-insert and promotion strategies end with retained
+                // losing bids.
+                if let Some((_, lowest_winner)) = strategy.expect.first() {
+                    for rank in strategy.expect.len()..bids.len() {
+                        assert!(auction.bid_state.amount(rank) <= *lowest_winner);
+                    }
+                }
+
+                // The live losing bids: `bids` is ascending and the winners are its last entries.
+                let losers: Vec<usize> = bids[..bids.len() - strategy.expect.len()]
+                    .iter()
+                    .map(|bid| {
+                        bidders
+                            .iter()
+                            .position(|bidder| bidder.0.pubkey() == bid.0)
+                            .expect("every bid belongs to a test bidder")
+                    })
+                    .collect();
+
+                // Settle: claim every winning bid into a fresh account and check what the seller
+                // collects. Every strategy above ends with Action::End, so this always runs; a bid
+                // state other than EnglishAuction fails the match below.
+                //
+                // It used to be gated on `auction.ended(0)`. With the end/gap pair this program
+                // records after end_auction -- (Some(ended_at), None) -- that is `0 > ended_at`
+                // (processor.rs:148), false for any real clock, so no claim ever ran and
+                // seller_collects was never checked. The assert makes a strategy that forgets
+                // to end its auction fail here instead of skipping settlement silently.
+                assert!(
+                    auction.ended_at.is_some(),
+                    "strategy must end the auction before settlement"
+                );
+
+                // claim_bid requires the clock to be strictly past ended_at (claim_bid.rs:129 via
+                // processor.rs:148). program-test 1.6's start() never leaves slot 1 -- its
+                // background task only registers ticks on one bank -- so the clock stays at the
+                // second end_auction recorded and every claim fails with InvalidState. Warp ahead;
+                // then check the clock moved rather than assume it did.
+                let slot = banks_client.get_root_slot().await.unwrap();
+                context.warp_to_slot(slot + 1000).unwrap();
+                let recent_blockhash = context.last_blockhash;
+                let now = helpers::get_clock(&mut banks_client).await.unix_timestamp;
+                assert!(
+                    now > auction.ended_at.unwrap(),
+                    "warp did not move the clock past ended_at"
+                );
+
+                // Once the auction has ended, a winner can no longer withdraw: cancel_bid must
+                // refuse with InvalidState and leave the pot untouched (cancel_bid.rs:177-180).
+                //
+                // That guard is ended(now) -- time, not AuctionState::Ended -- so it only holds
+                // once the clock has passed ended_at, which is why this runs after the warp. In
+                // the same second end_auction ran (and, with an end_auction_gap, until
+                // last_bid + gap), a winner's cancel still succeeds and is refunded. That is
+                // program behaviour, outside what these tests change; it is not asserted here.
+                for (index, _amount) in strategy.expect.iter() {
+                    let pot = &bidders[*index].1.pubkey();
+                    let escrowed = helpers::get_token_balance(&mut banks_client, pot).await;
+                    assert_auction_error(
+                        helpers::cancel_bid(
+                            &mut banks_client,
+                            &recent_blockhash,
+                            &program_id,
+                            &payer,
+                            &bidders[*index].0,
+                            &bidders[*index].1,
+                            &resource,
+                            &mint,
+                        )
+                        .await,
+                        AuctionError::InvalidState,
+                        "a winner cancelling after the end",
+                    );
+                    assert_eq!(
+                        helpers::get_token_balance(&mut banks_client, pot).await,
+                        escrowed
+                    );
+                }
+
+                let collection = Keypair::new();
+
+                // Generate Collection Pot.
+                helpers::create_token_account(
+                    &mut banks_client,
+                    &payer,
+                    &recent_blockhash,
+                    &collection,
+                    &mint,
+                    &payer.pubkey(),
+                )
+                .await
+                .unwrap();
+
+                // For each winning bid, claim into auction.
+                for (index, _amount) in strategy.expect.iter() {
+                    let err = helpers::claim_bid(
                         &mut banks_client,
-                        &payer,
                         &recent_blockhash,
-                        &collection,
+                        &program_id,
+                        &payer,
+                        &payer,
+                        &bidders[*index].0,
+                        &bidders[*index].1,
+                        &collection.pubkey(),
+                        &resource,
                         &mint,
-                        &payer.pubkey(),
                     )
-                    .await
-                    .unwrap();
+                    .await;
+                    println!("{:?}", err);
+                    err.expect("claim_bid");
 
-                    // For each winning bid, claim into auction.
-                    for (index, bid) in results {
-                        let err = helpers::claim_bid(
+                    // Bid pot should be empty
+                    let balance =
+                        helpers::get_token_balance(&mut banks_client, &bidders[*index].1.pubkey())
+                            .await;
+                    assert_eq!(balance, 0);
+                }
+
+                // A losing bid cannot be claimed: claim_bid refuses with InvalidState before it
+                // moves anything (claim_bid.rs:123-126). The escrow check follows from the failed
+                // transaction being rolled back; it is kept as a guard on the fixture.
+                for index in losers.iter() {
+                    let pot = &bidders[*index].1.pubkey();
+                    let escrowed = helpers::get_token_balance(&mut banks_client, pot).await;
+                    assert_auction_error(
+                        helpers::claim_bid(
                             &mut banks_client,
                             &recent_blockhash,
                             &program_id,
                             &payer,
                             &payer,
-                            &bidders[index.0].0,
-                            &bidders[index.0].1,
+                            &bidders[*index].0,
+                            &bidders[*index].1,
                             &collection.pubkey(),
                             &resource,
                             &mint,
                         )
-                        .await;
-                        println!("{:?}", err);
-                        err.expect("claim_bid");
-
-                        // Bid pot should be empty
-                        let balance = helpers::get_token_balance(
-                            &mut banks_client,
-                            &bidders[index.0].1.pubkey(),
-                        )
-                        .await;
-                        assert_eq!(balance, 0);
-                    }
-
-                    // Total claimed balance should match what we expect
-                    let balance =
-                        helpers::get_token_balance(&mut banks_client, &collection.pubkey()).await;
-                    assert_eq!(balance, strategy.seller_collects);
+                        .await,
+                        AuctionError::InvalidState,
+                        "claiming a losing bid",
+                    );
+                    assert_eq!(
+                        helpers::get_token_balance(&mut banks_client, pot).await,
+                        escrowed
+                    );
                 }
+
+                // A loser can still withdraw after the end: cancel_bid's guard refuses only
+                // winners, so the loser's escrow goes back to their wallet. Together with the
+                // winner check above, this pins both halves of `ended && is_winner`.
+                for index in losers.iter() {
+                    let wallet = &bidders[*index].0.pubkey();
+                    let pot = &bidders[*index].1.pubkey();
+                    let before = (
+                        helpers::get_token_balance(&mut banks_client, wallet).await,
+                        helpers::get_token_balance(&mut banks_client, pot).await,
+                    );
+                    helpers::cancel_bid(
+                        &mut banks_client,
+                        &recent_blockhash,
+                        &program_id,
+                        &payer,
+                        &bidders[*index].0,
+                        &bidders[*index].1,
+                        &resource,
+                        &mint,
+                    )
+                    .await
+                    .expect("a loser cancelling after the end");
+                    assert_eq!(
+                        helpers::get_token_balance(&mut banks_client, wallet).await,
+                        before.0 + before.1
+                    );
+                    assert_eq!(helpers::get_token_balance(&mut banks_client, pot).await, 0);
+                }
+
+                // Total claimed balance should match what we expect
+                let balance =
+                    helpers::get_token_balance(&mut banks_client, &collection.pubkey()).await;
+                assert_eq!(balance, strategy.seller_collects);
             }
-            _ => {}
+            ref other => panic!(
+                "WinnerLimit::Capped({}) must produce an EnglishAuction, got {:?}",
+                strategy.max_winners, other
+            ),
         }
     }
 }
 
-// Function wrapper expected to fail for testing failures.
-async fn handle_failing_action(
+/// Runs one action for test_incorrect_runs and returns the auction instruction's result.
+///
+/// Only the auction instruction's own result is returned. The approve transaction a bid needs, and
+/// reading the auction back after an End, must succeed, so neither can stand in for the rejection a
+/// strategy expects.
+async fn try_action(
     banks_client: &mut BanksClient,
     recent_blockhash: &Hash,
     program_id: &Pubkey,
@@ -514,7 +796,8 @@ async fn handle_failing_action(
                 &bidders[bidder].0,
                 amount,
             )
-            .await?;
+            .await
+            .expect("approve");
 
             let value = helpers::place_bid(
                 banks_client,
@@ -592,9 +875,11 @@ async fn handle_failing_action(
                     .expect("get_account")
                     .expect("account not found")
                     .data,
-            )?;
+            )
+            .unwrap();
 
             assert!(auction.ended_at.is_some());
+            assert_eq!(auction.state, AuctionState::Ended);
         }
     }
 
@@ -604,53 +889,91 @@ async fn handle_failing_action(
 #[cfg(feature = "test-bpf")]
 #[tokio::test]
 async fn test_incorrect_runs() {
-    // Local wrapper around a small test description described by actions.
+    // An auction run that must be rejected: every `setup` action has to succeed, then (after
+    // warping the clock past the end, if `warp`) `rejected` has to fail with `error`.
+    //
+    // This used to record only whether any action failed, and stopped at the first failure, so a
+    // setup action failing for an unrelated reason passed as the expected rejection. Reverting
+    // 377f6cd, for one, makes the at-floor 5000 bid in the reserve-price case fail, and the test
+    // stayed green without ever placing the below-floor bid.
     #[derive(Debug)]
     struct Test {
-        actions: Vec<Action>,
+        setup: Vec<Action>,
+        warp: bool,
+        rejected: Action,
+        error: AuctionError,
         max_winners: usize,
         price_floor: PriceFloor,
     }
 
-    // A list of auction runs that should succeed. At the end of the run the winning bid state
-    // should match the expected result.
     let strategies = [
+        // Cancelling a bid that was never placed. parse_accounts' owner checks reject it: the
+        // first to fail is the bidder's metadata PDA (cancel_bid.rs:79), which does not exist;
+        // the bidder-pot PDA check at :81 would fail with the same code.
         Test {
-            actions: vec![Action::Cancel(0), Action::End],
-            max_winners: 3,
-            price_floor: PriceFloor::None,
-        },
-        // Cancel a non-existing bid.
-        // Bidding less than the top bidder should fail.
-        Test {
-            actions: vec![
-                Action::Bid(0, 5000),
-                Action::Bid(1, 6000),
-                Action::Bid(2, 5500),
-                Action::Bid(0, 1000),
-                Action::Bid(1, 2000),
-                Action::Bid(2, 3000),
-                Action::Bid(3, 4000),
-                Action::Bid(3, 4000),
-                Action::End,
-            ],
+            setup: vec![],
+            warp: false,
+            rejected: Action::Cancel(0),
+            error: AuctionError::IncorrectOwner,
             max_winners: 3,
             price_floor: PriceFloor::None([0; 32]),
         },
-        // Bidding less than any bidder should fail.
+        // Bidding again without cancelling the previous bid (place_bid.rs:183-185).
+        //
+        // This case used to be commented "Bidding less than the top bidder should fail" and ran a
+        // nine-action strategy. The program does not enforce that -- a below-top bid is a valid
+        // lower-ranked bid, see the ranked-insert strategy in test_correct_runs -- and the
+        // strategy passed only because its later repeat bids happened to trip BidAlreadyActive.
+        // It was green while testing nothing it claimed. Reduced to the rule that actually fired.
         Test {
-            actions: vec![
-                Action::Bid(0, 5000),
-                Action::Bid(1, 6000),
-                Action::Bid(2, 1000),
-                Action::End,
-            ],
+            setup: vec![Action::Bid(0, 5000), Action::Bid(1, 6000)],
+            warp: false,
+            rejected: Action::Bid(0, 7000),
+            error: AuctionError::BidAlreadyActive,
             max_winners: 3,
             price_floor: PriceFloor::None([0; 32]),
         },
-        // Bidding after an auction has been explicitly ended should fail.
+        // Bidding one below the auction's reserve price (place_bid.rs:231-241).
+        //
+        // The original comment here was "Bidding less than any bidder should fail", with no price
+        // floor set. The program has no such rule: BidState::place_bid does a ranked insert that
+        // accepts a new lowest bid (the "Inserting at 0" branch, processor.rs:291-294), and when
+        // the array is full it evicts the lowest bid (processor.rs:299-301) rather than refusing
+        // one. The amount rule it does have is the price floor, applied at bid time and again at
+        // settlement, where is_winner/num_winners/winner_at inject it as `minimum`
+        // (processor.rs:155-177). So set one: at a floor of 5000 the 5000 and 6000 bids must be
+        // accepted and 4999 rejected. With the at-floor strategy in test_correct_runs, that pins
+        // the `amount < min` boundary (377f6cd) from both sides.
         Test {
-            actions: vec![Action::Bid(0, 5000), Action::End, Action::Bid(1, 6000)],
+            setup: vec![Action::Bid(0, 5000), Action::Bid(1, 6000)],
+            warp: false,
+            rejected: Action::Bid(2, 4999),
+            error: AuctionError::BidTooSmall,
+            max_winners: 3,
+            price_floor: PriceFloor::MinimumPrice([5000, 0, 0, 0]),
+        },
+        // Bidding after the auction has been explicitly ended, in the same second.
+        //
+        // The clock still equals ended_at, so ended(now) is false and place_bid reaches its state
+        // check (place_bid.rs:227-229).
+        Test {
+            setup: vec![Action::Bid(0, 5000), Action::End],
+            warp: false,
+            rejected: Action::Bid(1, 6000),
+            error: AuctionError::InvalidState,
+            max_winners: 3,
+            price_floor: PriceFloor::None([0; 32]),
+        },
+        // Bidding after the auction has ended, once the clock has passed ended_at.
+        //
+        // Now ended(now) is true, so place_bid tries to move the auction to Ended
+        // (place_bid.rs:139-145) -- which it already is -- and AuctionState::end refuses the
+        // transition.
+        Test {
+            setup: vec![Action::Bid(0, 5000), Action::End],
+            warp: true,
+            rejected: Action::Bid(1, 6000),
+            error: AuctionError::AuctionTransitionInvalid,
             max_winners: 3,
             price_floor: PriceFloor::None([0; 32]),
         },
@@ -660,6 +983,7 @@ async fn test_incorrect_runs() {
     for strategy in strategies.iter() {
         let (
             program_id,
+            mut context,
             mut banks_client,
             bidders,
             payer,
@@ -668,29 +992,86 @@ async fn test_incorrect_runs() {
             mint_authority,
             auction_pubkey,
             recent_blockhash,
-        ) = setup_auction(true, strategy.max_winners).await;
+        ) = setup_auction(true, strategy.max_winners, strategy.price_floor.clone()).await;
 
-        let mut failed = false;
-
-        for action in strategy.actions.iter() {
-            failed = failed
-                || handle_failing_action(
-                    &mut banks_client,
-                    &recent_blockhash,
-                    &program_id,
-                    &bidders,
-                    &mint,
-                    &payer,
-                    &resource,
-                    &auction_pubkey,
-                    action,
-                )
-                .await
-                .is_err();
+        for action in strategy.setup.iter() {
+            if let Err(err) = try_action(
+                &mut banks_client,
+                &recent_blockhash,
+                &program_id,
+                &bidders,
+                &mint,
+                &payer,
+                &resource,
+                &auction_pubkey,
+                action,
+            )
+            .await
+            {
+                panic!(
+                    "{:?}: setup action {:?} must succeed, got {:?}",
+                    strategy.error, action, err
+                );
+            }
         }
 
-        // Expect to fail.
-        assert!(failed);
+        // Move the clock past ended_at, as test_correct_runs does before settling.
+        let recent_blockhash = if strategy.warp {
+            let slot = banks_client.get_root_slot().await.unwrap();
+            context.warp_to_slot(slot + 1000).unwrap();
+            let auction: AuctionData = try_from_slice_unchecked(
+                &banks_client
+                    .get_account(auction_pubkey)
+                    .await
+                    .expect("get_account")
+                    .expect("account not found")
+                    .data,
+            )
+            .unwrap();
+            let now = helpers::get_clock(&mut banks_client).await.unix_timestamp;
+            assert!(
+                now > auction
+                    .ended_at
+                    .expect("warp strategies end the auction first"),
+                "warp did not move the clock past ended_at"
+            );
+            context.last_blockhash
+        } else {
+            recent_blockhash
+        };
+
+        // The rejected action's bidder. A failed transaction is rolled back, so these balances
+        // cannot move; the check guards the fixture, e.g. a helper sending a second transaction.
+        let bidder = match strategy.rejected {
+            Action::Bid(bidder, _) | Action::Cancel(bidder) => &bidders[bidder],
+            Action::End => panic!("no strategy expects End to be rejected"),
+        };
+        let balances_before = (
+            helpers::get_token_balance(&mut banks_client, &bidder.0.pubkey()).await,
+            helpers::get_token_balance(&mut banks_client, &bidder.1.pubkey()).await,
+        );
+
+        assert_auction_error(
+            try_action(
+                &mut banks_client,
+                &recent_blockhash,
+                &program_id,
+                &bidders,
+                &mint,
+                &payer,
+                &resource,
+                &auction_pubkey,
+                &strategy.rejected,
+            )
+            .await,
+            strategy.error.clone(),
+            &format!("{:?}", strategy.rejected),
+        );
+
+        let balances_after = (
+            helpers::get_token_balance(&mut banks_client, &bidder.0.pubkey()).await,
+            helpers::get_token_balance(&mut banks_client, &bidder.1.pubkey()).await,
+        );
+        assert_eq!(balances_after, balances_before);
     }
 }
-*/
