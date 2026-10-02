@@ -114,31 +114,33 @@ An ask rule prompts in every permission mode, including `bypassPermissions`
 no `extraKnownMarketplaces`: HF's marketplace holds only the `hf-cli` plugin,
 which would duplicate the installer's skill.
 
-## Read-only allowlist (`.claude/settings.json`)
+## Allowlist (`.claude/settings.json`)
 
-`permissions.allow` lists the read-only tools that agents here call most often,
-so they no longer prompt. It was built on 2026-09-26 from this repo's session
-transcripts, counting only calls that change nothing:
+`permissions.allow` holds one rule: the exact form `Bash(ldd --version)`
+(#23). `ldd <file>` can execute the file, so no wider form is allowed.
 
-- GitHub reads: `pull_request_read`, `search_pull_requests`, `search_code`,
-  `search_issues`, `list_pull_requests`, `get_file_contents`;
-- Supabase function metadata: `list_edge_functions`, `get_edge_function`;
-- Gmail reads (`search_threads`, `get_thread`, `get_message`) and Opera
-  `tab-content`, added in #21.
+No MCP tool is allowed, not even a read. An MCP allow rule matches the tool
+name, never its arguments, so any tool that takes a free-form string (an
+owner, a repo, a query, a URL) could carry locally read data to a remote
+server without a prompt if injected text drove the call. An allow rule also
+exempts the call from auto mode's classifier, the check meant to catch
+exactly that. Earlier rules for GitHub, Supabase, Gmail and Opera reads were
+removed for this reason. Personal read allowances belong in your uncommitted
+`.claude/settings.local.json`, not in this shared file.
+
+`permissions.ask` also holds `mcp__Gmail__send_message`, `reply`, `forward`
+and `mcp__Opera__go-to-page`: the calls that would complete an exfiltration.
+An ask rule prompts in every mode.
 
 Keep a single `allow` key. JSON parsers keep only the last of a duplicated
 key, so a second `allow` block silently discards the first.
 
-No shell rule is added. `git ls-tree`, the most frequent read-only git
-command Claude Code does not auto-allow, was on the list and was removed on
-Codex's review. In a partial clone it fetches missing objects from the
-promisor remote on demand. With an `ext::` remote allowed, that fetch runs an
-external command. So it is not read-only.
+`git ls-tree` is not allowed even though it looks read-only. In a partial
+clone it fetches missing objects from the promisor remote on demand. With an
+`ext::` remote allowed, that fetch runs an external command.
 
-These still prompt: every write, including GitHub comments, PR edits and
-merges, and Supabase `deploy_edge_function`. `execute_sql` also prompts: it
-runs arbitrary SQL, and only the `read_only=true` URL above stops it
-writing. `query_logs` prompts too, because logs can carry live guest data.
-Interpreters, package runners and `npm run` stay off the list, since any of
-them can run arbitrary code. Claude Code applies deny, then ask, then allow,
-so none of these rules overrides the Hugging Face ask and deny rules above.
+Everything else prompts, including every write (GitHub comments, PR edits and
+merges, Supabase `deploy_edge_function`) and `execute_sql`, which runs
+arbitrary SQL that only the `read_only=true` URL above stops from writing.
+Claude Code applies deny, then ask, then allow, so nothing here overrides the
+Hugging Face ask and deny rules above.

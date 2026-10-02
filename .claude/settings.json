@@ -1,18 +1,7 @@
 {
   "permissions": {
     "allow": [
-      "mcp__Gmail__search_threads",
-      "mcp__Gmail__get_thread",
-      "mcp__Gmail__get_message",
-      "mcp__Opera__tab-content",
-      "mcp__github__pull_request_read",
-      "mcp__github__search_pull_requests",
-      "mcp__Supabase__list_edge_functions",
-      "mcp__Supabase__get_edge_function",
-      "mcp__github__search_code",
-      "mcp__github__search_issues",
-      "mcp__github__list_pull_requests",
-      "mcp__github__get_file_contents"
+      "Bash(ldd --version)"
     ],
     "ask": [
       "mcp__*__hf_jobs",
@@ -46,7 +35,11 @@
       "PowerShell(hf buckets *)",
       "PowerShell(hf collections *)",
       "PowerShell(hf discussions *)",
-      "PowerShell(hf webhooks *)"
+      "PowerShell(hf webhooks *)",
+      "mcp__Gmail__send_message",
+      "mcp__Gmail__reply",
+      "mcp__Gmail__forward",
+      "mcp__Opera__go-to-page"
     ],
     "deny": [
       "Bash(hf auth token)",
