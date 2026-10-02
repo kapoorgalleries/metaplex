@@ -324,27 +324,62 @@ function Add-HfToSettingsText([string]$T) {
   }
   return $T.Substring(0, $at) + $add + $T.Substring($at)
 }
-# A new, empty file carrying $Like's own access list, set at creation: settings text never sits, even
-# briefly, in a file the folder's (possibly wider) access list lets others open. Bash: mkstemp, 0600.
-function New-FileLike([string]$Path, [string]$Like) {
+# The access list of an open file, as SDDL. Read from the same handle as the text, it describes the
+# same version of settings.json as the text does, whatever the name points at afterwards.
+function Get-HandleSddl([IO.FileStream]$Stream) {
+  $sec = if ($PSVersionTable.PSEdition -ceq 'Core') { [IO.FileSystemAclExtensions]::GetAccessControl($Stream) } else { $Stream.GetAccessControl() }
+  return $sec.GetSecurityDescriptorSddlForm('Access')
+}
+function New-FileSecurity([string]$Sddl) {
   $acl = New-Object Security.AccessControl.FileSecurity
-  $acl.SetSecurityDescriptorSddlForm((Get-Acl -LiteralPath $Like).GetSecurityDescriptorSddlForm('Access'))
+  $acl.SetSecurityDescriptorSddlForm($Sddl)
   $acl.SetAccessRuleProtection($true, $true)
+  return $acl
+}
+# A new, empty file carrying the access list $Sddl, set at creation: settings text never sits, even
+# briefly, in a file the folder's (possibly wider) access list lets others open. Bash: mkstemp, 0600.
+function New-FileLike([string]$Path, [string]$Sddl) {
+  $acl = New-FileSecurity $Sddl
   $w = [Security.AccessControl.FileSystemRights]::Write
   if ($PSVersionTable.PSEdition -ceq 'Core') {
     return [IO.FileSystemAclExtensions]::Create([IO.FileInfo]$Path, [IO.FileMode]::CreateNew, $w, [IO.FileShare]::None, 4096, [IO.FileOptions]::None, $acl)
   }
   return New-Object IO.FileStream($Path, [IO.FileMode]::CreateNew, $w, [IO.FileShare]::None, 4096, [IO.FileOptions]::None, $acl)
 }
-# A dated name next to settings.json that no file has yet, taken with CreateNew (New-FileLike: an
-# empty placeholder carrying $Like's access list), so two runs never share one and nothing is
-# overwritten. Parity with keep() in bootstrap-ai-clis.sh.
-function Reserve-BackupName([string]$Dir, [string]$Stamp, [string]$Suffix, [string]$Like) {
+function Set-FileSddl([string]$Path, [string]$Sddl) {
+  # The access list only: writing back every section would include the audit list, which needs a
+  # privilege this run does not hold.
+  $acl = New-Object Security.AccessControl.FileSecurity
+  $acl.SetSecurityDescriptorSddlForm($Sddl, [Security.AccessControl.AccessControlSections]::Access)
+  $acl.SetAccessRuleProtection($true, $true)
+  if ($PSVersionTable.PSEdition -ceq 'Core') { [IO.FileSystemAclExtensions]::SetAccessControl([IO.FileInfo]$Path, $acl) } else { [IO.File]::SetAccessControl($Path, $acl) }
+}
+# A dated name next to settings.json that no file has yet, taken with CreateNew (New-FileLike: a
+# placeholder carrying $Sddl and holding $Marker, this run's random bytes), so two runs never share
+# one and nothing is overwritten. Parity with keep() in bootstrap-ai-clis.sh.
+function Reserve-BackupName([string]$Dir, [string]$Stamp, [string]$Suffix, [string]$Sddl, [byte[]]$Marker) {
   for ($n = 1; $n -lt 100; $n++) {
     $name = Join-Path $Dir ("settings.json.$Stamp" + $(if ($n -gt 1) { "-$n" } else { '' }) + $Suffix)
-    try { (New-FileLike $name $Like).Dispose(); return $name } catch { if (-not (Test-Path -LiteralPath $name)) { throw } }
+    try { $fs = New-FileLike $name $Sddl } catch { if (Test-Path -LiteralPath $name) { continue }; throw }
+    try { $fs.Write($Marker, 0, $Marker.Length) } finally { $fs.Dispose() }
+    return $name
   }
   throw 'no free backup name'
+}
+# True only when $Path still holds exactly this run's placeholder bytes. A file that cannot be read
+# (another process holds it open) or holds anything else, empty included, is never taken for one.
+function Test-Placeholder([string]$Path, [byte[]]$Marker) {
+  try { return [Convert]::ToBase64String([IO.File]::ReadAllBytes($Path)) -ceq [Convert]::ToBase64String($Marker) } catch { return $false }
+}
+# Moves $Path to a free dated name next to settings.json. Move refuses a name that exists, so nothing
+# is overwritten; if no name is free, or the move fails, the file stays where it is and that path is
+# returned. Parity with keep() in bootstrap-ai-clis.sh.
+function Move-ToKept([string]$Dir, [string]$Stamp, [string]$Suffix, [string]$Path) {
+  for ($n = 1; $n -lt 100; $n++) {
+    $name = Join-Path $Dir ("settings.json.$Stamp" + $(if ($n -gt 1) { "-$n" } else { '' }) + $Suffix)
+    try { [IO.File]::Move($Path, $name); return $name } catch { if (-not (Test-Path -LiteralPath $name)) { return $Path } }
+  }
+  return $Path
 }
 # 0 added; 1 unsupported layout or unwritable; 2 changed during the edit. Never logs settings text.
 function Add-GeminiHf {
@@ -357,11 +392,24 @@ function Add-GeminiHf {
     $exists = Test-Path -LiteralPath $cfg
     $original = $null; $bom = [byte[]]@(); $text = "{}`n"
     if ($exists) {
-      # A link would be replaced by a plain file, and an EFS-encrypted file would be staged as
-      # plain text: leave both for manual edit.
-      $attrs = (Get-Item -LiteralPath $cfg -Force).Attributes
-      if ($attrs -band ([IO.FileAttributes]::ReparsePoint -bor [IO.FileAttributes]::Encrypted)) { return 1 }
-      $original = [IO.File]::ReadAllBytes($cfg)
+      # One open handle gives the text, the attributes and the access list: all of one version of
+      # the file. While it is held (no write or delete sharing) the name cannot be pointed elsewhere.
+      $in = [IO.File]::Open($cfg, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+      try {
+        # A link would be replaced by a plain file, and an EFS-encrypted file would be staged as
+        # plain text: leave both for manual edit.
+        $attrs = [IO.File]::GetAttributes($cfg)
+        if ($attrs -band ([IO.FileAttributes]::ReparsePoint -bor [IO.FileAttributes]::Encrypted)) { return 1 }
+        $sddl = Get-HandleSddl $in
+        $original = New-Object byte[] $in.Length
+        $got = 0
+        while ($got -lt $original.Length) {
+          $n = $in.Read($original, $got, $original.Length - $got)
+          if ($n -le 0) { throw 'short read' }
+          $got += $n
+        }
+        if ($in.ReadByte() -ne -1) { throw 'file grew' }
+      } finally { $in.Dispose() }
       if ($original.Length -ge 3 -and $original[0] -eq 0xEF -and $original[1] -eq 0xBB -and $original[2] -eq 0xBF) { $bom = [byte[]]@(0xEF, 0xBB, 0xBF) }
       $text = Read-Utf8 $original
     }
@@ -380,34 +428,54 @@ function Add-GeminiHf {
     $tmp = Join-Path $dir ('.settings.json.' + [guid]::NewGuid().ToString('N') + '.tmp')
     $bytes = [byte[]]($bom + $utf8.GetBytes($after))
     if ($exists) {
-      $fs = New-FileLike $tmp $cfg
+      $fs = New-FileLike $tmp $sddl
       try { $fs.Write($bytes, 0, $bytes.Length) } finally { $fs.Dispose() }
-      # Replace keeps settings.json's ACL and attributes, and moves the version it displaces to $bak.
-      # A version other than the one read above is put back, so an edit made meanwhile is never
-      # lost. The old version is kept, not deleted: a process that opened settings.json before the
-      # swap and writes later writes into it. Parity with the exchange in bootstrap-ai-clis.sh.
+      # Replace moves the version settings.json holds at that moment to $bak and the new text in,
+      # keeping that version's attributes and access list on the name. A version other than the one
+      # read above is put back, so an edit made meanwhile is never lost. The old version is kept,
+      # not deleted: a process that opened settings.json before the swap and writes later writes
+      # into it. Parity with the exchange in bootstrap-ai-clis.sh.
       $stamp = [DateTime]::UtcNow.ToString("yyyyMMdd'T'HHmmss'Z'")
-      $bak = Reserve-BackupName $dir $stamp '.bak' $cfg  # Replace fills this run's own placeholder
+      $marker = [guid]::NewGuid().ToByteArray()
+      $bak = Reserve-BackupName $dir $stamp '.bak' $sddl $marker  # Replace fills this run's own placeholder
+      $replaced = $false
       try {
         [IO.File]::Replace($tmp, $cfg, $bak)
-        $tmp = $null
+        $replaced = $true; $tmp = $null  # settings.json holds this run's text, $bak the version it displaced
+        # The same version means the same text, access list and (no link, no EFS) attributes.
         $same = $false
-        try { $same = [Convert]::ToBase64String([IO.File]::ReadAllBytes($bak)) -ceq [Convert]::ToBase64String($original) } catch { }
+        try {
+          $same = ([Convert]::ToBase64String([IO.File]::ReadAllBytes($bak)) -ceq [Convert]::ToBase64String($original)) -and
+            ((Get-Acl -LiteralPath $bak).GetSecurityDescriptorSddlForm('Access') -ceq $sddl) -and
+            -not ([IO.File]::GetAttributes($bak) -band ([IO.FileAttributes]::ReparsePoint -bor [IO.FileAttributes]::Encrypted))
+        } catch { }
         if ($same) { Log "gemini: previous settings kept at $bak"; return 0 }
+        # Two renames, not Replace: a rename goes through while another process holds the file open
+        # (with delete sharing), Replace does not. The file that was settings.json for a moment is
+        # kept too, under the access list of the version its text came from (Replace gave it the
+        # displaced version's): a process that opened it then writes into it.
         $back = Join-Path $dir ('.settings.json.' + [guid]::NewGuid().ToString('N') + '.tmp')
-        [IO.File]::Replace($bak, $cfg, $back)
-        # The file that was settings.json for a moment is kept too: a process that opened it then
-        # writes into it.
-        $kept = Reserve-BackupName $dir $stamp '.rejected' $cfg
-        [IO.File]::Replace($back, $kept, [NullString]::Value)
-        Write-Warning "gemini: settings.json changed during the edit; the displaced file is kept at $kept"
+        [IO.File]::Move($cfg, $back)
+        [IO.File]::Move($bak, $cfg)
+        $note = ''
+        try { Set-FileSddl $back $sddl } catch { $note = ' (its access list could not be reset to the one it was read with; check it)' }
+        $kept = Move-ToKept $dir $stamp '.rejected' $back
+        Write-Warning "gemini: settings.json changed during the edit and was left as it is; this run's text is kept at $kept$note"
         return 2
       } catch {
-        # Replace can fail after moving settings.json to the backup name: put that version back.
-        # Before that point the name holds only this run's empty placeholder, which is removed.
-        if (Test-Path -LiteralPath $bak) {
-          if ((Get-Item -LiteralPath $bak -Force).Length -eq 0) { Remove-Item -LiteralPath $bak -Force -ErrorAction SilentlyContinue }
-          elseif (-not (Test-Path -LiteralPath $cfg)) { [IO.File]::Move($bak, $cfg) }
+        if ($replaced) {
+          # The rollback stopped part way. Nothing is deleted: this run's text is at $cfg or $back,
+          # the version it displaced at $bak.
+          if (-not (Test-Path -LiteralPath $cfg)) { try { [IO.File]::Move($back, $cfg) } catch { } }
+          $where = if (Test-Path -LiteralPath $cfg) { "it holds this run's text" } else { "this run's text is at $back" }
+          Write-Warning "gemini: settings.json changed during the edit and could not be put back; $where, the version it displaced is at $bak"
+          return 2
+        } elseif (Test-Placeholder $bak $marker) {
+          # Replace did not get as far as moving settings.json: $bak is still this run's placeholder.
+          Remove-Item -LiteralPath $bak -Force -ErrorAction SilentlyContinue
+        } elseif (-not (Test-Path -LiteralPath $cfg)) {
+          # Replace moved settings.json to $bak, then failed to move the new text in: put it back.
+          try { [IO.File]::Move($bak, $cfg) } catch { Write-Warning "gemini: settings.json could not be put back; it is at $bak" }
         }
         throw
       }
@@ -528,7 +596,7 @@ if (-not $SkipHf) {
     elseif ($state -eq 3) {
       $rc = Add-GeminiHf
       if ($rc -eq 0 -and (Get-HfClientState 'gemini') -eq 0) { Log 'gemini: added the user huggingface MCP server' }
-      elseif ($rc -eq 2) { Add-Failure 'hf-mcp-gemini' 'gemini: user settings changed during the edit; left unchanged, rerun' }
+      elseif ($rc -eq 2) { Add-Failure 'hf-mcp-gemini' 'gemini: user settings changed during the edit; rerun' }
       else { Add-Failure 'hf-mcp-gemini' 'gemini: could not add the Hugging Face entry (unsupported settings layout or unwritable file); left unchanged' }
     } else { Add-Failure 'hf-mcp-gemini' 'gemini: user settings need manual review (commented/unsupported JSON, incompatible URL or missing blocked tools); left unchanged' }
   }

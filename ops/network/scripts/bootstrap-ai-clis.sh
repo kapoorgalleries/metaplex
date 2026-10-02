@@ -503,14 +503,14 @@ def exchange(a, b):
         err = ctypes.get_errno()
         raise OSError(err, os.strerror(err))
 
-def has_macos_acl(path):  # acl_get_file fails with ENOENT when the file has no extended ACL
+def has_macos_acl(fd):  # acl_get_fd fails with ENOENT when the open file has no extended ACL
     import ctypes
     libc = ctypes.CDLL(None, use_errno=True)
-    libc.acl_get_file.restype = ctypes.c_void_p
-    libc.acl_get_file.argtypes = [ctypes.c_char_p, ctypes.c_int]
+    libc.acl_get_fd.restype = ctypes.c_void_p
+    libc.acl_get_fd.argtypes = [ctypes.c_int]
     libc.acl_get_entry.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.POINTER(ctypes.c_void_p)]
     libc.acl_free.argtypes = [ctypes.c_void_p]
-    acl = libc.acl_get_file(os.fsencode(path), 0x100)  # ACL_TYPE_EXTENDED
+    acl = libc.acl_get_fd(fd)  # on macOS: the open file's extended ACL
     if not acl:
         err = ctypes.get_errno()
         if err == errno.ENOENT:
@@ -521,9 +521,9 @@ def has_macos_acl(path):  # acl_get_file fails with ENOENT when the file has no 
     finally:
         libc.acl_free(acl)
 
-def no_macos_acl(path):
+def no_macos_acl(fd):
     # macOS applies an ACL entry whatever the mode says, so a file carrying one is refused.
-    if sys.platform == "darwin" and has_macos_acl(path):
+    if sys.platform == "darwin" and has_macos_acl(fd):
         raise OSError("extended ACL")
 
 def keep(path, target, suffix):
@@ -545,35 +545,80 @@ def keep(path, target, suffix):
         return name
     return path
 
-def copy_access(src, dst):
-    # Owner, group and (Linux) access ACL, before dst gets src's mode: the new file is then readable
-    # by no one the old one excluded. Raises if any of them cannot be carried over (edit refused).
-    old, new = os.stat(src), os.stat(dst)
-    if (old.st_uid, old.st_gid) != (new.st_uid, new.st_gid):
-        os.chown(dst, old.st_uid, old.st_gid)
-    if sys.platform != "darwin" and hasattr(os, "listxattr"):  # Linux: ACL in system.posix_acl_access
+ACL = "system.posix_acl_access"  # Linux: where a file's POSIX access ACL lives
+
+def read_access(fd):
+    # Owner, group, mode and (Linux) access ACL of the open file, taken from the same open file as
+    # its text: both then describe one version, whatever the name points at by the time of the swap.
+    st = os.fstat(fd)
+    if not stat.S_ISREG(st.st_mode):
+        raise OSError("not a regular file")
+    acl = None
+    if sys.platform != "darwin" and hasattr(os, "getxattr"):
         try:
-            names = os.listxattr(src)
+            acl = os.getxattr(fd, ACL)
         except OSError as e:
-            if e.errno not in (errno.ENOTSUP, errno.EOPNOTSUPP):
+            if e.errno not in (errno.ENODATA, errno.ENOTSUP, errno.EOPNOTSUPP):
                 raise
-            names = []
-        if "system.posix_acl_access" in names:
-            os.setxattr(dst, "system.posix_acl_access", os.getxattr(src, "system.posix_acl_access"))
+    return st, acl
+
+def same_version(a, b):  # the open file was not changed in place between two looks
+    return all(getattr(a, k) == getattr(b, k) for k in ("st_mode", "st_uid", "st_gid", "st_size", "st_mtime_ns", "st_ctime_ns"))
+
+class Changed(Exception):
+    pass
+
+def snapshot(path):
+    # Text, owner, group, mode and (Linux) access ACL of the file at path, all read from one open
+    # file, so all of one version whatever the name points at later. Never through a link (a link
+    # put there since is refused); a FIFO does not block the open. A file changed in place while it
+    # is read raises Changed.
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0))
+    try:
+        st, acl = read_access(fd)
+        no_macos_acl(fd)
+        chunks = []
+        while True:
+            chunk = os.read(fd, 1 << 16)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        if not same_version(st, os.fstat(fd)):
+            raise Changed
+        return b"".join(chunks), (st.st_mode, st.st_uid, st.st_gid, acl)
+    finally:
+        os.close(fd)
+
+def apply_access(fd, access):
+    # Onto the open temp file: owner and group, then the ACL (or none: a default ACL on the folder
+    # gives a new file one the old file lacks), then the mode, so the new file is readable by no
+    # one the old one excluded. Raises if any of them cannot be carried over (edit refused).
+    mode, uid, gid, acl = access
+    now = os.fstat(fd)
+    if (now.st_uid, now.st_gid) != (uid, gid):
+        os.fchown(fd, uid, gid)
+    if sys.platform != "darwin" and hasattr(os, "setxattr"):
+        if acl is not None:
+            os.setxattr(fd, ACL, acl)
         else:
-            # A default ACL on the folder gives dst an access ACL that src does not have.
             try:
-                os.removexattr(dst, "system.posix_acl_access")
+                os.removexattr(fd, ACL)
             except OSError as e:
                 if e.errno not in (errno.ENODATA, errno.ENOTSUP, errno.EOPNOTSUPP):
                     raise
+    os.fchmod(fd, stat.S_IMODE(mode))
 
 tmp = None
 try:
     target = pathlib.Path(os.path.realpath(cfg))
     if cfg.is_symlink() and not target.exists():
         sys.exit(1)
-    original = target.read_bytes() if target.exists() else None
+    try:
+        original, access = snapshot(target)
+    except FileNotFoundError:
+        original = access = None
+    except Changed:
+        sys.exit(2)
     raw = original.decode("utf-8") if original is not None else "{}" + "\n"
     bom = "\ufeff" if raw.startswith("\ufeff") else ""
     text = raw[len(bom):]
@@ -586,21 +631,17 @@ try:
     expected.setdefault("mcpServers", {})["huggingface"] = entry
     if strict(after) != expected:
         sys.exit(1)
-    mode = stat.S_IMODE(target.stat().st_mode) if original is not None else 0o600
     new = (bom + after).encode("utf-8")
     target.parent.mkdir(parents=True, exist_ok=True)
-    if original is not None:
-        no_macos_acl(target)
     # mkstemp creates the file 0600 and owned by this user, so no one else can read it meanwhile.
     fd, tmp = tempfile.mkstemp(prefix=".settings.json.", suffix=".tmp", dir=target.parent)
     with os.fdopen(fd, "wb") as f:
-        no_macos_acl(tmp)  # an ACL the folder hands a new file: checked before any text goes in
+        no_macos_acl(fd)  # an ACL the folder hands a new file: checked before any text goes in
         f.write(new)
         f.flush()
-        os.fsync(f.fileno())
-    if original is not None:
-        copy_access(target, tmp)
-    os.chmod(tmp, mode)
+        os.fsync(fd)
+        if access is not None:
+            apply_access(fd, access)  # a new settings.json keeps mkstemp's 0600
     if original is None:
         # link() refuses a name that exists, as File.Move does in the .ps1, so a settings file
         # created meanwhile is never overwritten. The temporary name is removed below.
@@ -610,20 +651,27 @@ try:
             sys.exit(2)
     else:
         # As File.Replace with a backup in the .ps1: the swap keeps whatever version settings.json
-        # had at that moment. A version other than the one read above is put back, so an edit made
-        # meanwhile is never lost.
+        # had at that moment. A version other than the one read above (text or permissions) is put
+        # back, so an edit made meanwhile is never lost.
         exchange(tmp, target)
         displaced, tmp = tmp, None
         try:
-            same = stat.S_ISREG(os.lstat(displaced).st_mode) and pathlib.Path(displaced).read_bytes() == original
-        except OSError:
+            same = snapshot(displaced) == (original, access)
+        except Exception:
             same = False
         if not same:
-            exchange(displaced, target)
+            try:
+                exchange(displaced, target)
+            except Exception:
+                # Nothing is deleted: settings.json holds this run's text, the version it displaced
+                # gets a dated name.
+                where = keep(displaced, target, ".bak")
+                print(f"gemini: settings.json changed during the edit and could not be put back; it holds this run's text, the version it displaced is at {where}", file=sys.stderr)
+                sys.exit(2)
             # The file that was settings.json for a moment is kept too: a process that opened it
             # then writes into it.
             kept = keep(displaced, target, ".rejected")
-            print(f"gemini: settings.json changed during the edit; the displaced file is kept at {kept}", file=sys.stderr)
+            print(f"gemini: settings.json changed during the edit and was left as it is; this run's text is kept at {kept}", file=sys.stderr)
             sys.exit(2)
         # The old version is kept, not deleted: a process that opened settings.json before the
         # swap and writes later writes into it, and that write is then still on disk.
@@ -653,7 +701,7 @@ register_hf_mcp() {
       if [ "$state" = 0 ] && check_client_hf gemini; then
         log "gemini: added the user huggingface MCP server"
       elif [ "$state" = 2 ]; then
-        warn "gemini: user settings changed during the edit; left unchanged, rerun"; failed hf-mcp-gemini
+        warn "gemini: user settings changed during the edit; rerun"; failed hf-mcp-gemini
       else
         warn "gemini: could not add the Hugging Face entry (unsupported settings layout or unwritable file); left unchanged"; failed hf-mcp-gemini
       fi

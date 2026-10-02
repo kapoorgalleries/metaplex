@@ -378,6 +378,128 @@ ctypes.CDLL = CDLL
         self.assertEqual(target.read_text(), '{"edited": "meanwhile"}\n')
         self.assertEqual(self.only_backup(target, '.rejected').read_text(), '{"late": "write"}\n')
 
+    def test_rolled_back_file_keeps_the_access_of_the_version_it_was_read_from(self):
+        # settings.json is replaced after the bootstrap read it, by a file others may read. The
+        # rolled-back file holds the text that was read, so it must carry that version's mode (and
+        # owner, group, ACL), not the new file's: all come from the one open file the text came
+        # from, never from the name afterwards.
+        hook = self.root / 'hook'
+        hook.mkdir()
+        (hook / 'sitecustomize.py').write_text(r'''import json, os, sys
+real, done = json.loads, []
+def loads(*a, **k):
+    if sys.argv[0] == "-" and len(sys.argv) > 3 and not done:  # the splice's first parse, after its read
+        done.append(1)
+        t = os.environ["RACE_TARGET"]
+        with open(t + ".new", "w") as f:
+            f.write('{"theme": "dark"}\n')
+        os.chmod(t + ".new", 0o644)
+        os.rename(t + ".new", t)
+    return real(*a, **k)
+json.loads = loads
+''')
+        target = self.write('.gemini/settings.json', '{"theme": "light"}\n')
+        target.chmod(0o600)
+        self.env.update(PYTHONPATH=str(hook), RACE_TARGET=str(target))
+        result = self.run_registration('gemini')
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn('changed during the edit', result.stdout)
+        self.assertEqual(target.read_text(), '{"theme": "dark"}\n')
+        self.assertEqual(target.stat().st_mode & 0o777, 0o644)
+        rejected = self.only_backup(target, '.rejected')
+        self.assertEqual(rejected.stat().st_mode & 0o777, 0o600)
+        data = json.loads(rejected.read_text())
+        self.assertEqual(data['theme'], 'light')
+        self.assertIn('huggingface', data['mcpServers'])
+
+    def test_settings_changed_in_place_between_the_two_looks_is_refused(self):
+        # The bootstrap looks at the open file's owner, group, mode, size and times before and
+        # after it reads the text; a file changed in place in between (here: a chmod) is refused.
+        hook = self.root / 'hook'
+        hook.mkdir()
+        (hook / 'sitecustomize.py').write_text(r'''import os, sys
+real, calls = os.fstat, []
+def fstat(fd):
+    if sys.argv[0] == "-" and len(sys.argv) > 3:
+        calls.append(1)
+        if len(calls) == 2:  # the look after the read
+            os.chmod(os.environ["RACE_TARGET"], 0o644)
+    return real(fd)
+os.fstat = fstat
+''')
+        target = self.write('.gemini/settings.json', '{"theme": "light"}\n')
+        target.chmod(0o600)
+        self.env.update(PYTHONPATH=str(hook), RACE_TARGET=str(target))
+        result = self.run_registration('gemini')
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn('changed during the edit', result.stdout)
+        self.assertEqual(target.read_text(), '{"theme": "light"}\n')
+        self.assertEqual(target.stat().st_mode & 0o777, 0o644)
+        self.assertEqual(list((self.root / '.gemini').iterdir()), [target])
+
+    def test_permissions_changed_after_the_read_count_as_a_change(self):
+        # Only the mode changes after the read (a chmod in place): the displaced file has the text
+        # that was read but not its permissions, so it is put back as it now is, and this run's
+        # text is kept under the permissions it was read with.
+        hook = self.root / 'hook'
+        hook.mkdir()
+        (hook / 'sitecustomize.py').write_text(r'''import json, os, sys
+real, done = json.loads, []
+def loads(*a, **k):
+    if sys.argv[0] == "-" and len(sys.argv) > 3 and not done:
+        done.append(1)
+        os.chmod(os.environ["RACE_TARGET"], 0o644)
+    return real(*a, **k)
+json.loads = loads
+''')
+        target = self.write('.gemini/settings.json', '{"theme": "light"}\n')
+        target.chmod(0o600)
+        self.env.update(PYTHONPATH=str(hook), RACE_TARGET=str(target))
+        result = self.run_registration('gemini')
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn('changed during the edit', result.stdout)
+        self.assertEqual(target.read_text(), '{"theme": "light"}\n')
+        self.assertEqual(target.stat().st_mode & 0o777, 0o644)
+        rejected = self.only_backup(target, '.rejected')
+        self.assertEqual(rejected.stat().st_mode & 0o777, 0o600)
+        self.assertIn('huggingface', json.loads(rejected.read_text())['mcpServers'])
+
+    def test_failed_rollback_deletes_nothing_and_says_where_each_version_is(self):
+        # settings.json is edited before the swap, and putting it back then fails: this run's text
+        # stays settings.json, the edited version gets a dated name, and the run says so.
+        hook = self.root / 'hook'
+        hook.mkdir()
+        (hook / 'sitecustomize.py').write_text(r'''import ctypes, os
+calls = []
+def wrap(fn):
+    def step(*a, **k):
+        calls.append(1)
+        if len(calls) == 1:
+            with open(os.environ["RACE_TARGET"], "w") as f:
+                f.write('{"edited": "meanwhile"}\n')
+            return fn(*a, **k)
+        ctypes.set_errno(5)  # EIO: the swap back fails
+        return -1
+    return step
+class CDLL(ctypes.CDLL):
+    def __getattr__(self, name):
+        fn = super().__getattr__(name)
+        return wrap(fn) if name in ("renameat2", "renamex_np") else fn
+ctypes.CDLL = CDLL
+''')
+        target = self.write('.gemini/settings.json', '{"theme": "light"}\n')
+        self.env.update(PYTHONPATH=str(hook), RACE_TARGET=str(target))
+        result = self.run_registration('gemini')
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn('changed during the edit', result.stdout)
+        self.assertIn('could not be put back', result.stderr)
+        data = json.loads(target.read_text())
+        self.assertEqual(data['theme'], 'light')
+        self.assertIn('huggingface', data['mcpServers'])
+        bak = self.only_backup(target)
+        self.assertEqual(bak.read_text(), '{"edited": "meanwhile"}\n')
+        self.assertIn(str(bak), result.stderr)
+
     def test_macos_acl_on_the_temp_file_is_refused_before_any_text_is_written(self):
         # macOS applies an ACL entry whatever the mode says, so a temp file the folder hands one to
         # must be refused before settings text goes into it. There is no such API here: the platform
@@ -386,10 +508,10 @@ ctypes.CDLL = CDLL
         hook.mkdir()
         (hook / 'sitecustomize.py').write_text(r'''import ctypes, errno, os, sys
 sys.platform = "darwin"
-def acl_get_file(path, kind):
-    p = path.decode()
+def acl_get_fd(fd):
+    p = os.readlink(f"/proc/self/fd/{fd}")
     with open(os.environ["ACL_LOG"], "a") as log:
-        log.write(f"{os.path.basename(p)} {os.path.getsize(p)}\n")
+        log.write(f"{os.path.basename(p)} {os.fstat(fd).st_size}\n")
     if p.endswith(".tmp"):
         return 1  # an ACL inherited from the folder
     ctypes.set_errno(errno.ENOENT)
@@ -398,7 +520,7 @@ def acl_get_entry(acl, which, out): return 0
 def acl_free(acl): return 0
 class Libc:
     def __init__(self):
-        self.acl_get_file, self.acl_get_entry, self.acl_free = acl_get_file, acl_get_entry, acl_free
+        self.acl_get_fd, self.acl_get_entry, self.acl_free = acl_get_fd, acl_get_entry, acl_free
 ctypes.CDLL = lambda *a, **k: Libc()
 ''')
         p = self.write('.gemini/settings.json', '{"theme": "light"}\n')
