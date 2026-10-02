@@ -387,303 +387,34 @@ except (ValueError, OSError, TypeError, AttributeError):
     sys.exit(1)
 PYJSON
 }
-add_gemini_hf() {  # 0 added; 1 unsupported layout or unwritable; 2 changed during the edit
+add_gemini_hf() {  # 0 created; 4 settings.json exists: left untouched, snippet printed; 1 could not create
+  # Gemini's settings.json is only ever created, never edited: an existing file (which may hold other
+  # servers' settings) is left byte-for-byte as it is and the entry is printed for a manual paste.
+  # Never `gemini mcp add`/`remove`: they write every ${VAR} in mcpServers back expanded.
   local py cfg="${GEMINI_CLI_HOME:-$HOME}/.gemini/settings.json"
   py="$(json_python)" || return 1
   # shellcheck disable=SC2086
   "$py" - "$cfg" "$HF_MCP_URL" $HF_DENY <<'PYJSON'
-import errno, json, os, pathlib, stat, sys, tempfile, time
-# Every existing byte is kept, so nothing already in the file is re-serialised: the entry is
-# spliced in as text, as the first member of the top-level mcpServers object (created when
-# absent). Parity with Add-GeminiHf in bootstrap-ai-clis.ps1, which produces the same bytes.
-cfg, url, deny = pathlib.Path(sys.argv[1]), sys.argv[2], sys.argv[3:]
+import json, os, sys
+cfg, url, deny = sys.argv[1], sys.argv[2], sys.argv[3:]
 entry = {"url": url, "type": "http", "headers": {"Authorization": "Bearer ${HF_TOKEN}"}, "excludeTools": deny}
-
-def reject(constant):  # json.loads alone takes NaN and Infinity; JSON does not
-    raise ValueError(constant)
-
-def strict(t):
-    return json.loads(t, parse_constant=reject)
-
-def ws(t, i):
-    while i < len(t) and t[i] in " \t\r\n":
-        i += 1
-    return i
-
-def string_end(t, i):  # t[i] is the opening quote
-    i += 1
-    while i < len(t):
-        if t[i] == "\\":
-            i += 2
-        elif t[i] == '"':
-            return i + 1
-        elif t[i] < " ":
-            raise ValueError("control character")
-        else:
-            i += 1
-    raise ValueError("unterminated string")
-
-def value_end(t, i):
-    if i >= len(t):
-        raise ValueError("missing value")
-    if t[i] == '"':
-        return string_end(t, i)
-    if t[i] in "{[":
-        depth = 0
-        while i < len(t):
-            c = t[i]
-            if c == '"':
-                i = string_end(t, i)
-                continue
-            if c == "/":
-                raise ValueError("comment")
-            if c in "{[":
-                depth += 1
-            elif c in "}]":
-                depth -= 1
-                if depth == 0:
-                    return i + 1
-            i += 1
-        raise ValueError("unterminated value")
-    j = i
-    while j < len(t) and t[j] not in ",}] \t\r\n/":
-        j += 1
-    if j == i:
-        raise ValueError("missing value")
-    return j
-
-def insert(t):
-    nl = "\r\n" if "\r\n" in t else "\n"
-    body = json.dumps(entry, indent=2).replace("\n", nl + "    ")
-    i = ws(t, 0)
-    if i >= len(t) or t[i] != "{":
-        raise ValueError("root is not an object")
-    root, i = i, ws(t, i + 1)
-    root_empty, servers = t[i:i + 1] == "}", None
-    while not root_empty:
-        if t[i:i + 1] != '"':
-            raise ValueError("expected a key")
-        k = string_end(t, i)
-        key, i = json.loads(t[i:k]), ws(t, k)
-        if t[i:i + 1] != ":":
-            raise ValueError("expected a colon")
-        v = ws(t, i + 1)
-        i = ws(t, value_end(t, v))
-        if key == "mcpServers":
-            if servers is not None:
-                raise ValueError("duplicate mcpServers")
-            servers = v
-        if t[i:i + 1] == ",":
-            i = ws(t, i + 1)
-        elif t[i:i + 1] == "}":
-            break
-        else:
-            raise ValueError("expected a comma")
-    if servers is None:
-        at = root + 1
-        add = nl + '  "mcpServers": {' + nl + '    "huggingface": ' + body + nl + "  }" + (nl if root_empty else ",")
-    else:
-        if t[servers] != "{":
-            raise ValueError("mcpServers is not an object")
-        at = servers + 1
-        add = nl + '    "huggingface": ' + body + (nl + "  " if t[ws(t, at)] == "}" else ",")
-    return t[:at] + add + t[at:]
-
-def exchange(a, b):
-    # Swaps two names in one atomic step: renameat2(RENAME_EXCHANGE) on Linux, renamex_np(RENAME_SWAP)
-    # on macOS. Raises where the system or filesystem has neither; the edit is then refused.
-    import ctypes
-    libc = ctypes.CDLL(None, use_errno=True)
-    a, b = os.fsencode(a), os.fsencode(b)
-    if sys.platform == "darwin":
-        rc = libc.renamex_np(a, b, ctypes.c_uint(2))
-    else:
-        rc = libc.renameat2(-100, a, -100, b, ctypes.c_uint(2))  # AT_FDCWD
-    if rc != 0:
-        err = ctypes.get_errno()
-        raise OSError(err, os.strerror(err))
-
-def has_macos_acl(fd):  # acl_get_fd fails with ENOENT when the open file has no extended ACL
-    import ctypes
-    libc = ctypes.CDLL(None, use_errno=True)
-    libc.acl_get_fd.restype = ctypes.c_void_p
-    libc.acl_get_fd.argtypes = [ctypes.c_int]
-    libc.acl_get_entry.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.POINTER(ctypes.c_void_p)]
-    libc.acl_free.argtypes = [ctypes.c_void_p]
-    acl = libc.acl_get_fd(fd)  # on macOS: the open file's extended ACL
-    if not acl:
-        err = ctypes.get_errno()
-        if err == errno.ENOENT:
-            return False
-        raise OSError(err, os.strerror(err))
-    try:
-        return libc.acl_get_entry(acl, 0, ctypes.byref(ctypes.c_void_p())) == 0  # ACL_FIRST_ENTRY
-    finally:
-        libc.acl_free(acl)
-
-def no_macos_acl(fd):
-    # macOS applies an ACL entry whatever the mode says, so a file carrying one is refused.
-    if sys.platform == "darwin" and has_macos_acl(fd):
-        raise OSError("extended ACL")
-
-def keep(path, target, suffix):
-    # Gives a file this run must not delete a dated name next to settings.json. link() refuses a
-    # name that exists, so no file is ever overwritten; if no name is free the hidden one stays.
-    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
-    for n in range(1, 100):
-        name = target.with_name(f"{target.name}.{stamp}" + (f"-{n}" if n > 1 else "") + suffix)
-        try:
-            os.link(path, name)
-        except FileExistsError:
-            continue
-        except OSError:
-            return path
-        try:
-            os.unlink(path)
-        except OSError:
-            pass
-        return name
-    return path
-
-ACL = "system.posix_acl_access"  # Linux: where a file's POSIX access ACL lives
-
-def read_access(fd):
-    # Owner, group, mode and (Linux) access ACL of the open file, taken from the same open file as
-    # its text: both then describe one version, whatever the name points at by the time of the swap.
-    st = os.fstat(fd)
-    if not stat.S_ISREG(st.st_mode):
-        raise OSError("not a regular file")
-    acl = None
-    if sys.platform != "darwin" and hasattr(os, "getxattr"):
-        try:
-            acl = os.getxattr(fd, ACL)
-        except OSError as e:
-            if e.errno not in (errno.ENODATA, errno.ENOTSUP, errno.EOPNOTSUPP):
-                raise
-    return st, acl
-
-def same_version(a, b):  # the open file was not changed in place between two looks
-    return all(getattr(a, k) == getattr(b, k) for k in ("st_mode", "st_uid", "st_gid", "st_size", "st_mtime_ns", "st_ctime_ns"))
-
-class Changed(Exception):
-    pass
-
-def snapshot(path):
-    # Text, owner, group, mode and (Linux) access ACL of the file at path, all read from one open
-    # file, so all of one version whatever the name points at later. Never through a link (a link
-    # put there since is refused); a FIFO does not block the open. A file changed in place while it
-    # is read raises Changed.
-    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0))
-    try:
-        st, acl = read_access(fd)
-        no_macos_acl(fd)
-        chunks = []
-        while True:
-            chunk = os.read(fd, 1 << 16)
-            if not chunk:
-                break
-            chunks.append(chunk)
-        if not same_version(st, os.fstat(fd)):
-            raise Changed
-        return b"".join(chunks), (st.st_mode, st.st_uid, st.st_gid, acl)
-    finally:
-        os.close(fd)
-
-def apply_access(fd, access):
-    # Onto the open temp file: owner and group, then the ACL (or none: a default ACL on the folder
-    # gives a new file one the old file lacks), then the mode, so the new file is readable by no
-    # one the old one excluded. Raises if any of them cannot be carried over (edit refused).
-    mode, uid, gid, acl = access
-    now = os.fstat(fd)
-    if (now.st_uid, now.st_gid) != (uid, gid):
-        os.fchown(fd, uid, gid)
-    if sys.platform != "darwin" and hasattr(os, "setxattr"):
-        if acl is not None:
-            os.setxattr(fd, ACL, acl)
-        else:
-            try:
-                os.removexattr(fd, ACL)
-            except OSError as e:
-                if e.errno not in (errno.ENODATA, errno.ENOTSUP, errno.EOPNOTSUPP):
-                    raise
-    os.fchmod(fd, stat.S_IMODE(mode))
-
-tmp = None
+doc = (json.dumps({"mcpServers": {"huggingface": entry}}, indent=2) + "\n").encode()
 try:
-    target = pathlib.Path(os.path.realpath(cfg))
-    if cfg.is_symlink() and not target.exists():
-        sys.exit(1)
-    try:
-        original, access = snapshot(target)
-    except FileNotFoundError:
-        original = access = None
-    except Changed:
-        sys.exit(2)
-    raw = original.decode("utf-8") if original is not None else "{}" + "\n"
-    bom = "\ufeff" if raw.startswith("\ufeff") else ""
-    text = raw[len(bom):]
-    before = strict(text)
-    if not isinstance(before, dict) or "huggingface" in (before.get("mcpServers") or {}):
-        sys.exit(1)
-    after = insert(text)
-    # The splice must parse to exactly the old settings plus the one entry.
-    expected = strict(text)
-    expected.setdefault("mcpServers", {})["huggingface"] = entry
-    if strict(after) != expected:
-        sys.exit(1)
-    new = (bom + after).encode("utf-8")
-    target.parent.mkdir(parents=True, exist_ok=True)
-    # mkstemp creates the file 0600 and owned by this user, so no one else can read it meanwhile.
-    fd, tmp = tempfile.mkstemp(prefix=".settings.json.", suffix=".tmp", dir=target.parent)
-    with os.fdopen(fd, "wb") as f:
-        no_macos_acl(fd)  # an ACL the folder hands a new file: checked before any text goes in
-        f.write(new)
-        f.flush()
-        os.fsync(fd)
-        if access is not None:
-            apply_access(fd, access)  # a new settings.json keeps mkstemp's 0600
-    if original is None:
-        # link() refuses a name that exists, as File.Move does in the .ps1, so a settings file
-        # created meanwhile is never overwritten. The temporary name is removed below.
-        try:
-            os.link(tmp, target)
-        except FileExistsError:
-            sys.exit(2)
-    else:
-        # As File.Replace with a backup in the .ps1: the swap keeps whatever version settings.json
-        # had at that moment. A version other than the one read above (text or permissions) is put
-        # back, so an edit made meanwhile is never lost.
-        exchange(tmp, target)
-        displaced, tmp = tmp, None
-        try:
-            same = snapshot(displaced) == (original, access)
-        except Exception:
-            same = False
-        if not same:
-            try:
-                exchange(displaced, target)
-            except Exception:
-                # Nothing is deleted: settings.json holds this run's text, the version it displaced
-                # gets a dated name.
-                where = keep(displaced, target, ".bak")
-                print(f"gemini: settings.json changed during the edit and could not be put back; it holds this run's text, the version it displaced is at {where}", file=sys.stderr)
-                sys.exit(2)
-            # The file that was settings.json for a moment is kept too: a process that opened it
-            # then writes into it.
-            kept = keep(displaced, target, ".rejected")
-            print(f"gemini: settings.json changed during the edit and was left as it is; this run's text is kept at {kept}", file=sys.stderr)
-            sys.exit(2)
-        # The old version is kept, not deleted: a process that opened settings.json before the
-        # swap and writes later writes into it, and that write is then still on disk.
-        print(f"gemini: previous settings kept at {keep(displaced, target, '.bak')}")
-except Exception:  # never a traceback: it could quote settings text
+    os.makedirs(os.path.dirname(cfg), exist_ok=True)
+    # O_EXCL: refuses any existing name, a symlink included, so nothing is ever overwritten.
+    fd = os.open(cfg, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+except FileExistsError:
+    snippet = '"huggingface": ' + json.dumps(entry, indent=2)
+    print(f"gemini: {cfg} already exists and was left unchanged. To finish, add this entry inside its "
+          f'top-level "mcpServers" object (create "mcpServers": {{ }} if it has none), then rerun:\n{snippet}')
+    sys.exit(4)
+except OSError:
     sys.exit(1)
+try:
+    os.write(fd, doc)
+    os.fsync(fd)
 finally:
-    if tmp is not None:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
+    os.close(fd)
 PYJSON
 }
 register_hf_mcp() {
@@ -699,11 +430,11 @@ register_hf_mcp() {
     elif [ "$state" = 3 ]; then
       add_gemini_hf; state=$?
       if [ "$state" = 0 ] && check_client_hf gemini; then
-        log "gemini: added the user huggingface MCP server"
-      elif [ "$state" = 2 ]; then
-        warn "gemini: user settings changed during the edit; rerun"; failed hf-mcp-gemini
+        log "gemini: created user settings with the huggingface MCP server"
+      elif [ "$state" = 4 ]; then
+        warn "gemini: user settings exist; huggingface entry not added (manual step above)"; failed hf-mcp-gemini
       else
-        warn "gemini: could not add the Hugging Face entry (unsupported settings layout or unwritable file); left unchanged"; failed hf-mcp-gemini
+        warn "gemini: could not create user settings; nothing changed"; failed hf-mcp-gemini
       fi
     else
       warn "gemini: user settings need manual review (commented/unsupported JSON, incompatible URL or missing blocked tools); left unchanged"; failed hf-mcp-gemini

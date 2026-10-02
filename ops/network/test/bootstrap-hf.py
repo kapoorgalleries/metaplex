@@ -8,14 +8,10 @@ Run: python3 ops/network/test/bootstrap-hf.py
 import json
 import os
 from pathlib import Path
-import pwd
-import re
 import shutil
-import struct
 import subprocess
 import sys
 import tempfile
-import time
 import unittest
 
 if sys.version_info < (3, 11):
@@ -89,14 +85,6 @@ class BootstrapHf(unittest.TestCase):
         p.write_text(content)
         return p
 
-    def only_backup(self, p, suffix='.bak'):
-        # After an edit of an existing file the folder holds it and exactly one dated backup
-        # ('.bak': the previous settings; '.rejected': this run's text after a rollback).
-        rest = sorted(set(p.parent.iterdir()) - {p})
-        self.assertEqual(len(rest), 1, rest)
-        self.assertRegex(rest[0].name, r'^' + re.escape(p.name) + r'\.\d{8}T\d{6}Z(-\d+)?' + re.escape(suffix) + '$')
-        return rest[0]
-
     def run_registration(self, only=None, extra='', **as_user):
         prelude = '''set -u
 log() { printf '%s\\n' "$*"; }
@@ -125,15 +113,6 @@ failed() { FAILED="$FAILED $1"; }
         self.assertIn('${HF_TOKEN}', paths[1].read_text())
         self.assertEqual(json.loads(paths[1].read_text())['mcpServers']['huggingface']['type'], 'http')
         self.assertNotIn('PROJECT-SHADOW', paths[0].read_text())
-
-    def test_unrelated_keys_and_other_servers_preserved(self):
-        self.write('.gemini/settings.json', json.dumps({'theme': {'huggingface': True}, 'mcpServers': {'existing': {'command': 'keep-me'}}}))
-        result = self.run_registration('gemini')
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        data = json.loads((self.root / '.gemini/settings.json').read_text())
-        self.assertEqual(data['theme'], {'huggingface': True})
-        self.assertEqual(data['mcpServers']['existing']['command'], 'keep-me')
-        self.assertIn('huggingface', data['mcpServers'])
 
     def test_legacy_gemini_httpurl_entry_is_compatible(self):
         p = self.write('.gemini/settings.json', json.dumps({'mcpServers': {'huggingface': {'httpUrl': URL, 'excludeTools': DENY}}}))
@@ -200,453 +179,115 @@ failed() { FAILED="$FAILED $1"; }
                 self.assertNotIn('test-secret-must-not-appear', result.stdout + result.stderr)
                 self.assertNotIn('Traceback', result.stdout + result.stderr)
 
-    def test_gemini_other_servers_env_references_never_expanded(self):
-        # Codex's PR #18 blocker: `gemini mcp add` saved Bearer ${OTHER_TOKEN} as the value.
-        self.env['OTHER_TOKEN'] = 'synthetic-other-secret'
-        original = ('{\n  "theme": "light",\n  "mcpServers": {\n    "other": {\n      "url": "https://x.example/mcp",\n'
-                    '      "headers": {"Authorization": "Bearer ${OTHER_TOKEN}"}\n    }\n  }\n}\n')
-        p = self.write('.gemini/settings.json', original)
-        p.chmod(0o640)
+    ENTRY = {'url': URL, 'type': 'http', 'headers': {'Authorization': 'Bearer ${HF_TOKEN}'}, 'excludeTools': DENY}
+
+    def test_new_settings_file_is_created_private_with_the_exact_entry(self):
         result = self.run_registration('gemini')
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        after = p.read_text()
-        self.assertNotIn('synthetic-other-secret', after)
-        self.assertNotIn('test-secret-must-not-appear', after)
-        self.assertIn('"Bearer ${OTHER_TOKEN}"', after)
-        self.assertIn('"Bearer ${HF_TOKEN}"', after)
-        # Every original byte is kept: the entry is one contiguous insertion.
-        at = after.index('\n    "huggingface"')
-        added = len(after) - len(original)
-        self.assertEqual(after[:at] + after[at + added:], original)
-        self.assertEqual(p.stat().st_mode & 0o777, 0o640)
-        data = json.loads(after)
-        self.assertEqual(data['mcpServers']['huggingface'], {
-            'url': URL, 'type': 'http', 'headers': {'Authorization': 'Bearer ${HF_TOKEN}'}, 'excludeTools': DENY})
-        self.assertEqual(list(data['mcpServers']), ['huggingface', 'other'])
-        self.assertFalse((self.root / 'calls.jsonl').exists())
-        # No temporary file left; the previous version is kept, with its own mode.
-        bak = self.only_backup(p)
-        self.assertEqual(bak.read_text(), original)
-        self.assertEqual(bak.stat().st_mode & 0o777, 0o640)
-        self.assertIn(f'previous settings kept at {bak}', result.stdout)
+        p = self.root / '.gemini/settings.json'
+        self.assertEqual(p.read_text(), json.dumps({'mcpServers': {'huggingface': self.ENTRY}}, indent=2) + '\n')
+        self.assertEqual(p.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(list(p.parent.iterdir()), [p])
+        self.assertIn('created user settings', result.stdout)
+        self.assertNotIn('test-secret-must-not-appear', p.read_text() + result.stdout + result.stderr)
+        self.assertFalse((self.root / 'calls.jsonl').exists())  # `gemini mcp add` is never run
 
-    def test_gemini_insertion_layouts_and_refusals(self):
-        entry = {'url': URL, 'type': 'http', 'headers': {'Authorization': 'Bearer ${HF_TOKEN}'}, 'excludeTools': DENY}
-        added = [('{}', {}),
-                 ('{"theme":{"mcpServers":1},"mcpServers":{}}', {'theme': {'mcpServers': 1}}),
-                 ('{"mcp\\u0053ervers": {"o": {"command": "x"}}}', {'o': {'command': 'x'}}),
-                 ('{"note": "a } { \\" [ ] / text", "mcpServers": {"o": {"args": ["{", "}"]}}}', {'o': {'args': ['{', '}']}}),
-                 ('\ufeff{\r\n  "theme": "caf\u00e9"\r\n}\r\n', {'theme': 'caf\u00e9'})]
-        for content, rest in added:
+    def test_existing_settings_are_never_edited_and_the_entry_is_printed(self):
+        # Codex's PR #18 blocker was `gemini mcp add` saving Bearer ${OTHER_TOKEN} as its value. An
+        # existing file is now left byte-for-byte as it is; the entry is printed for a manual paste.
+        self.env['OTHER_TOKEN'] = 'synthetic-other-secret'
+        contents = ['{}',
+                    '{"theme": {"huggingface": true}, "mcpServers": {"existing": {"command": "keep-me"}}}',
+                    '{\n  "mcpServers": {\n    "other": {\n      "url": "https://x.example/mcp",\n'
+                    '      "headers": {"Authorization": "Bearer ${OTHER_TOKEN}"}\n    }\n  }\n}\n',
+                    '\ufeff{\r\n  "theme": "caf\u00e9"\r\n}\r\n']
+        for content in contents:
             with self.subTest(content=content):
+                shutil.rmtree(self.root / '.gemini', ignore_errors=True)
                 p = self.write('.gemini/settings.json', content)
+                p.chmod(0o640)
+                before = p.read_bytes()
                 result = self.run_registration('gemini')
-                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-                raw = p.read_bytes()
-                text = raw.decode('utf-8')
-                self.assertEqual(raw.startswith(b'\xef\xbb\xbf'), content.startswith('\ufeff'))
-                if '\r\n' in content:
-                    self.assertEqual(text.count('\n'), text.count('\r\n'))
-                data = json.loads(text.lstrip('\ufeff'))
-                self.assertEqual(data['mcpServers']['huggingface'], entry)
-                servers = data['mcpServers']
-                if 'o' in rest:
-                    self.assertEqual(servers['o'], rest['o'])
-                if 'theme' in rest:
-                    self.assertEqual(data['theme'], rest['theme'])
-        for content in ['{"mcpServers": {}, "mcpServers": {"x": {}}}', '{"mcpServers": null}',
-                        '{"a": {/* c */ "b": 1}}', '[1, 2]']:
-            with self.subTest(content=content):
-                p = self.write('.gemini/settings.json', content)
-                result = self.run_registration('gemini')
-                self.assertEqual(result.returncode, 1)
-                self.assertIn('hf-mcp-gemini', result.stdout)
-                self.assertEqual(p.read_text(), content)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn('already exists and was left unchanged', result.stdout)
+                self.assertIn('INSTALL INCOMPLETE: hf-mcp-gemini', result.stdout)
+                self.assertEqual(p.read_bytes(), before)
+                self.assertEqual(p.stat().st_mode & 0o777, 0o640)
+                self.assertEqual(list(p.parent.iterdir()), [p])
+                self.assertNotIn('synthetic-other-secret', result.stdout + result.stderr)
+                self.assertNotIn('test-secret-must-not-appear', result.stdout + result.stderr)
+                self.assertFalse((self.root / 'calls.jsonl').exists())
+                # The printed entry is exactly what to paste into mcpServers.
+                out = result.stdout.splitlines()
+                i = next(k for k, line in enumerate(out) if line.startswith('"huggingface": {'))
+                j = next(k for k in range(i, len(out)) if out[k] == '}')
+                pasted = json.loads('{"mcpServers": {' + '\n'.join(out[i:j + 1]) + '}}')
+                self.assertEqual(pasted['mcpServers']['huggingface'], self.ENTRY)
 
-    def test_non_standard_json_refused_by_check_and_by_splice(self):
-        # Plain JSON only: Windows PowerShell 5.1's ConvertFrom-Json and Python's json.loads each
-        # accept some of these, Gemini's parser does not. The .ps1 applies the same strict grammar.
-        contents = ['{"theme":\'light\'}', '{theme: "light"}', '{"a": {b: 1}}', '{"a": NaN}',
-                    '{"a": Infinity}', '{"a": -Infinity}', '{"a": [1,]}', '{"a": 01}', '{"a": "\\x"}']
+    def test_unsupported_settings_untouched_even_when_the_check_is_bypassed(self):
+        # Plain JSON only (Windows PowerShell 5.1's ConvertFrom-Json and Python's json.loads each accept
+        # some of these; Gemini's parser does not). The check sends them to manual review, and even
+        # past the check the file is never edited.
+        contents = ['{"theme":\'light\'}', '{theme: "light"}', '{"a": {b: 1}}', '{"a": NaN}', '{"a": Infinity}',
+                    '{"a": -Infinity}', '{"a": [1,]}', '{"a": 01}', '{"a": "\\x"}', '{"mcpServers": null}',
+                    '{"mcpServers": {}, "mcpServers": {"x": {}}}', '{"a": {/* c */ "b": 1}}', '[1, 2]']
         for content in contents:
             for forced in ['', 'check_client_hf() { return 3; }']:
                 with self.subTest(content=content, forced=forced):
                     p = self.write('.gemini/settings.json', content)
                     result = self.run_registration('gemini', forced)
                     self.assertEqual(result.returncode, 1)
-                    self.assertIn('manual review' if not forced else 'could not add', result.stdout)
+                    self.assertTrue('manual review' in result.stdout or 'left unchanged' in result.stdout, result.stdout)
+                    self.assertIn('INSTALL INCOMPLETE: hf-mcp-gemini', result.stdout)
                     self.assertEqual(p.read_text(), content)
                     self.assertEqual(list((self.root / '.gemini').iterdir()), [p])
 
-    def test_new_settings_file_created_meanwhile_is_not_overwritten(self):
-        # Another process creates settings.json just before the bootstrap's final rename/link.
+    def test_settings_file_created_meanwhile_is_not_overwritten(self):
+        # Another program creates settings.json between the check and the create.
         hook = self.root / 'hook'
         hook.mkdir()
         (hook / 'sitecustomize.py').write_text(
-            'import os\n'
-            'def race(real):\n'
-            '    def step(src, dst, *a, **k):\n'
-            '        t = os.environ["RACE_TARGET"]\n'
-            '        if not os.path.exists(t):\n'
-            '            with open(t, "w") as f:\n'
-            '                f.write("{\\"created\\": \\"meanwhile\\"}\\n")\n'
-            '        return real(src, dst, *a, **k)\n'
-            '    return step\n'
-            'os.link, os.replace = race(os.link), race(os.replace)\n')
+            'import os, sys\n'
+            'real = os.open\n'
+            'def racing_open(path, flags, *a, **k):\n'
+            '    if sys.argv[0] == "-" and len(sys.argv) > 3 and flags & os.O_EXCL and not os.path.lexists(path):\n'
+            '        with open(path, "w") as f:\n'
+            '            f.write(\'{"created": "meanwhile"}\\n\')\n'
+            '    return real(path, flags, *a, **k)\n'
+            'os.open = racing_open\n')
         target = self.root / '.gemini/settings.json'
-        self.env.update(PYTHONPATH=str(hook), RACE_TARGET=str(target))
+        self.env.update(PYTHONPATH=str(hook))
         result = self.run_registration('gemini')
-        self.assertEqual(result.returncode, 1)
-        self.assertIn('changed during the edit', result.stdout)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn('already exists and was left unchanged', result.stdout)
         self.assertEqual(target.read_text(), '{"created": "meanwhile"}\n')
-        self.assertEqual(list((self.root / '.gemini').iterdir()), [target])
+        self.assertEqual(list(target.parent.iterdir()), [target])
 
-    def test_existing_settings_edited_meanwhile_is_kept(self):
-        # Another process edits settings.json right before the bootstrap's swap, after its read:
-        # in place (as Gemini writes it) or by renaming a new file over it. Either edit survives.
-        hook = self.root / 'hook'
-        hook.mkdir()
-        (hook / 'sitecustomize.py').write_text(r'''import ctypes, os
-done = []
-def once(fn):
-    def step(*a, **k):
-        if not done:
-            done.append(1)
-            t = os.environ["RACE_TARGET"]
-            with open(t + ".new" if os.environ["RACE_MODE"] == "rename" else t, "w") as f:
-                f.write('{"edited": "meanwhile"}\n')
-            if os.environ["RACE_MODE"] == "rename":
-                os.rename(t + ".new", t)
-        return fn(*a, **k)
-    return step
-class CDLL(ctypes.CDLL):
-    def __getattr__(self, name):
-        fn = super().__getattr__(name)
-        return once(fn) if name in ("renameat2", "renamex_np") else fn
-ctypes.CDLL = CDLL
-os.replace = once(os.replace)
-''')
-        target = self.root / '.gemini/settings.json'
-        for mode in ['in-place', 'rename']:
-            with self.subTest(mode=mode):
-                shutil.rmtree(self.root / '.gemini', ignore_errors=True)
-                self.write('.gemini/settings.json', '{"theme": "light"}\n')
-                self.env.update(PYTHONPATH=str(hook), RACE_TARGET=str(target), RACE_MODE=mode)
-                result = self.run_registration('gemini')
-                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-                self.assertIn('changed during the edit', result.stdout)
-                self.assertEqual(target.read_text(), '{"edited": "meanwhile"}\n')
-                # This run's text, settings.json for a moment, is kept: see the next test.
-                rejected = json.loads(self.only_backup(target, '.rejected').read_text())
-                self.assertEqual(rejected['theme'], 'light')
-                self.assertIn('huggingface', rejected['mcpServers'])
-
-    def test_write_through_a_handle_opened_during_the_edit_is_kept(self):
-        # settings.json is edited before the swap, so this run is rolled back, and a process opens
-        # it in the moment it holds this run's text, writing only after the bootstrap has finished.
-        # That write lands in the rolled-back file, which must therefore still be on disk.
-        hook = self.root / 'hook'
-        hook.mkdir()
-        (hook / 'sitecustomize.py').write_text(r'''import atexit, ctypes, os
-state = {}
-def late_write():
-    fh = state["fh"]
-    fh.seek(0); fh.truncate(); fh.write(b'{"late": "write"}\n'); fh.close()
-def wrap(fn):
-    def step(*a, **k):
-        t, first = os.environ["RACE_TARGET"], "fh" not in state
-        if first:
-            with open(t, "w") as f:
-                f.write('{"edited": "meanwhile"}\n')
-        r = fn(*a, **k)
-        if first:
-            state["fh"] = open(t, "r+b")  # settings.json holds this run's text right now
-            atexit.register(late_write)
-        return r
-    return step
-class CDLL(ctypes.CDLL):
-    def __getattr__(self, name):
-        fn = super().__getattr__(name)
-        return wrap(fn) if name in ("renameat2", "renamex_np") else fn
-ctypes.CDLL = CDLL
-''')
-        target = self.write('.gemini/settings.json', '{"theme": "light"}\n')
-        self.env.update(PYTHONPATH=str(hook), RACE_TARGET=str(target))
-        result = self.run_registration('gemini')
-        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-        self.assertIn('changed during the edit', result.stdout)
-        self.assertEqual(target.read_text(), '{"edited": "meanwhile"}\n')
-        self.assertEqual(self.only_backup(target, '.rejected').read_text(), '{"late": "write"}\n')
-
-    def test_rolled_back_file_keeps_the_access_of_the_version_it_was_read_from(self):
-        # settings.json is replaced after the bootstrap read it, by a file others may read. The
-        # rolled-back file holds the text that was read, so it must carry that version's mode (and
-        # owner, group, ACL), not the new file's: all come from the one open file the text came
-        # from, never from the name afterwards.
-        hook = self.root / 'hook'
-        hook.mkdir()
-        (hook / 'sitecustomize.py').write_text(r'''import json, os, sys
-real, done = json.loads, []
-def loads(*a, **k):
-    if sys.argv[0] == "-" and len(sys.argv) > 3 and not done:  # the splice's first parse, after its read
-        done.append(1)
-        t = os.environ["RACE_TARGET"]
-        with open(t + ".new", "w") as f:
-            f.write('{"theme": "dark"}\n')
-        os.chmod(t + ".new", 0o644)
-        os.rename(t + ".new", t)
-    return real(*a, **k)
-json.loads = loads
-''')
-        target = self.write('.gemini/settings.json', '{"theme": "light"}\n')
-        target.chmod(0o600)
-        self.env.update(PYTHONPATH=str(hook), RACE_TARGET=str(target))
-        result = self.run_registration('gemini')
-        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-        self.assertIn('changed during the edit', result.stdout)
-        self.assertEqual(target.read_text(), '{"theme": "dark"}\n')
-        self.assertEqual(target.stat().st_mode & 0o777, 0o644)
-        rejected = self.only_backup(target, '.rejected')
-        self.assertEqual(rejected.stat().st_mode & 0o777, 0o600)
-        data = json.loads(rejected.read_text())
-        self.assertEqual(data['theme'], 'light')
-        self.assertIn('huggingface', data['mcpServers'])
-
-    def test_settings_changed_in_place_between_the_two_looks_is_refused(self):
-        # The bootstrap looks at the open file's owner, group, mode, size and times before and
-        # after it reads the text; a file changed in place in between (here: a chmod) is refused.
-        hook = self.root / 'hook'
-        hook.mkdir()
-        (hook / 'sitecustomize.py').write_text(r'''import os, sys
-real, calls = os.fstat, []
-def fstat(fd):
-    if sys.argv[0] == "-" and len(sys.argv) > 3:
-        calls.append(1)
-        if len(calls) == 2:  # the look after the read
-            os.chmod(os.environ["RACE_TARGET"], 0o644)
-    return real(fd)
-os.fstat = fstat
-''')
-        target = self.write('.gemini/settings.json', '{"theme": "light"}\n')
-        target.chmod(0o600)
-        self.env.update(PYTHONPATH=str(hook), RACE_TARGET=str(target))
-        result = self.run_registration('gemini')
-        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-        self.assertIn('changed during the edit', result.stdout)
-        self.assertEqual(target.read_text(), '{"theme": "light"}\n')
-        self.assertEqual(target.stat().st_mode & 0o777, 0o644)
-        self.assertEqual(list((self.root / '.gemini').iterdir()), [target])
-
-    def test_permissions_changed_after_the_read_count_as_a_change(self):
-        # Only the mode changes after the read (a chmod in place): the displaced file has the text
-        # that was read but not its permissions, so it is put back as it now is, and this run's
-        # text is kept under the permissions it was read with.
-        hook = self.root / 'hook'
-        hook.mkdir()
-        (hook / 'sitecustomize.py').write_text(r'''import json, os, sys
-real, done = json.loads, []
-def loads(*a, **k):
-    if sys.argv[0] == "-" and len(sys.argv) > 3 and not done:
-        done.append(1)
-        os.chmod(os.environ["RACE_TARGET"], 0o644)
-    return real(*a, **k)
-json.loads = loads
-''')
-        target = self.write('.gemini/settings.json', '{"theme": "light"}\n')
-        target.chmod(0o600)
-        self.env.update(PYTHONPATH=str(hook), RACE_TARGET=str(target))
-        result = self.run_registration('gemini')
-        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-        self.assertIn('changed during the edit', result.stdout)
-        self.assertEqual(target.read_text(), '{"theme": "light"}\n')
-        self.assertEqual(target.stat().st_mode & 0o777, 0o644)
-        rejected = self.only_backup(target, '.rejected')
-        self.assertEqual(rejected.stat().st_mode & 0o777, 0o600)
-        self.assertIn('huggingface', json.loads(rejected.read_text())['mcpServers'])
-
-    def test_failed_rollback_deletes_nothing_and_says_where_each_version_is(self):
-        # settings.json is edited before the swap, and putting it back then fails: this run's text
-        # stays settings.json, the edited version gets a dated name, and the run says so.
-        hook = self.root / 'hook'
-        hook.mkdir()
-        (hook / 'sitecustomize.py').write_text(r'''import ctypes, os
-calls = []
-def wrap(fn):
-    def step(*a, **k):
-        calls.append(1)
-        if len(calls) == 1:
-            with open(os.environ["RACE_TARGET"], "w") as f:
-                f.write('{"edited": "meanwhile"}\n')
-            return fn(*a, **k)
-        ctypes.set_errno(5)  # EIO: the swap back fails
-        return -1
-    return step
-class CDLL(ctypes.CDLL):
-    def __getattr__(self, name):
-        fn = super().__getattr__(name)
-        return wrap(fn) if name in ("renameat2", "renamex_np") else fn
-ctypes.CDLL = CDLL
-''')
-        target = self.write('.gemini/settings.json', '{"theme": "light"}\n')
-        self.env.update(PYTHONPATH=str(hook), RACE_TARGET=str(target))
-        result = self.run_registration('gemini')
-        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-        self.assertIn('changed during the edit', result.stdout)
-        self.assertIn('could not be put back', result.stderr)
-        data = json.loads(target.read_text())
-        self.assertEqual(data['theme'], 'light')
-        self.assertIn('huggingface', data['mcpServers'])
-        bak = self.only_backup(target)
-        self.assertEqual(bak.read_text(), '{"edited": "meanwhile"}\n')
-        self.assertIn(str(bak), result.stderr)
-
-    def test_macos_acl_on_the_temp_file_is_refused_before_any_text_is_written(self):
-        # macOS applies an ACL entry whatever the mode says, so a temp file the folder hands one to
-        # must be refused before settings text goes into it. There is no such API here: the platform
-        # and libc are faked, and each file's size at the moment it is checked is recorded.
-        hook = self.root / 'hook'
-        hook.mkdir()
-        (hook / 'sitecustomize.py').write_text(r'''import ctypes, errno, os, sys
-sys.platform = "darwin"
-def acl_get_fd(fd):
-    p = os.readlink(f"/proc/self/fd/{fd}")
-    with open(os.environ["ACL_LOG"], "a") as log:
-        log.write(f"{os.path.basename(p)} {os.fstat(fd).st_size}\n")
-    if p.endswith(".tmp"):
-        return 1  # an ACL inherited from the folder
-    ctypes.set_errno(errno.ENOENT)
-    return 0
-def acl_get_entry(acl, which, out): return 0
-def acl_free(acl): return 0
-class Libc:
-    def __init__(self):
-        self.acl_get_fd, self.acl_get_entry, self.acl_free = acl_get_fd, acl_get_entry, acl_free
-ctypes.CDLL = lambda *a, **k: Libc()
-''')
-        p = self.write('.gemini/settings.json', '{"theme": "light"}\n')
-        log = self.root / 'acl.log'
-        self.env.update(PYTHONPATH=str(hook), ACL_LOG=str(log))
-        result = self.run_registration('gemini')
-        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-        self.assertIn('could not add', result.stdout)
-        self.assertEqual(p.read_text(), '{"theme": "light"}\n')
-        self.assertEqual(list((self.root / '.gemini').iterdir()), [p])
-        checks = [line.split() for line in log.read_text().splitlines()]
-        self.assertEqual(len(checks), 2, checks)
-        self.assertEqual(checks[0][0], 'settings.json')
-        self.assertTrue(checks[1][0].startswith('.settings.json.'), checks)
-        self.assertEqual(checks[1][1], '0', checks)  # empty when checked
-
-    def test_backup_name_never_overwrites_an_existing_file(self):
-        p = self.write('.gemini/settings.json', '{"theme": "light"}\n')
-        now = time.time()
-        taken = [p.with_name(p.name + time.strftime('.%Y%m%dT%H%M%SZ.bak', time.gmtime(now + s))) for s in range(4)]
-        for t in taken:
-            t.write_text('MARKER')
-        result = self.run_registration('gemini')
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual([t.read_text() for t in taken], ['MARKER'] * 4)
-        rest = set(p.parent.iterdir()) - {p, *taken}
-        self.assertEqual(len(rest), 1, rest)
-        bak = rest.pop()
-        self.assertRegex(bak.name, r'^settings\.json\.\d{8}T\d{6}Z-2\.bak$')
-        self.assertEqual(bak.read_text(), '{"theme": "light"}\n')
-        self.assertIn(f'previous settings kept at {bak}', result.stdout)
-
-    def test_gemini_edit_keeps_owner_group_mode_and_acl(self):
-        if os.geteuid() != 0:
-            self.skipTest('needs root to give the settings file another owner and group')
-        p = self.write('.gemini/settings.json', '{"theme": "light"}\n')
-        os.chown(p, 1, 2)
-        # user::rw- group::--- group:3:r-- mask::r-- other::---, so mode 0640 without the owning group.
-        acl = struct.pack('<I', 2) + b''.join(struct.pack('<HHI', *e) for e in [
-            (0x01, 6, 0xFFFFFFFF), (0x04, 0, 0xFFFFFFFF), (0x08, 4, 3), (0x10, 4, 0xFFFFFFFF), (0x20, 0, 0xFFFFFFFF)])
-        try:
-            os.setxattr(p, 'system.posix_acl_access', acl)
-        except OSError:
-            self.skipTest('filesystem without POSIX ACLs')
-        before = os.stat(p)
-        result = self.run_registration('gemini')
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        after = os.stat(p)
-        self.assertEqual((after.st_uid, after.st_gid, after.st_mode & 0o7777), (1, 2, before.st_mode & 0o7777))
-        self.assertEqual(os.getxattr(p, 'system.posix_acl_access'), acl)
-        self.assertIn('huggingface', json.loads(p.read_text())['mcpServers'])
-        bak = self.only_backup(p)  # the old file itself: same owner, group, mode and ACL
-        self.assertEqual((bak.stat().st_uid, bak.stat().st_gid, bak.stat().st_mode & 0o7777), (1, 2, before.st_mode & 0o7777))
-        self.assertEqual(bak.read_text(), '{"theme": "light"}\n')
-
-    def test_gemini_edit_drops_an_acl_inherited_from_the_folder(self):
-        # The folder got a default ACL after settings.json was written: a new file inherits
-        # user:65534:r--, which the old file never had and chmod 0640 would make effective.
-        if os.geteuid() != 0:
-            self.skipTest('needs root to set a default ACL')
-        p = self.write('.gemini/settings.json', '{"theme": "light"}\n')
-        p.chmod(0o640)
-        default = struct.pack('<I', 2) + b''.join(struct.pack('<HHI', *e) for e in [
-            (0x01, 7, 0xFFFFFFFF), (0x02, 4, 65534), (0x04, 0, 0xFFFFFFFF), (0x10, 4, 0xFFFFFFFF), (0x20, 0, 0xFFFFFFFF)])
-        try:
-            os.setxattr(p.parent, 'system.posix_acl_default', default)
-        except OSError:
-            self.skipTest('filesystem without POSIX ACLs')
-        result = self.run_registration('gemini')
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertNotIn('system.posix_acl_access', os.listxattr(p))
-        self.assertEqual(p.stat().st_mode & 0o777, 0o640)
-        self.assertIn('huggingface', json.loads(p.read_text())['mcpServers'])
-
-    def test_write_through_a_handle_opened_before_the_edit_is_kept(self):
-        # A process opened settings.json before the swap and writes after the bootstrap is done:
-        # the write lands in the old file, which must still be on disk.
-        p = self.write('.gemini/settings.json', '{"theme": "light"}\n')
-        with open(p, 'r+') as late:
-            result = self.run_registration('gemini')
-            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            late.seek(0)
-            late.write('{"theme": "dark"} ')
-        self.assertIn('huggingface', json.loads(p.read_text())['mcpServers'])
-        self.assertEqual(self.only_backup(p).read_text(), '{"theme": "dark"} \n')
-
-    def test_gemini_edit_refused_when_group_cannot_be_kept(self):
-        if os.geteuid() != 0:
-            self.skipTest('needs root to run the bootstrap as another user')
-        nobody = pwd.getpwnam('nobody')
-        p = self.write('.gemini/settings.json', '{"theme": "light"}\n')
-        p.chmod(0o640)
-        for path in [self.root, *self.root.rglob('*')]:
-            os.chown(path, nobody.pw_uid, nobody.pw_gid)
-        os.chown(p, nobody.pw_uid, 0)  # nobody cannot give the new file group root
-        result = self.run_registration('gemini', user=nobody.pw_uid, group=nobody.pw_gid, extra_groups=[])
-        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-        self.assertIn('could not add', result.stdout)
-        self.assertEqual(p.read_text(), '{"theme": "light"}\n')
-        self.assertEqual((p.stat().st_gid, p.stat().st_mode & 0o777), (0, 0o640))
-        self.assertEqual(list((self.root / '.gemini').iterdir()), [p])
-
-    def test_gemini_symlinked_settings_stay_a_symlink(self):
+    def test_symlinked_settings_are_never_written_through(self):
         real = self.write('dotfiles/gemini-settings.json', '{"theme": "light"}\n')
         link = self.root / '.gemini/settings.json'
         link.parent.mkdir()
         link.symlink_to(real)
         result = self.run_registration('gemini')
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn('already exists and was left unchanged', result.stdout)
         self.assertTrue(link.is_symlink())
-        self.assertIn('huggingface', json.loads(real.read_text())['mcpServers'])
-        # The displaced file stays next to the link's target, under that file's name; the link's
-        # folder gets nothing (docs/hugging-face.md, "Gemini CLI (user level)").
-        self.assertEqual(list(link.parent.iterdir()), [link])
-        self.assertEqual(self.only_backup(real).read_text(), '{"theme": "light"}\n')
+        self.assertEqual(real.read_text(), '{"theme": "light"}\n')
         link.unlink()
-        link.symlink_to(self.root / 'missing.json')
+        link.symlink_to(self.root / 'missing.json')  # dangling: never created through
         result = self.run_registration('gemini')
-        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertTrue(link.is_symlink())
         self.assertFalse((self.root / 'missing.json').exists())
 
-    def test_gemini_settings_changed_during_edit_is_reported(self):
-        result = self.run_registration('gemini', 'add_gemini_hf() { return 2; }')
-        self.assertEqual(result.returncode, 1)
-        self.assertIn('changed during the edit', result.stdout)
-        self.assertIn('hf-mcp-gemini', result.stdout)
+    def test_gemini_results_are_reported(self):
+        for stub, text in [('add_gemini_hf() { return 4; }', 'manual step above'),
+                           ('add_gemini_hf() { return 1; }', 'could not create user settings')]:
+            with self.subTest(stub=stub):
+                result = self.run_registration('gemini', stub)
+                self.assertEqual(result.returncode, 1)
+                self.assertIn(text, result.stdout)
+                self.assertIn('hf-mcp-gemini', result.stdout)
 
     def test_custom_user_config_directories(self):
         self.env['CODEX_HOME'] = str(self.root / 'custom-codex')

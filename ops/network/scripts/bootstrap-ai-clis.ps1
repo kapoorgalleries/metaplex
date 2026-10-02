@@ -247,248 +247,44 @@ function Get-HfClientState([string]$Client) {
     return 0
   } catch { return 1 }
 }
-# Gemini's huggingface entry is spliced into settings.json as text, so no existing byte is rewritten.
+# Gemini's settings.json is only ever created, never edited: an existing file (which may hold other
+# servers' settings) is left byte-for-byte as it is and the entry is printed for a manual paste.
 # Never `gemini mcp add` (or `remove`): Gemini 0.61 writes back the whole mcpServers map as loaded,
 # with every ${VAR} already expanded, so another server's secret would be saved in the clear.
-# Byte-for-byte parity with add_gemini_hf in bootstrap-ai-clis.sh; the scanner reads the top level
-# only, on text Test-StrictJson has already passed.
-function Skip-JsonString([string]$T, [int]$i) {
-  $i++
-  while ($i -lt $T.Length) {
-    $c = $T[$i]
-    if ($c -ceq [char]'\') { $i += 2 }
-    elseif ($c -ceq [char]'"') { return $i + 1 }
-    elseif ([int]$c -lt 0x20) { throw 'control character' }
-    else { $i++ }
-  }
-  throw 'unterminated string'
-}
-function Skip-JsonValue([string]$T, [int]$i) {
-  if ($i -ge $T.Length) { throw 'missing value' }
-  $c = $T[$i]
-  if ($c -ceq [char]'"') { return Skip-JsonString $T $i }
-  if ($c -ceq [char]'{' -or $c -ceq [char]'[') {
-    $depth = 0
-    while ($i -lt $T.Length) {
-      $c = $T[$i]
-      if ($c -ceq [char]'"') { $i = Skip-JsonString $T $i; continue }
-      if ($c -ceq [char]'/') { throw 'comment' }
-      if ($c -ceq [char]'{' -or $c -ceq [char]'[') { $depth++ }
-      elseif ($c -ceq [char]'}' -or $c -ceq [char]']') { $depth--; if ($depth -eq 0) { return $i + 1 } }
-      $i++
-    }
-    throw 'unterminated value'
-  }
-  $j = $i
-  while ($j -lt $T.Length -and ",}] `t`r`n/".IndexOf($T[$j]) -lt 0) { $j++ }
-  if ($j -eq $i) { throw 'missing value' }
-  return $j
-}
-function Add-HfToSettingsText([string]$T) {
-  $nl = if ($T.Contains("`r`n")) { "`r`n" } else { "`n" }
-  $tools = @($hfDeny | ForEach-Object { '    "' + $_ + '"' })
-  for ($k = 0; $k -lt $tools.Count - 1; $k++) { $tools[$k] += ',' }
-  # Single quotes keep ${HF_TOKEN} literal.
-  $lines = @('{', ('  "url": "' + $hfUrl + '",'), '  "type": "http",', '  "headers": {',
-    '    "Authorization": "Bearer ${HF_TOKEN}"', '  },', '  "excludeTools": [') + $tools + @('  ]', '}')
-  $body = $lines -join ($nl + '    ')
-  $i = Skip-JsonWs $T 0
-  if ($i -ge $T.Length -or $T[$i] -cne [char]'{') { throw 'root is not an object' }
-  $root = $i; $i = Skip-JsonWs $T ($i + 1)
-  $rootEmpty = $i -lt $T.Length -and $T[$i] -ceq [char]'}'
-  $servers = -1
-  while (-not $rootEmpty) {
-    if ($i -ge $T.Length -or $T[$i] -cne [char]'"') { throw 'expected a key' }
-    $k = Skip-JsonString $T $i
-    $key = ConvertFrom-Json -InputObject $T.Substring($i, $k - $i)
-    $i = Skip-JsonWs $T $k
-    if ($i -ge $T.Length -or $T[$i] -cne [char]':') { throw 'expected a colon' }
-    $v = Skip-JsonWs $T ($i + 1)
-    $i = Skip-JsonWs $T (Skip-JsonValue $T $v)
-    if ($key -ceq 'mcpServers') {
-      if ($servers -ge 0) { throw 'duplicate mcpServers' }
-      $servers = $v
-    }
-    if ($i -lt $T.Length -and $T[$i] -ceq [char]',') { $i = Skip-JsonWs $T ($i + 1) }
-    elseif ($i -lt $T.Length -and $T[$i] -ceq [char]'}') { break }
-    else { throw 'expected a comma' }
-  }
-  if ($servers -lt 0) {
-    $at = $root + 1
-    $add = $nl + '  "mcpServers": {' + $nl + '    "huggingface": ' + $body + $nl + '  }' + $(if ($rootEmpty) { $nl } else { ',' })
-  } else {
-    if ($T[$servers] -cne [char]'{') { throw 'mcpServers is not an object' }
-    $at = $servers + 1
-    $empty = $T[(Skip-JsonWs $T $at)] -ceq [char]'}'
-    $add = $nl + '    "huggingface": ' + $body + $(if ($empty) { $nl + '  ' } else { ',' })
-  }
-  return $T.Substring(0, $at) + $add + $T.Substring($at)
-}
-# The access list of an open file, as SDDL. Read from the same handle as the text, it describes the
-# same version of settings.json as the text does, whatever the name points at afterwards.
-function Get-HandleSddl([IO.FileStream]$Stream) {
-  $sec = if ($PSVersionTable.PSEdition -ceq 'Core') { [IO.FileSystemAclExtensions]::GetAccessControl($Stream) } else { $Stream.GetAccessControl() }
-  return $sec.GetSecurityDescriptorSddlForm('Access')
-}
-function New-FileSecurity([string]$Sddl) {
-  $acl = New-Object Security.AccessControl.FileSecurity
-  $acl.SetSecurityDescriptorSddlForm($Sddl)
-  $acl.SetAccessRuleProtection($true, $true)
-  return $acl
-}
-# A new, empty file carrying the access list $Sddl, set at creation: settings text never sits, even
-# briefly, in a file the folder's (possibly wider) access list lets others open. Bash: mkstemp, 0600.
-function New-FileLike([string]$Path, [string]$Sddl) {
-  $acl = New-FileSecurity $Sddl
-  $w = [Security.AccessControl.FileSystemRights]::Write
-  if ($PSVersionTable.PSEdition -ceq 'Core') {
-    return [IO.FileSystemAclExtensions]::Create([IO.FileInfo]$Path, [IO.FileMode]::CreateNew, $w, [IO.FileShare]::None, 4096, [IO.FileOptions]::None, $acl)
-  }
-  return New-Object IO.FileStream($Path, [IO.FileMode]::CreateNew, $w, [IO.FileShare]::None, 4096, [IO.FileOptions]::None, $acl)
-}
-function Set-FileSddl([string]$Path, [string]$Sddl) {
-  # The access list only: writing back every section would include the audit list, which needs a
-  # privilege this run does not hold.
-  $acl = New-Object Security.AccessControl.FileSecurity
-  $acl.SetSecurityDescriptorSddlForm($Sddl, [Security.AccessControl.AccessControlSections]::Access)
-  $acl.SetAccessRuleProtection($true, $true)
-  if ($PSVersionTable.PSEdition -ceq 'Core') { [IO.FileSystemAclExtensions]::SetAccessControl([IO.FileInfo]$Path, $acl) } else { [IO.File]::SetAccessControl($Path, $acl) }
-}
-# A dated name next to settings.json that no file has yet, taken with CreateNew (New-FileLike: a
-# placeholder carrying $Sddl and holding $Marker, this run's random bytes), so two runs never share
-# one and nothing is overwritten. Parity with keep() in bootstrap-ai-clis.sh.
-function Reserve-BackupName([string]$Dir, [string]$Stamp, [string]$Suffix, [string]$Sddl, [byte[]]$Marker) {
-  for ($n = 1; $n -lt 100; $n++) {
-    $name = Join-Path $Dir ("settings.json.$Stamp" + $(if ($n -gt 1) { "-$n" } else { '' }) + $Suffix)
-    try { $fs = New-FileLike $name $Sddl } catch { if (Test-Path -LiteralPath $name) { continue }; throw }
-    try { $fs.Write($Marker, 0, $Marker.Length) } finally { $fs.Dispose() }
-    return $name
-  }
-  throw 'no free backup name'
-}
-# True only when $Path still holds exactly this run's placeholder bytes. A file that cannot be read
-# (another process holds it open) or holds anything else, empty included, is never taken for one.
-function Test-Placeholder([string]$Path, [byte[]]$Marker) {
-  try { return [Convert]::ToBase64String([IO.File]::ReadAllBytes($Path)) -ceq [Convert]::ToBase64String($Marker) } catch { return $false }
-}
-# Moves $Path to a free dated name next to settings.json. Move refuses a name that exists, so nothing
-# is overwritten; if no name is free, or the move fails, the file stays where it is and that path is
-# returned. Parity with keep() in bootstrap-ai-clis.sh.
-function Move-ToKept([string]$Dir, [string]$Stamp, [string]$Suffix, [string]$Path) {
-  for ($n = 1; $n -lt 100; $n++) {
-    $name = Join-Path $Dir ("settings.json.$Stamp" + $(if ($n -gt 1) { "-$n" } else { '' }) + $Suffix)
-    try { [IO.File]::Move($Path, $name); return $name } catch { if (-not (Test-Path -LiteralPath $name)) { return $Path } }
-  }
-  return $Path
-}
-# 0 added; 1 unsupported layout or unwritable; 2 changed during the edit. Never logs settings text.
+# Parity with add_gemini_hf in bootstrap-ai-clis.sh: same bytes, same return codes.
+# 0 created; 4 settings.json exists: left untouched, snippet printed; 1 could not create.
 function Add-GeminiHf {
   $geminiDir = if ($env:GEMINI_CLI_HOME) { $env:GEMINI_CLI_HOME } else { $env:USERPROFILE }
   $dir = Join-Path $geminiDir '.gemini'
   $cfg = Join-Path $dir 'settings.json'
-  $tmp = $null
-  try {
-    $utf8 = New-Object Text.UTF8Encoding($false, $true)
-    $exists = Test-Path -LiteralPath $cfg
-    $original = $null; $bom = [byte[]]@(); $text = "{}`n"
-    if ($exists) {
-      # One open handle gives the text, the attributes and the access list: all of one version of
-      # the file. While it is held (no write or delete sharing) the name cannot be pointed elsewhere.
-      $in = [IO.File]::Open($cfg, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
-      try {
-        # A link would be replaced by a plain file, and an EFS-encrypted file would be staged as
-        # plain text: leave both for manual edit.
-        $attrs = [IO.File]::GetAttributes($cfg)
-        if ($attrs -band ([IO.FileAttributes]::ReparsePoint -bor [IO.FileAttributes]::Encrypted)) { return 1 }
-        $sddl = Get-HandleSddl $in
-        $original = New-Object byte[] $in.Length
-        $got = 0
-        while ($got -lt $original.Length) {
-          $n = $in.Read($original, $got, $original.Length - $got)
-          if ($n -le 0) { throw 'short read' }
-          $got += $n
-        }
-        if ($in.ReadByte() -ne -1) { throw 'file grew' }
-      } finally { $in.Dispose() }
-      if ($original.Length -ge 3 -and $original[0] -eq 0xEF -and $original[1] -eq 0xBB -and $original[2] -eq 0xBF) { $bom = [byte[]]@(0xEF, 0xBB, 0xBF) }
-      $text = Read-Utf8 $original
-    }
-    if (-not (Test-StrictJson $text)) { return 1 }
-    $after = Add-HfToSettingsText $text
-    if (-not (Test-StrictJson $after)) { return 1 }
-    # The splice must parse, carry exactly this entry, and add nothing else.
-    $was = $text | ConvertFrom-Json -ErrorAction Stop
-    $now = $after | ConvertFrom-Json -ErrorAction Stop
-    $want = '{"url":"' + $hfUrl + '","type":"http","headers":{"Authorization":"Bearer ${HF_TOKEN}"},"excludeTools":[' + (($hfDeny | ForEach-Object { '"' + $_ + '"' }) -join ',') + ']}'
-    if ((ConvertTo-Json -InputObject $now.mcpServers.huggingface -Depth 5 -Compress) -cne $want) { return 1 }
-    $wasTop = @($was.PSObject.Properties).Count; $nowTop = @($now.PSObject.Properties).Count
-    $wasServers = if ($null -ne $was.mcpServers) { @($was.mcpServers.PSObject.Properties).Count } else { 0 }
-    if ($nowTop -ne $wasTop + $(if ($null -eq $was.mcpServers) { 1 } else { 0 }) -or @($now.mcpServers.PSObject.Properties).Count -ne $wasServers + 1) { return 1 }
-    New-Item -ItemType Directory -Force -Path $dir | Out-Null
-    $tmp = Join-Path $dir ('.settings.json.' + [guid]::NewGuid().ToString('N') + '.tmp')
-    $bytes = [byte[]]($bom + $utf8.GetBytes($after))
-    if ($exists) {
-      $fs = New-FileLike $tmp $sddl
-      try { $fs.Write($bytes, 0, $bytes.Length) } finally { $fs.Dispose() }
-      # Replace moves the version settings.json holds at that moment to $bak and the new text in,
-      # keeping that version's attributes and access list on the name. A version other than the one
-      # read above is put back, so an edit made meanwhile is never lost. The old version is kept,
-      # not deleted: a process that opened settings.json before the swap and writes later writes
-      # into it. Parity with the exchange in bootstrap-ai-clis.sh.
-      $stamp = [DateTime]::UtcNow.ToString("yyyyMMdd'T'HHmmss'Z'")
-      $marker = [guid]::NewGuid().ToByteArray()
-      $bak = Reserve-BackupName $dir $stamp '.bak' $sddl $marker  # Replace fills this run's own placeholder
-      $replaced = $false
-      try {
-        [IO.File]::Replace($tmp, $cfg, $bak)
-        $replaced = $true; $tmp = $null  # settings.json holds this run's text, $bak the version it displaced
-        # The same version means the same text, access list and (no link, no EFS) attributes.
-        $same = $false
-        try {
-          $same = ([Convert]::ToBase64String([IO.File]::ReadAllBytes($bak)) -ceq [Convert]::ToBase64String($original)) -and
-            ((Get-Acl -LiteralPath $bak).GetSecurityDescriptorSddlForm('Access') -ceq $sddl) -and
-            -not ([IO.File]::GetAttributes($bak) -band ([IO.FileAttributes]::ReparsePoint -bor [IO.FileAttributes]::Encrypted))
-        } catch { }
-        if ($same) { Log "gemini: previous settings kept at $bak"; return 0 }
-        # Two renames, not Replace: a rename goes through while another process holds the file open
-        # (with delete sharing), Replace does not. The file that was settings.json for a moment is
-        # kept too, under the access list of the version its text came from (Replace gave it the
-        # displaced version's): a process that opened it then writes into it.
-        $back = Join-Path $dir ('.settings.json.' + [guid]::NewGuid().ToString('N') + '.tmp')
-        [IO.File]::Move($cfg, $back)
-        [IO.File]::Move($bak, $cfg)
-        $note = ''
-        try { Set-FileSddl $back $sddl } catch { $note = ' (its access list could not be reset to the one it was read with; check it)' }
-        $kept = Move-ToKept $dir $stamp '.rejected' $back
-        Write-Warning "gemini: settings.json changed during the edit and was left as it is; this run's text is kept at $kept$note"
-        return 2
-      } catch {
-        if ($replaced) {
-          # The rollback stopped part way. Nothing is deleted: this run's text is at $cfg or $back,
-          # the version it displaced at $bak.
-          if (-not (Test-Path -LiteralPath $cfg)) { try { [IO.File]::Move($back, $cfg) } catch { } }
-          $where = if (Test-Path -LiteralPath $cfg) { "it holds this run's text" } else { "this run's text is at $back" }
-          Write-Warning "gemini: settings.json changed during the edit and could not be put back; $where, the version it displaced is at $bak"
-          return 2
-        } elseif (Test-Placeholder $bak $marker) {
-          # Replace did not get as far as moving settings.json: $bak is still this run's placeholder.
-          Remove-Item -LiteralPath $bak -Force -ErrorAction SilentlyContinue
-        } elseif (-not (Test-Path -LiteralPath $cfg)) {
-          # Replace moved settings.json to $bak, then failed to move the new text in: put it back.
-          try { [IO.File]::Move($bak, $cfg) } catch { Write-Warning "gemini: settings.json could not be put back; it is at $bak" }
-        }
-        throw
-      }
-    } else {
-      [IO.File]::WriteAllBytes($tmp, $bytes)
-      if (Test-Path -LiteralPath $cfg) { return 2 }
-      # Move refuses an existing name, so a file created meanwhile is never overwritten.
-      try { [IO.File]::Move($tmp, $cfg) } catch { if (Test-Path -LiteralPath $cfg) { return 2 }; throw }
-    }
-    $tmp = $null
-    return 0
-  } catch { return 1 }
-  finally { if ($tmp -and (Test-Path -LiteralPath $tmp)) { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue } }
+  # The entry in the layout of Python's json.dumps(indent=2). Single quotes keep ${HF_TOKEN} literal.
+  $tools = @($hfDeny | ForEach-Object { '    "' + $_ + '"' })
+  for ($k = 0; $k -lt $tools.Count - 1; $k++) { $tools[$k] += ',' }
+  $entry = @('{', ('  "url": "' + $hfUrl + '",'), '  "type": "http",', '  "headers": {',
+    '    "Authorization": "Bearer ${HF_TOKEN}"', '  },', '  "excludeTools": [') + $tools + @('  ]', '}')
+  $doc = (@('{', '  "mcpServers": {', ('    "huggingface": ' + $entry[0])) + @($entry[1..($entry.Count - 1)] | ForEach-Object { '    ' + $_ }) + @('  }', '}')) -join "`n"
+  # GetAttributes sees the name itself, a dangling link included, so nothing is created through one.
+  $taken = { try { [void][IO.File]::GetAttributes($cfg); $true } catch { $false } }
+  if (-not (& $taken)) {
+    try {
+      New-Item -ItemType Directory -Force -Path $dir | Out-Null
+      # Only this user can open the new file, from the moment it exists. CreateNew refuses any
+      # existing name, so a file created meanwhile is never overwritten.
+      $acl = New-Object Security.AccessControl.FileSecurity
+      $acl.SetAccessRuleProtection($true, $false)
+      $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule([Security.Principal.WindowsIdentity]::GetCurrent().User, 'FullControl', 'Allow')))
+      $w = [Security.AccessControl.FileSystemRights]::Write
+      $fs = if ($PSVersionTable.PSEdition -ceq 'Core') {
+        [IO.FileSystemAclExtensions]::Create([IO.FileInfo]$cfg, [IO.FileMode]::CreateNew, $w, [IO.FileShare]::None, 4096, [IO.FileOptions]::None, $acl)
+      } else { New-Object IO.FileStream($cfg, [IO.FileMode]::CreateNew, $w, [IO.FileShare]::None, 4096, [IO.FileOptions]::None, $acl) }
+      try { $bytes = [Text.Encoding]::UTF8.GetBytes($doc + "`n"); $fs.Write($bytes, 0, $bytes.Length); $fs.Flush($true) } finally { $fs.Dispose() }
+      return 0
+    } catch { if (-not (& $taken)) { return 1 } }
+  }
+  Write-Host ("gemini: $cfg already exists and was left unchanged. To finish, add this entry inside its top-level " +
+    '"mcpServers" object (create "mcpServers": { } if it has none), then rerun:')
+  Write-Host ('"huggingface": ' + ($entry -join "`n"))
+  return 4
 }
 # Node 20+ at most once per run; $true when it is on PATH afterwards.
 $NodeOk = $null
@@ -595,9 +391,9 @@ if (-not $SkipHf) {
     if ($state -eq 0) { Log 'gemini: compatible user huggingface MCP server already configured; left as is' }
     elseif ($state -eq 3) {
       $rc = Add-GeminiHf
-      if ($rc -eq 0 -and (Get-HfClientState 'gemini') -eq 0) { Log 'gemini: added the user huggingface MCP server' }
-      elseif ($rc -eq 2) { Add-Failure 'hf-mcp-gemini' 'gemini: user settings changed during the edit; rerun' }
-      else { Add-Failure 'hf-mcp-gemini' 'gemini: could not add the Hugging Face entry (unsupported settings layout or unwritable file); left unchanged' }
+      if ($rc -eq 0 -and (Get-HfClientState 'gemini') -eq 0) { Log 'gemini: created user settings with the huggingface MCP server' }
+      elseif ($rc -eq 4) { Add-Failure 'hf-mcp-gemini' 'gemini: user settings exist; huggingface entry not added (manual step above)' }
+      else { Add-Failure 'hf-mcp-gemini' 'gemini: could not create user settings; nothing changed' }
     } else { Add-Failure 'hf-mcp-gemini' 'gemini: user settings need manual review (commented/unsupported JSON, incompatible URL or missing blocked tools); left unchanged' }
   }
   if ($WithClaudeHfMcp -and -not $SkipClaude -and (Have 'claude')) {
