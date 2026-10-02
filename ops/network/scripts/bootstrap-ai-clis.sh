@@ -521,17 +521,37 @@ def has_macos_acl(path):  # acl_get_file fails with ENOENT when the file has no 
     finally:
         libc.acl_free(acl)
 
+def no_macos_acl(path):
+    # macOS applies an ACL entry whatever the mode says, so a file carrying one is refused.
+    if sys.platform == "darwin" and has_macos_acl(path):
+        raise OSError("extended ACL")
+
+def keep(path, target, suffix):
+    # Gives a file this run must not delete a dated name next to settings.json. link() refuses a
+    # name that exists, so no file is ever overwritten; if no name is free the hidden one stays.
+    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    for n in range(1, 100):
+        name = target.with_name(f"{target.name}.{stamp}" + (f"-{n}" if n > 1 else "") + suffix)
+        try:
+            os.link(path, name)
+        except FileExistsError:
+            continue
+        except OSError:
+            return path
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+        return name
+    return path
+
 def copy_access(src, dst):
-    # Owner, group and access ACL, before dst gets src's mode: the new file is then readable by no
-    # one the old one excluded. Raises if any of them cannot be carried over (the edit is refused).
+    # Owner, group and (Linux) access ACL, before dst gets src's mode: the new file is then readable
+    # by no one the old one excluded. Raises if any of them cannot be carried over (edit refused).
     old, new = os.stat(src), os.stat(dst)
     if (old.st_uid, old.st_gid) != (new.st_uid, new.st_gid):
         os.chown(dst, old.st_uid, old.st_gid)
-    if sys.platform == "darwin":
-        # Also dst: the folder may hand new files an inherited ACL that src does not have.
-        if has_macos_acl(src) or has_macos_acl(dst):
-            raise OSError("extended ACL")
-    elif hasattr(os, "listxattr"):  # Linux keeps a POSIX ACL in the system.posix_acl_access attribute
+    if sys.platform != "darwin" and hasattr(os, "listxattr"):  # Linux: ACL in system.posix_acl_access
         try:
             names = os.listxattr(src)
         except OSError as e:
@@ -569,9 +589,12 @@ try:
     mode = stat.S_IMODE(target.stat().st_mode) if original is not None else 0o600
     new = (bom + after).encode("utf-8")
     target.parent.mkdir(parents=True, exist_ok=True)
+    if original is not None:
+        no_macos_acl(target)
     # mkstemp creates the file 0600 and owned by this user, so no one else can read it meanwhile.
     fd, tmp = tempfile.mkstemp(prefix=".settings.json.", suffix=".tmp", dir=target.parent)
     with os.fdopen(fd, "wb") as f:
+        no_macos_acl(tmp)  # an ACL the folder hands a new file: checked before any text goes in
         f.write(new)
         f.flush()
         os.fsync(f.fileno())
@@ -597,29 +620,14 @@ try:
             same = False
         if not same:
             exchange(displaced, target)
-            if pathlib.Path(displaced).read_bytes() == new:
-                tmp = displaced  # this run's text again: removed below
-            else:
-                print(f"gemini: kept another version of settings.json at {displaced}", file=sys.stderr)
+            # The file that was settings.json for a moment is kept too: a process that opened it
+            # then writes into it.
+            kept = keep(displaced, target, ".rejected")
+            print(f"gemini: settings.json changed during the edit; the displaced file is kept at {kept}", file=sys.stderr)
             sys.exit(2)
         # The old version is kept, not deleted: a process that opened settings.json before the
         # swap and writes later writes into it, and that write is then still on disk.
-        stamp, bak = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()), displaced
-        for n in range(1, 100):
-            name = target.with_name(f"{target.name}.{stamp}" + (f"-{n}" if n > 1 else "") + ".bak")
-            try:
-                os.link(displaced, name)  # refuses an existing name, so no file is overwritten
-            except FileExistsError:
-                continue
-            except OSError:
-                break
-            bak = name
-            try:
-                os.unlink(displaced)
-            except OSError:
-                pass
-            break
-        print(f"gemini: previous settings kept at {bak}")
+        print(f"gemini: previous settings kept at {keep(displaced, target, '.bak')}")
 except Exception:  # never a traceback: it could quote settings text
     sys.exit(1)
 finally:

@@ -9,10 +9,13 @@ import json
 import os
 from pathlib import Path
 import pwd
+import re
+import shutil
 import struct
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 if sys.version_info < (3, 11):
@@ -86,11 +89,12 @@ class BootstrapHf(unittest.TestCase):
         p.write_text(content)
         return p
 
-    def only_backup(self, p):
-        # After an edit of an existing file the folder holds it and exactly one dated backup.
+    def only_backup(self, p, suffix='.bak'):
+        # After an edit of an existing file the folder holds it and exactly one dated backup
+        # ('.bak': the previous settings; '.rejected': this run's text after a rollback).
         rest = sorted(set(p.parent.iterdir()) - {p})
         self.assertEqual(len(rest), 1, rest)
-        self.assertRegex(rest[0].name, r'^' + p.name.replace('.', r'\.') + r'\.\d{8}T\d{6}Z(-\d+)?\.bak$')
+        self.assertRegex(rest[0].name, r'^' + re.escape(p.name) + r'\.\d{8}T\d{6}Z(-\d+)?' + re.escape(suffix) + '$')
         return rest[0]
 
     def run_registration(self, only=None, extra='', **as_user):
@@ -325,13 +329,107 @@ os.replace = once(os.replace)
         target = self.root / '.gemini/settings.json'
         for mode in ['in-place', 'rename']:
             with self.subTest(mode=mode):
+                shutil.rmtree(self.root / '.gemini', ignore_errors=True)
                 self.write('.gemini/settings.json', '{"theme": "light"}\n')
                 self.env.update(PYTHONPATH=str(hook), RACE_TARGET=str(target), RACE_MODE=mode)
                 result = self.run_registration('gemini')
                 self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
                 self.assertIn('changed during the edit', result.stdout)
                 self.assertEqual(target.read_text(), '{"edited": "meanwhile"}\n')
-                self.assertEqual(list((self.root / '.gemini').iterdir()), [target])
+                # This run's text, settings.json for a moment, is kept: see the next test.
+                rejected = json.loads(self.only_backup(target, '.rejected').read_text())
+                self.assertEqual(rejected['theme'], 'light')
+                self.assertIn('huggingface', rejected['mcpServers'])
+
+    def test_write_through_a_handle_opened_during_the_edit_is_kept(self):
+        # settings.json is edited before the swap, so this run is rolled back, and a process opens
+        # it in the moment it holds this run's text, writing only after the bootstrap has finished.
+        # That write lands in the rolled-back file, which must therefore still be on disk.
+        hook = self.root / 'hook'
+        hook.mkdir()
+        (hook / 'sitecustomize.py').write_text(r'''import atexit, ctypes, os
+state = {}
+def late_write():
+    fh = state["fh"]
+    fh.seek(0); fh.truncate(); fh.write(b'{"late": "write"}\n'); fh.close()
+def wrap(fn):
+    def step(*a, **k):
+        t, first = os.environ["RACE_TARGET"], "fh" not in state
+        if first:
+            with open(t, "w") as f:
+                f.write('{"edited": "meanwhile"}\n')
+        r = fn(*a, **k)
+        if first:
+            state["fh"] = open(t, "r+b")  # settings.json holds this run's text right now
+            atexit.register(late_write)
+        return r
+    return step
+class CDLL(ctypes.CDLL):
+    def __getattr__(self, name):
+        fn = super().__getattr__(name)
+        return wrap(fn) if name in ("renameat2", "renamex_np") else fn
+ctypes.CDLL = CDLL
+''')
+        target = self.write('.gemini/settings.json', '{"theme": "light"}\n')
+        self.env.update(PYTHONPATH=str(hook), RACE_TARGET=str(target))
+        result = self.run_registration('gemini')
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn('changed during the edit', result.stdout)
+        self.assertEqual(target.read_text(), '{"edited": "meanwhile"}\n')
+        self.assertEqual(self.only_backup(target, '.rejected').read_text(), '{"late": "write"}\n')
+
+    def test_macos_acl_on_the_temp_file_is_refused_before_any_text_is_written(self):
+        # macOS applies an ACL entry whatever the mode says, so a temp file the folder hands one to
+        # must be refused before settings text goes into it. There is no such API here: the platform
+        # and libc are faked, and each file's size at the moment it is checked is recorded.
+        hook = self.root / 'hook'
+        hook.mkdir()
+        (hook / 'sitecustomize.py').write_text(r'''import ctypes, errno, os, sys
+sys.platform = "darwin"
+def acl_get_file(path, kind):
+    p = path.decode()
+    with open(os.environ["ACL_LOG"], "a") as log:
+        log.write(f"{os.path.basename(p)} {os.path.getsize(p)}\n")
+    if p.endswith(".tmp"):
+        return 1  # an ACL inherited from the folder
+    ctypes.set_errno(errno.ENOENT)
+    return 0
+def acl_get_entry(acl, which, out): return 0
+def acl_free(acl): return 0
+class Libc:
+    def __init__(self):
+        self.acl_get_file, self.acl_get_entry, self.acl_free = acl_get_file, acl_get_entry, acl_free
+ctypes.CDLL = lambda *a, **k: Libc()
+''')
+        p = self.write('.gemini/settings.json', '{"theme": "light"}\n')
+        log = self.root / 'acl.log'
+        self.env.update(PYTHONPATH=str(hook), ACL_LOG=str(log))
+        result = self.run_registration('gemini')
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn('could not add', result.stdout)
+        self.assertEqual(p.read_text(), '{"theme": "light"}\n')
+        self.assertEqual(list((self.root / '.gemini').iterdir()), [p])
+        checks = [line.split() for line in log.read_text().splitlines()]
+        self.assertEqual(len(checks), 2, checks)
+        self.assertEqual(checks[0][0], 'settings.json')
+        self.assertTrue(checks[1][0].startswith('.settings.json.'), checks)
+        self.assertEqual(checks[1][1], '0', checks)  # empty when checked
+
+    def test_backup_name_never_overwrites_an_existing_file(self):
+        p = self.write('.gemini/settings.json', '{"theme": "light"}\n')
+        now = time.time()
+        taken = [p.with_name(p.name + time.strftime('.%Y%m%dT%H%M%SZ.bak', time.gmtime(now + s))) for s in range(4)]
+        for t in taken:
+            t.write_text('MARKER')
+        result = self.run_registration('gemini')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual([t.read_text() for t in taken], ['MARKER'] * 4)
+        rest = set(p.parent.iterdir()) - {p, *taken}
+        self.assertEqual(len(rest), 1, rest)
+        bak = rest.pop()
+        self.assertRegex(bak.name, r'^settings\.json\.\d{8}T\d{6}Z-2\.bak$')
+        self.assertEqual(bak.read_text(), '{"theme": "light"}\n')
+        self.assertIn(f'previous settings kept at {bak}', result.stdout)
 
     def test_gemini_edit_keeps_owner_group_mode_and_acl(self):
         if os.geteuid() != 0:

@@ -336,6 +336,16 @@ function New-FileLike([string]$Path, [string]$Like) {
   }
   return New-Object IO.FileStream($Path, [IO.FileMode]::CreateNew, $w, [IO.FileShare]::None, 4096, [IO.FileOptions]::None, $acl)
 }
+# A dated name next to settings.json that no file has yet, taken with CreateNew (New-FileLike: an
+# empty placeholder carrying $Like's access list), so two runs never share one and nothing is
+# overwritten. Parity with keep() in bootstrap-ai-clis.sh.
+function Reserve-BackupName([string]$Dir, [string]$Stamp, [string]$Suffix, [string]$Like) {
+  for ($n = 1; $n -lt 100; $n++) {
+    $name = Join-Path $Dir ("settings.json.$Stamp" + $(if ($n -gt 1) { "-$n" } else { '' }) + $Suffix)
+    try { (New-FileLike $name $Like).Dispose(); return $name } catch { if (-not (Test-Path -LiteralPath $name)) { throw } }
+  }
+  throw 'no free backup name'
+}
 # 0 added; 1 unsupported layout or unwritable; 2 changed during the edit. Never logs settings text.
 function Add-GeminiHf {
   $geminiDir = if ($env:GEMINI_CLI_HOME) { $env:GEMINI_CLI_HOME } else { $env:USERPROFILE }
@@ -377,8 +387,7 @@ function Add-GeminiHf {
       # lost. The old version is kept, not deleted: a process that opened settings.json before the
       # swap and writes later writes into it. Parity with the exchange in bootstrap-ai-clis.sh.
       $stamp = [DateTime]::UtcNow.ToString("yyyyMMdd'T'HHmmss'Z'")
-      $bak = Join-Path $dir "settings.json.$stamp.bak"
-      for ($n = 2; Test-Path -LiteralPath $bak; $n++) { $bak = Join-Path $dir "settings.json.$stamp-$n.bak" }
+      $bak = Reserve-BackupName $dir $stamp '.bak' $cfg  # Replace fills this run's own placeholder
       try {
         [IO.File]::Replace($tmp, $cfg, $bak)
         $tmp = $null
@@ -387,12 +396,19 @@ function Add-GeminiHf {
         if ($same) { Log "gemini: previous settings kept at $bak"; return 0 }
         $back = Join-Path $dir ('.settings.json.' + [guid]::NewGuid().ToString('N') + '.tmp')
         [IO.File]::Replace($bak, $cfg, $back)
-        if ([Convert]::ToBase64String([IO.File]::ReadAllBytes($back)) -ceq [Convert]::ToBase64String($bytes)) { $tmp = $back }  # this run's text: removed below
-        else { Write-Warning "gemini: kept another version of settings.json at $back" }
+        # The file that was settings.json for a moment is kept too: a process that opened it then
+        # writes into it.
+        $kept = Reserve-BackupName $dir $stamp '.rejected' $cfg
+        [IO.File]::Replace($back, $kept, [NullString]::Value)
+        Write-Warning "gemini: settings.json changed during the edit; the displaced file is kept at $kept"
         return 2
       } catch {
         # Replace can fail after moving settings.json to the backup name: put that version back.
-        if (-not (Test-Path -LiteralPath $cfg) -and (Test-Path -LiteralPath $bak)) { [IO.File]::Move($bak, $cfg) }
+        # Before that point the name holds only this run's empty placeholder, which is removed.
+        if (Test-Path -LiteralPath $bak) {
+          if ((Get-Item -LiteralPath $bak -Force).Length -eq 0) { Remove-Item -LiteralPath $bak -Force -ErrorAction SilentlyContinue }
+          elseif (-not (Test-Path -LiteralPath $cfg)) { [IO.File]::Move($bak, $cfg) }
+        }
         throw
       }
     } else {
