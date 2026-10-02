@@ -8,6 +8,8 @@ Run: python3 ops/network/test/bootstrap-hf.py
 import json
 import os
 from pathlib import Path
+import pwd
+import struct
 import subprocess
 import sys
 import tempfile
@@ -84,7 +86,7 @@ class BootstrapHf(unittest.TestCase):
         p.write_text(content)
         return p
 
-    def run_registration(self, only=None, extra=''):
+    def run_registration(self, only=None, extra='', **as_user):
         prelude = '''set -u
 log() { printf '%s\\n' "$*"; }
 warn() { printf '%s\\n' "$*"; }
@@ -95,7 +97,7 @@ failed() { FAILED="$FAILED $1"; }
         flags = '\n'.join(f'SKIP_{c.upper()}={int(only is not None and c != only)}' for c in ['claude', 'codex', 'gemini'])
         code = prelude + self.functions + '\n' + flags + '\nCLAUDE_HF_MCP=1\n' + extra + '\nregister_hf_mcp\n[ -z "$FAILED" ] || { echo "INSTALL INCOMPLETE:$FAILED"; exit 1; }\necho "INSTALL OK"\n'
         return subprocess.run(['bash', '-c', code], cwd=self.root / 'project', env=self.env,
-                              text=True, capture_output=True, timeout=15)
+                              text=True, capture_output=True, timeout=15, **as_user)
 
     def test_new_user_registration_and_all_three_repeat_without_rewrite(self):
         first = self.run_registration()
@@ -283,6 +285,79 @@ failed() { FAILED="$FAILED $1"; }
         self.assertIn('changed during the edit', result.stdout)
         self.assertEqual(target.read_text(), '{"created": "meanwhile"}\n')
         self.assertEqual(list((self.root / '.gemini').iterdir()), [target])
+
+    def test_existing_settings_edited_meanwhile_is_kept(self):
+        # Another process edits settings.json right before the bootstrap's swap, after its read:
+        # in place (as Gemini writes it) or by renaming a new file over it. Either edit survives.
+        hook = self.root / 'hook'
+        hook.mkdir()
+        (hook / 'sitecustomize.py').write_text(r'''import ctypes, os
+done = []
+def once(fn):
+    def step(*a, **k):
+        if not done:
+            done.append(1)
+            t = os.environ["RACE_TARGET"]
+            with open(t + ".new" if os.environ["RACE_MODE"] == "rename" else t, "w") as f:
+                f.write('{"edited": "meanwhile"}\n')
+            if os.environ["RACE_MODE"] == "rename":
+                os.rename(t + ".new", t)
+        return fn(*a, **k)
+    return step
+class CDLL(ctypes.CDLL):
+    def __getattr__(self, name):
+        fn = super().__getattr__(name)
+        return once(fn) if name in ("renameat2", "renamex_np") else fn
+ctypes.CDLL = CDLL
+os.replace = once(os.replace)
+''')
+        target = self.root / '.gemini/settings.json'
+        for mode in ['in-place', 'rename']:
+            with self.subTest(mode=mode):
+                self.write('.gemini/settings.json', '{"theme": "light"}\n')
+                self.env.update(PYTHONPATH=str(hook), RACE_TARGET=str(target), RACE_MODE=mode)
+                result = self.run_registration('gemini')
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn('changed during the edit', result.stdout)
+                self.assertEqual(target.read_text(), '{"edited": "meanwhile"}\n')
+                self.assertEqual(list((self.root / '.gemini').iterdir()), [target])
+
+    def test_gemini_edit_keeps_owner_group_mode_and_acl(self):
+        if os.geteuid() != 0:
+            self.skipTest('needs root to give the settings file another owner and group')
+        p = self.write('.gemini/settings.json', '{"theme": "light"}\n')
+        os.chown(p, 1, 2)
+        # user::rw- group::--- group:3:r-- mask::r-- other::---, so mode 0640 without the owning group.
+        acl = struct.pack('<I', 2) + b''.join(struct.pack('<HHI', *e) for e in [
+            (0x01, 6, 0xFFFFFFFF), (0x04, 0, 0xFFFFFFFF), (0x08, 4, 3), (0x10, 4, 0xFFFFFFFF), (0x20, 0, 0xFFFFFFFF)])
+        try:
+            os.setxattr(p, 'system.posix_acl_access', acl)
+        except OSError:
+            self.skipTest('filesystem without POSIX ACLs')
+        before = os.stat(p)
+        result = self.run_registration('gemini')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        after = os.stat(p)
+        self.assertEqual((after.st_uid, after.st_gid, after.st_mode & 0o7777), (1, 2, before.st_mode & 0o7777))
+        self.assertEqual(os.getxattr(p, 'system.posix_acl_access'), acl)
+        self.assertIn('huggingface', json.loads(p.read_text())['mcpServers'])
+        self.assertEqual(list((self.root / '.gemini').iterdir()), [p])
+
+    def test_gemini_edit_refused_when_group_cannot_be_kept(self):
+        if os.geteuid() != 0:
+            self.skipTest('needs root to run the bootstrap as another user')
+        nobody = pwd.getpwnam('nobody')
+        p = self.write('.gemini/settings.json', '{"theme": "light"}\n')
+        p.chmod(0o640)
+        for path in [self.root, *self.root.rglob('*')]:
+            os.chown(path, nobody.pw_uid, nobody.pw_gid)
+        os.chown(p, nobody.pw_uid, 0)  # nobody cannot give the new file group root
+        result = self.run_registration('gemini', user=nobody.pw_uid, group=nobody.pw_gid, extra_groups=[])
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn('could not add', result.stdout)
+        self.assertEqual(p.read_text(), '{"theme": "light"}\n')
+        self.assertEqual((p.stat().st_gid, p.stat().st_mode & 0o777), (0, 0o640))
+        self.assertEqual(list((self.root / '.gemini').iterdir()), [p])
 
     def test_gemini_symlinked_settings_stay_a_symlink(self):
         real = self.write('dotfiles/gemini-settings.json', '{"theme": "light"}\n')

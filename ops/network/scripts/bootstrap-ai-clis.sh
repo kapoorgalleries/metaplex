@@ -392,7 +392,7 @@ add_gemini_hf() {  # 0 added; 1 unsupported layout or unwritable; 2 changed duri
   py="$(json_python)" || return 1
   # shellcheck disable=SC2086
   "$py" - "$cfg" "$HF_MCP_URL" $HF_DENY <<'PYJSON'
-import json, os, pathlib, stat, sys, tempfile
+import errno, json, os, pathlib, stat, sys, tempfile
 # Every existing byte is kept, so nothing already in the file is re-serialised: the entry is
 # spliced in as text, as the first member of the top-level mcpServers object (created when
 # absent). Parity with Add-GeminiHf in bootstrap-ai-clis.ps1, which produces the same bytes.
@@ -489,6 +489,57 @@ def insert(t):
         add = nl + '    "huggingface": ' + body + (nl + "  " if t[ws(t, at)] == "}" else ",")
     return t[:at] + add + t[at:]
 
+def exchange(a, b):
+    # Swaps two names in one atomic step: renameat2(RENAME_EXCHANGE) on Linux, renamex_np(RENAME_SWAP)
+    # on macOS. Raises where the system or filesystem has neither; the edit is then refused.
+    import ctypes
+    libc = ctypes.CDLL(None, use_errno=True)
+    a, b = os.fsencode(a), os.fsencode(b)
+    if sys.platform == "darwin":
+        rc = libc.renamex_np(a, b, ctypes.c_uint(2))
+    else:
+        rc = libc.renameat2(-100, a, -100, b, ctypes.c_uint(2))  # AT_FDCWD
+    if rc != 0:
+        err = ctypes.get_errno()
+        raise OSError(err, os.strerror(err))
+
+def has_macos_acl(path):  # acl_get_file fails with ENOENT when the file has no extended ACL
+    import ctypes
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.acl_get_file.restype = ctypes.c_void_p
+    libc.acl_get_file.argtypes = [ctypes.c_char_p, ctypes.c_int]
+    libc.acl_get_entry.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.POINTER(ctypes.c_void_p)]
+    libc.acl_free.argtypes = [ctypes.c_void_p]
+    acl = libc.acl_get_file(os.fsencode(path), 0x100)  # ACL_TYPE_EXTENDED
+    if not acl:
+        err = ctypes.get_errno()
+        if err == errno.ENOENT:
+            return False
+        raise OSError(err, os.strerror(err))
+    try:
+        return libc.acl_get_entry(acl, 0, ctypes.byref(ctypes.c_void_p())) == 0  # ACL_FIRST_ENTRY
+    finally:
+        libc.acl_free(acl)
+
+def copy_access(src, dst):
+    # Owner, group and access ACL, before dst gets src's mode: the new file is then readable by no
+    # one the old one excluded. Raises if any of them cannot be carried over (the edit is refused).
+    old, new = os.stat(src), os.stat(dst)
+    if (old.st_uid, old.st_gid) != (new.st_uid, new.st_gid):
+        os.chown(dst, old.st_uid, old.st_gid)
+    if sys.platform == "darwin":
+        if has_macos_acl(src):
+            raise OSError("extended ACL")
+    elif hasattr(os, "listxattr"):  # Linux keeps a POSIX ACL in the system.posix_acl_access attribute
+        try:
+            names = os.listxattr(src)
+        except OSError as e:
+            if e.errno not in (errno.ENOTSUP, errno.EOPNOTSUPP):
+                raise
+            names = []
+        if "system.posix_acl_access" in names:
+            os.setxattr(dst, "system.posix_acl_access", os.getxattr(src, "system.posix_acl_access"))
+
 tmp = None
 try:
     target = pathlib.Path(os.path.realpath(cfg))
@@ -508,12 +559,16 @@ try:
     if strict(after) != expected:
         sys.exit(1)
     mode = stat.S_IMODE(target.stat().st_mode) if original is not None else 0o600
+    new = (bom + after).encode("utf-8")
     target.parent.mkdir(parents=True, exist_ok=True)
+    # mkstemp creates the file 0600 and owned by this user, so no one else can read it meanwhile.
     fd, tmp = tempfile.mkstemp(prefix=".settings.json.", suffix=".tmp", dir=target.parent)
     with os.fdopen(fd, "wb") as f:
-        f.write((bom + after).encode("utf-8"))
+        f.write(new)
         f.flush()
         os.fsync(f.fileno())
+    if original is not None:
+        copy_access(target, tmp)
     os.chmod(tmp, mode)
     if original is None:
         # link() refuses a name that exists, as File.Move does in the .ps1, so a settings file
@@ -523,10 +578,24 @@ try:
         except FileExistsError:
             sys.exit(2)
     else:
-        if (target.read_bytes() if target.exists() else None) != original:
+        # As File.Replace with a backup in the .ps1: the swap keeps whatever version settings.json
+        # had at that moment, and that version is deleted only if it is exactly the one read above.
+        # Any other is put back, so an edit made meanwhile is never lost.
+        exchange(tmp, target)
+        displaced, tmp = tmp, None
+        try:
+            same = stat.S_ISREG(os.lstat(displaced).st_mode) and pathlib.Path(displaced).read_bytes() == original
+        except OSError:
+            same = False
+        if same:
+            os.unlink(displaced)
+        else:
+            exchange(displaced, target)
+            if pathlib.Path(displaced).read_bytes() == new:
+                tmp = displaced  # this run's text again: removed below
+            else:
+                print(f"gemini: kept another version of settings.json at {displaced}", file=sys.stderr)
             sys.exit(2)
-        os.replace(tmp, target)
-        tmp = None
 except Exception:  # never a traceback: it could quote settings text
     sys.exit(1)
 finally:

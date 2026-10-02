@@ -370,9 +370,26 @@ function Add-GeminiHf {
     if ($exists) {
       $fs = New-FileLike $tmp $cfg
       try { $fs.Write($bytes, 0, $bytes.Length) } finally { $fs.Dispose() }
-      if (-not (Test-Path -LiteralPath $cfg) -or [Convert]::ToBase64String([IO.File]::ReadAllBytes($cfg)) -cne [Convert]::ToBase64String($original)) { return 2 }
-      # Keeps the file's ACL and attributes. [NullString]: PowerShell would pass `$null as "" (an illegal path).
-      [IO.File]::Replace($tmp, $cfg, [NullString]::Value)
+      # Replace keeps settings.json's ACL and attributes, and moves the version it displaces to $bak.
+      # That version is deleted only if it is exactly the one read above; any other is put back, so
+      # an edit made meanwhile is never lost. Parity with the exchange in bootstrap-ai-clis.sh.
+      $bak = Join-Path $dir ('.settings.json.' + [guid]::NewGuid().ToString('N') + '.tmp')
+      try {
+        [IO.File]::Replace($tmp, $cfg, $bak)
+        $tmp = $null
+        $same = $false
+        try { $same = [Convert]::ToBase64String([IO.File]::ReadAllBytes($bak)) -ceq [Convert]::ToBase64String($original) } catch { }
+        if ($same) { Remove-Item -LiteralPath $bak -Force; return 0 }
+        $back = Join-Path $dir ('.settings.json.' + [guid]::NewGuid().ToString('N') + '.tmp')
+        [IO.File]::Replace($bak, $cfg, $back)
+        if ([Convert]::ToBase64String([IO.File]::ReadAllBytes($back)) -ceq [Convert]::ToBase64String($bytes)) { $tmp = $back }  # this run's text: removed below
+        else { Write-Warning "gemini: kept another version of settings.json at $back" }
+        return 2
+      } catch {
+        # Replace can fail after moving settings.json to the backup name: put that version back.
+        if (-not (Test-Path -LiteralPath $cfg) -and (Test-Path -LiteralPath $bak)) { [IO.File]::Move($bak, $cfg) }
+        throw
+      }
     } else {
       [IO.File]::WriteAllBytes($tmp, $bytes)
       if (Test-Path -LiteralPath $cfg) { return 2 }
