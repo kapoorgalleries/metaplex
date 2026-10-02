@@ -412,6 +412,10 @@ os.replace = once(os.replace)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertTrue(link.is_symlink())
         self.assertIn('huggingface', json.loads(real.read_text())['mcpServers'])
+        # The displaced file stays next to the link's target, under that file's name; the link's
+        # folder gets nothing (docs/hugging-face.md, "Gemini CLI (user level)").
+        self.assertEqual(list(link.parent.iterdir()), [link])
+        self.assertEqual(self.only_backup(real).read_text(), '{"theme": "light"}\n')
         link.unlink()
         link.symlink_to(self.root / 'missing.json')
         result = self.run_registration('gemini')
