@@ -113,3 +113,39 @@ An ask rule prompts in every permission mode, including `bypassPermissions`
 ([docs](https://code.claude.com/docs/en/permission-modes)). The file declares
 no `extraKnownMarketplaces`: HF's marketplace holds only the `hf-cli` plugin,
 which would duplicate the installer's skill.
+
+## Allowlist (`.claude/settings.json`)
+
+`permissions.allow` holds one rule: the exact form `Bash(ldd --version)`
+(#23). `ldd <file>` can execute the file, so no wider form is allowed.
+
+No MCP tool is allowed, not even a read. An MCP allow rule matches the tool
+name, never its arguments, so any tool that takes a free-form string (an
+owner, a repo, a query, a URL) could carry locally read data to a remote
+server without a prompt if injected text drove the call. An allow rule also
+exempts the call from auto mode's classifier, the check meant to catch
+exactly that. Earlier rules for GitHub, Supabase, Gmail and Opera reads were
+removed for this reason. Personal read allowances belong in your uncommitted
+`.claude/settings.local.json`, not in this shared file.
+
+`permissions.ask` also holds `mcp__Gmail__send_message`, `reply`, `forward`
+and `mcp__Opera__go-to-page`: the calls that would complete an exfiltration.
+An ask rule prompts in every mode.
+
+Keep a single `allow` key. JSON parsers keep only the last of a duplicated
+key, so a second `allow` block silently discards the first.
+
+`git ls-tree` is not allowed even though it looks read-only. In a partial
+clone it fetches missing objects from the promisor remote on demand. With an
+`ext::` remote allowed, that fetch runs an external command.
+
+What happens to everything else depends on the permission mode. In the
+default mode it prompts, including every write (GitHub comments, PR edits and
+merges, Supabase `deploy_edge_function`) and `execute_sql`, which runs
+arbitrary SQL that only the `read_only=true` URL above stops from writing.
+In `bypassPermissions` only the `ask` rules in this file still prompt, so
+those writes run unprompted there; `dontAsk` refuses anything not allowed
+instead of asking. A write that must always need a person belongs in `ask`,
+not in this paragraph.
+Claude Code applies deny, then ask, then allow, so nothing here overrides the
+Hugging Face ask and deny rules above.

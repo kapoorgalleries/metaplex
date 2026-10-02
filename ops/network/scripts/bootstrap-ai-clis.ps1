@@ -111,7 +111,7 @@ function Npm-Global($pkg) { return ((Invoke-Native 'npm' @('install', '-g', '--n
 function Invoke-Installer([string]$Url, [string]$Flags = '') {
   # Only the download is made terminating: a vendor installer that relies on the default 'Continue'
   # (Windows PowerShell 5.1 turns redirected native stderr into error records) keeps working.
-  $cmd = "if ([int][Net.ServicePointManager]::SecurityProtocol -ne 0) { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 }; try { `$s = Invoke-RestMethod -Uri '$Url' -ErrorAction Stop } catch { exit 1 }; "
+  $cmd = "if ([int][Net.ServicePointManager]::SecurityProtocol -ne 0) { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 }; try { `$s = Invoke-RestMethod -Uri '$Url' -ErrorAction Stop } catch { [Console]::Error.WriteLine(`$_.Exception.Message); exit 1 }; "
   if ($Flags) { $cmd += "& ([scriptblock]::Create(`$s)) $Flags" }
   else { $cmd += "Invoke-Expression `$s" }
   return (Invoke-Native $PsExe @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', $cmd))
@@ -140,7 +140,11 @@ function Test-Python {
   return $false
 }
 # A child process reads a candidate user config in isolation, without this checkout's MCP entry.
-# The parent's CODEX_HOME and working directory are never modified. No OAuth/server calls.
+# The parent's CODEX_HOME and working directory are never modified. `codex mcp list --json`
+# performs bounded OAuth-discovery requests for each HTTP server in that config (failures
+# tolerated) and consults Codex's OAuth token store; `codex mcp get <name> --json` only reads and
+# serialises that one entry (Codex 0.156.1, mcp_cmd.rs run_list vs run_get). Neither starts a
+# server or triggers a login.
 function Invoke-CodexConfig([string]$Dir, [string]$Action) {
   $quoted = $Dir.Replace("'", "''")
   $cmd = "`$ErrorActionPreference = 'Stop'; `$env:CODEX_HOME = '$quoted'; Set-Location -LiteralPath '$quoted'; try { `$ErrorActionPreference = 'Continue'; `$global:LASTEXITCODE = 1; & codex mcp $Action --json 2>`$null; exit `$LASTEXITCODE } catch { exit 1 }"
@@ -183,7 +187,20 @@ function Register-CodexHf {
     [IO.File]::AppendAllText($cfg, $addition) # Preserve existing bytes, permissions and user entries.
     Log 'codex: added the user huggingface MCP server'
   } catch { Add-Failure 'hf-mcp-codex' "codex: $($_.Exception.Message)" }
-  finally { if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force } }
+  finally {
+    try { if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction Stop } }
+    catch { Write-Warning "codex: could not remove the staging directory $stage" }
+  }
+}
+# claude mcp get answers from the merged configuration: exit 1 when the server is absent, otherwise a
+# text block whose Scope, Type and URL lines identify a compatible user-scope entry. It also probes the
+# server, so it may take a moment offline; the result is decided by the config lines alone.
+function Get-ClaudeHfStateFromCli {
+  $r = Invoke-Captured 'claude' @('mcp', 'get', 'huggingface')
+  if ($r.Code -ne 0) { return 3 }
+  $urlPattern = '(?m)^\s*URL:\s*' + [regex]::Escape($hfUrl) + '(\?login)?\s*$'
+  if ($r.Out -match '(?m)^\s*Scope:\s*User config' -and $r.Out -match '(?m)^\s*Type:\s*http\s*$' -and $r.Out -match $urlPattern) { return 0 }
+  return 1
 }
 # 0 compatible, 3 absent, 1 unsupported/incompatible. Use properties, not a textual key match.
 # PS 5.1 ConvertFrom-Json does not accept comments: preserve those settings for manual review.
@@ -214,7 +231,13 @@ function Get-HfClientState([string]$Client) {
       foreach ($tool in $hfDeny) { if (@($entry.excludeTools) -cnotcontains $tool) { return 1 } }
     }
     return 0
-  } catch { return 1 }
+  } catch {
+    if ($Client -ne 'claude') { return 1 }
+    # Claude Code's user store also carries per-project history, and ConvertFrom-Json rejects any
+    # object whose keys differ only in case (two spellings of one project path). Ask the CLI about
+    # the single entry instead of parsing the whole file.
+    return (Get-ClaudeHfStateFromCli)
+  }
 }
 # Node 20+ at most once per run; $true when it is on PATH afterwards.
 $NodeOk = $null
