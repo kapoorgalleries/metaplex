@@ -2,7 +2,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { z } from 'zod';
-import { REMOTE_SCRIPTS, SCRIPTS_DIR } from '../constants.js';
+import { IS_WINDOWS, REMOTE_SCRIPTS, SCRIPTS_DIR } from '../constants.js';
 import { getJob, listJobs, run, startJob, stripAnsi, tailFile } from '../exec.js';
 import { isComputer, listHosts, selectHosts, sshSkipReason, type HostFilter } from '../inventory.js';
 import { clipStream, errorMessage, fail, mdTable, ok, parseMdTable } from '../result.js';
@@ -37,8 +37,11 @@ export function refusedArgs(args: string[], filters: string[]): string {
 }
 
 /** The table file verify.sh names on its "saved:" line (out/verify-<timestamp>-<pid>.md; a Windows profile path has spaces). */
-export function verifySavedFile(text: string): string | undefined {
-  return /saved:\s+(.+?\.md)\s*$/m.exec(text)?.[1];
+export function verifySavedFile(text: string, windows = IS_WINDOWS): string | undefined {
+  const p = /saved:\s+(.+?\.md)\s*$/m.exec(text)?.[1];
+  // Git Bash prints /c/Users/...; Node on Windows needs C:/Users/...
+  const m = p && windows ? /^\/([a-zA-Z])\/(.*)$/.exec(p) : null;
+  return m ? `${(m[1] ?? '').toUpperCase()}:/${m[2] ?? ''}` : p;
 }
 
 function filterArgs(p: HostFilter): string[] {

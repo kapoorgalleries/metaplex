@@ -368,6 +368,8 @@ read it with Read-Host -AsSecureString, and it lasts for that window only.
            $env:NO_BROWSER = 'true'  first and paste the code back within 5 minutes.
            Google Workspace account (not personal Gmail): first
            $env:GOOGLE_CLOUD_PROJECT = '<project-id>'; personal Gmail must leave it unset.
+           "no longer supported for Gemini Code Assist for individuals": that account's free tier is
+           closed to Gemini CLI; the way in (API key, paid Workspace project, or Antigravity) is Sanjay's call.
            API key instead (this window only; https://aistudio.google.com/app/apikey):
            $env:GEMINI_API_KEY = [Net.NetworkCredential]::new('', (Read-Host 'key' -AsSecureString)).Password
   hf       run `hf auth login` (over SSH: ssh -t). "Log in with your browser" prints a URL and a code:
