@@ -6,6 +6,7 @@ This repo is Kapoor Galleries' storefront for Indian, Himalayan and South Asian 
 - `.claude/README.md` explains the Supabase MCP server. It points at live production guest data and must stay read-only.
 - `docs/hugging-face.md` covers the Hugging Face setup in full.
 - Never stop, interrupt, or archive the provenance pipeline (the "Art provenance pipeline integration" session or anything it runs). Only Sanjay can change this.
+- To ask Gemini, use `ops/gemini/gemini.py` (setup and rules in `ops/gemini/README.md`). It reads `GEMINI_API_KEY` from the environment; free tier only, and no client data, prices, inventory, photographs or transcripts go to it.
 
 ## Hugging Face tooling available here
 
