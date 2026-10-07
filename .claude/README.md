@@ -27,6 +27,48 @@ Removing `read_only=true` or adding back `functions` / `branching` gives an agen
 write access to real guest data. If you need that, prefer pointing at a
 development project or a Supabase branch instead.
 
+## Permissions and the settings check
+
+`settings.json` is the committed permission policy for every Claude Code
+session in this repo. What to know about it:
+
+**What is allowed without a prompt.** Only `Bash(ldd --version)`, as an exact
+command. Nothing else is in `permissions.allow`. An allow rule matches a tool
+by name alone, so a tool with a free-form string argument (an `owner`, a
+`query`, a `threadId`) would become a channel that can carry anything the
+model has read to a remote server with no prompt. The reasoning and the
+rejected candidates are in PR #23.
+
+**GitHub reads prompt.** `mcp__github__pull_request_read` and the other
+GitHub read tools are not in `allow`, for the reason above. A `PreToolUse`
+hook that pins `owner`/`repo` to `kapoorgalleries/metaplex` and accepts only
+typed arguments could make the two tools with no free-form fields
+(`pull_request_read`, `get_job_logs`) safe to auto-allow. That hook is not
+committed: a script that grants Claude Code permissions should be written and
+reviewed by the owner, not by the agent it governs. If one is added, register
+it under `hooks` with a `$CLAUDE_PROJECT_DIR/.claude/hooks/...` command, and
+the check below will confirm the file exists and parses.
+
+**Sends always ask.** `permissions.ask` names the Gmail send, reply and
+forward tools and Opera's `go-to-page`, along with the Hugging Face commands
+that spend or publish. An ask rule prompts in every permission mode,
+including `bypassPermissions`.
+
+**Personal allowances go in `settings.local.json`.** That file is ignored by
+git (see `.gitignore`) and applies only to this repo on your machine. Put
+your own read allowances there, not in the committed file, which is public
+and binds every clone.
+
+**The check.** `scripts/check-claude-settings.js` fails on a duplicate JSON
+key at any depth, which is how #21's rules were silently lost, and checks the
+permission lists and every hook command's script. Its parser has its own
+tests in `scripts/test-check-claude-settings.js`. CI runs both from
+`.github/workflows/claude-settings.yml` whenever `.claude/` changes. Locally:
+
+```sh
+node scripts/test-check-claude-settings.js && node scripts/check-claude-settings.js
+```
+
 ## Skills
 
 `.claude/skills/` holds relative symlinks into `.agents/skills/`, which is the
