@@ -5,9 +5,10 @@
 // file. JSON allows that, JSON.parse keeps the last one silently, and so
 // #21's rules were never in effect (PR #23). This script fails on a duplicate
 // key at any depth, then checks the parts of the file this repository relies
-// on against the Claude Code reference: permission keys and lists, hook event
-// names, hook fields, and that every command hook is in exec form with its
-// scripts under .claude/hooks/, present and parsing.
+// on against the Claude Code reference: permission keys, values and lists,
+// hook event names and fields, and that every command hook is in exec form
+// with its scripts under .claude/hooks/, present, executable where it must
+// be, and parsing.
 //
 // Run: node scripts/check-claude-settings.js
 // CI:  .github/workflows/claude-settings.yml
@@ -29,13 +30,17 @@ const MAX_DEPTH = 256;
 const HOOKS_DIR = '.claude/hooks/';
 
 // Documented names, from code.claude.com/docs/en/settings-reference and
-// code.claude.com/docs/en/hooks. A key outside these lists is most likely a
-// typo that Claude Code would ignore silently, which is the class of failure
-// this script exists to catch. When the docs add a name, add it here.
+// code.claude.com/docs/en/hooks. An entry outside these lists is most likely
+// a typo: Claude Code skips it, with a Settings Warning at the start of an
+// interactive session and nothing at all in a -p or CI run, which is the
+// class of failure this script exists to catch. When the docs add a name,
+// add it here.
+const SKIPPED = 'Claude Code skips it (a Settings Warning in an interactive session, nothing in a -p or CI run)';
 const PERMISSION_KEYS = [
   'allow', 'ask', 'deny', 'additionalDirectories', 'defaultMode',
-  'blockReadsOutsideWorkingDirectories', 'disableBypassPermissionsMode',
+  'blockReadsOutsideWorkingDirectories', 'disableBypassPermissionsMode', 'disableAutoMode',
 ];
+const PERMISSION_MODES = ['default', 'acceptEdits', 'plan', 'auto', 'dontAsk', 'bypassPermissions', 'manual'];
 const HOOK_EVENTS = [
   'SessionStart', 'Setup', 'InstructionsLoaded', 'UserPromptSubmit', 'UserPromptExpansion',
   'MessageDisplay', 'PreToolUse', 'PermissionRequest', 'PostToolUse', 'PostToolUseFailure',
@@ -45,7 +50,15 @@ const HOOK_EVENTS = [
   'PreCompact', 'PostCompact', 'PreModelSwitch', 'PostModelSwitch', 'SessionEnd',
   'Elicitation', 'ElicitationResult',
 ];
+// "if" is evaluated only on these events; elsewhere a hook with "if" never runs.
+const TOOL_EVENTS = ['PreToolUse', 'PostToolUse', 'PostToolUseFailure', 'PermissionRequest', 'PermissionDenied'];
+// A matcher on these events is ignored.
+const NO_MATCHER_EVENTS = [
+  'CwdChanged', 'UserPromptSubmit', 'PostToolBatch', 'Stop', 'TeammateIdle', 'TaskCreated',
+  'TaskCompleted', 'WorktreeCreate', 'WorktreeRemove', 'MessageDisplay',
+];
 const HOOK_TYPES = ['command', 'http', 'mcp_tool', 'prompt', 'agent'];
+// "once" is documented but honoured only in skill frontmatter; see checkHook.
 const HOOK_COMMON_FIELDS = ['type', 'if', 'timeout', 'statusMessage', 'once'];
 const HOOK_TYPE_FIELDS = {
   command: ['command', 'args', 'async', 'asyncRewake', 'shell'],
@@ -55,7 +68,9 @@ const HOOK_TYPE_FIELDS = {
   agent: ['prompt', 'model'],
 };
 const HOOK_REQUIRED_STRINGS = { http: ['url'], mcp_tool: ['server', 'tool'], prompt: ['prompt'], agent: ['prompt'] };
-const PERMISSION_MODES = ['default', 'acceptEdits', 'plan', 'auto', 'dontAsk', 'bypassPermissions', 'manual'];
+// What this file holds at the top level. Anything within two edits of one
+// of these names is a misspelling that would silently drop the whole block.
+const TOP_LEVEL_KEYS_HERE = ['permissions', 'hooks'];
 
 // A small JSON parser that rejects duplicate keys. Objects are returned as
 // prototype-less so a key such as "__proto__" cannot shadow anything.
@@ -143,10 +158,10 @@ function parseStrict(text) {
       ws();
       if (text[i] !== '"') err('expected a string key');
       const key = string();
+      if (hasOwn(out, key)) err(`duplicate key "${key}"`);
       ws();
       if (text[i] !== ':') err('expected : after key');
       i++;
-      if (hasOwn(out, key)) err(`duplicate key "${key}"`);
       out[key] = value();
       ws();
       if (text[i] === ',') {
@@ -169,11 +184,31 @@ function isPlainObject(v) {
 }
 const isNonEmptyString = (v) => typeof v === 'string' && v.trim() !== '';
 
+function editDistance(a, b) {
+  const d = Array.from({ length: a.length + 1 }, (_, i) => [i, ...Array(b.length).fill(0)]);
+  for (let j = 1; j <= b.length; j++) d[0][j] = j;
+  for (let i = 1; i <= a.length; i++) {
+    for (let j = 1; j <= b.length; j++) {
+      d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    }
+  }
+  return d[a.length][b.length];
+}
+
 function checkUnknownKeys(obj, known, at, what, fail) {
   for (const key of Object.keys(obj)) {
     if (!known.includes(key)) {
-      fail(`${at}.${key} is not ${what} in the Claude Code reference; a typo here is ignored silently (if the docs added it, add it to the list in scripts/check-claude-settings.js)`);
+      fail(`${at}.${key} is not ${what} in the Claude Code reference; ${SKIPPED}. If the docs added it, add it to the list in scripts/check-claude-settings.js`);
     }
+  }
+}
+
+function checkTopLevel(settings, fail) {
+  if (!hasOwn(settings, 'permissions')) fail('"permissions" is missing; this file exists to hold the permission policy');
+  for (const key of Object.keys(settings)) {
+    if (TOP_LEVEL_KEYS_HERE.includes(key)) continue;
+    const near = TOP_LEVEL_KEYS_HERE.find((k) => editDistance(key.toLowerCase(), k) <= 2);
+    if (near) fail(`"${key}" looks like a misspelling of "${near}"; Claude Code does not read it, so nothing in it applies`);
   }
 }
 
@@ -187,8 +222,8 @@ function checkPermissions(permissions, fail) {
   if (hasOwn(permissions, 'blockReadsOutsideWorkingDirectories') && typeof permissions.blockReadsOutsideWorkingDirectories !== 'boolean') {
     fail('permissions.blockReadsOutsideWorkingDirectories must be true or false');
   }
-  if (hasOwn(permissions, 'disableBypassPermissionsMode') && permissions.disableBypassPermissionsMode !== 'disable') {
-    fail('permissions.disableBypassPermissionsMode must be the string "disable"');
+  for (const k of ['disableBypassPermissionsMode', 'disableAutoMode']) {
+    if (hasOwn(permissions, k) && permissions[k] !== 'disable') fail(`permissions.${k} must be the string "disable"`);
   }
   if (hasOwn(permissions, 'additionalDirectories')) {
     const dirs = permissions.additionalDirectories;
@@ -208,6 +243,7 @@ function checkPermissions(permissions, fail) {
         return fail(`permissions.${list}[${n}] must be a non-empty string`);
       }
       if (rule !== rule.trim()) fail(`permissions.${list}[${n}] has leading or trailing whitespace: ${JSON.stringify(rule)}`);
+      if (/^mcp__[^(]*\(/.test(rule)) fail(`permissions.${list}[${n}] is an mcp__ rule with parentheses; Claude Code skips such rules when loading a settings file: ${JSON.stringify(rule)}`);
       if (seen.has(rule)) fail(`permissions.${list} lists ${JSON.stringify(rule)} twice`);
       seen.add(rule);
       if (where.has(rule) && where.get(rule) !== list) {
@@ -221,7 +257,8 @@ function checkPermissions(permissions, fail) {
 // Matcher evaluation per the hooks reference: "*", "" or omitted match all;
 // only letters, digits, _, -, space, comma and | is an exact string or list;
 // anything else is a JavaScript regular expression, which must compile.
-function checkMatcher(matcher, at, fail) {
+function checkMatcher(matcher, event, at, fail) {
+  if (NO_MATCHER_EVENTS.includes(event)) fail(`${at}.matcher has no effect: ${event} has no matcher support`);
   if (typeof matcher !== 'string') return fail(`${at}.matcher must be a string`);
   if (matcher === '*' || /^[A-Za-z0-9_\- ,|]*$/.test(matcher)) return;
   try {
@@ -232,13 +269,17 @@ function checkMatcher(matcher, at, fail) {
 }
 
 // One exec-form token: the command, or an element of args. Returns true when
-// the token referenced a repository path, whether or not it was valid. The
-// placeholder is the braced form the hooks reference defines; the bare
-// $CLAUDE_PROJECT_DIR spelling is a shell variable, and exec form has no
+// the token referenced a path placeholder, whether or not it was valid. The
+// project placeholder is the braced form the hooks reference defines; the
+// bare $CLAUDE_PROJECT_DIR spelling is a shell variable, and exec form has no
 // shell to expand it (Claude Code does not rewrite that form).
 const PLACEHOLDER = /\$\{CLAUDE_PROJECT_DIR\}\/(.*)$/;
-function checkPathToken(token, root, at, fail) {
-  if (!token.includes('CLAUDE_PROJECT_DIR')) return false;
+function checkPathToken(token, root, at, fail, executable) {
+  if (/\$\{?CLAUDE_PLUGIN_(ROOT|DATA)/.test(token)) {
+    fail(`${at}: plugin placeholders do not apply to a settings.json hook: ${JSON.stringify(token)}`);
+    return true;
+  }
+  if (!/\$\{?CLAUDE_PROJECT_DIR/.test(token)) return false;
   const m = PLACEHOLDER.exec(token);
   if (!m) {
     fail(`${at} must reference the script as \${CLAUDE_PROJECT_DIR}/<path> (braces; the bare spelling is not substituted in exec form): ${JSON.stringify(token)}`);
@@ -249,6 +290,10 @@ function checkPathToken(token, root, at, fail) {
     fail(`${at}: ${rel} must use forward slashes, which Claude Code resolves on every platform`);
     return true;
   }
+  if (rel === '' || rel.replace(/\/+$/, '') === HOOKS_DIR.slice(0, -1)) {
+    fail(`${at} names the hooks directory, not a script: ${JSON.stringify(token)}`);
+    return true;
+  }
   if (!rel.startsWith(HOOKS_DIR)) {
     fail(`${at}: ${rel} is not under ${HOOKS_DIR}`);
     return true;
@@ -256,8 +301,8 @@ function checkPathToken(token, root, at, fail) {
   let real;
   let hooksRoot;
   try {
+    hooksRoot = path.join(fs.realpathSync(root), HOOKS_DIR);
     real = fs.realpathSync(path.resolve(root, rel));
-    hooksRoot = fs.realpathSync(path.join(root, HOOKS_DIR)) + path.sep;
   } catch (e) {
     fail(`${at}: ${rel} does not exist`);
     return true;
@@ -269,6 +314,13 @@ function checkPathToken(token, root, at, fail) {
   if (!fs.statSync(real).isFile()) {
     fail(`${at}: ${rel} is not a file`);
     return true;
+  }
+  if (executable && process.platform !== 'win32') {
+    try {
+      fs.accessSync(real, fs.constants.X_OK);
+    } catch (e) {
+      fail(`${at}: ${rel} is not executable; exec form spawns it directly, so chmod +x it and commit the mode`);
+    }
   }
   if (/\.[cm]?js$/.test(rel)) {
     const r = spawnSync(process.execPath, ['--check', real], { encoding: 'utf8' });
@@ -295,8 +347,8 @@ function checkCommandHook(hook, root, at, fail) {
     fail(`${at}.args[${n}] must be a string`);
     return '';
   });
-  if (hook.command.includes('CLAUDE_PROJECT_DIR')) {
-    checkPathToken(hook.command, root, `${at}.command`, fail);
+  if (/\$\{?CLAUDE_PROJECT_DIR/.test(hook.command)) {
+    checkPathToken(hook.command, root, `${at}.command`, fail, true);
   } else {
     if (!PROGRAM_NAME.test(hook.command)) {
       fail(`${at}.command must be a bare program name such as "node", or the \${CLAUDE_PROJECT_DIR}/.claude/hooks/ script itself: ${JSON.stringify(hook.command)}`);
@@ -305,23 +357,26 @@ function checkCommandHook(hook, root, at, fail) {
       fail(`${at}.args[0] must be the \${CLAUDE_PROJECT_DIR}/.claude/hooks/ script; interpreter flags and inline code are not accepted, put them in the script`);
     }
   }
-  args.forEach((arg, n) => checkPathToken(arg, root, `${at}.args[${n}]`, fail));
+  args.forEach((arg, n) => checkPathToken(arg, root, `${at}.args[${n}]`, fail, false));
   for (const k of ['async', 'asyncRewake']) {
     if (hasOwn(hook, k) && typeof hook[k] !== 'boolean') fail(`${at}.${k} must be true or false`);
   }
   if (hasOwn(hook, 'shell')) fail(`${at}.shell has no effect in exec form`);
 }
 
-function checkHook(hook, root, at, fail) {
+function checkHook(hook, event, root, at, fail) {
   if (!isPlainObject(hook)) return fail(`${at} must be an object`);
   if (!HOOK_TYPES.includes(hook.type)) return fail(`${at}.type must be one of ${HOOK_TYPES.map((t) => `"${t}"`).join(', ')}`);
+  checkUnknownKeys(hook, [...HOOK_COMMON_FIELDS, ...HOOK_TYPE_FIELDS[hook.type]], at, `a ${hook.type} hook field`, fail);
+  if (hasOwn(hook, 'if')) {
+    if (!isNonEmptyString(hook.if)) fail(`${at}.if must be a permission rule string`);
+    if (!TOOL_EVENTS.includes(event)) fail(`${at}.if is only evaluated on ${TOOL_EVENTS.join(', ')}; on ${event} a hook with "if" set never runs`);
+  }
   if (hasOwn(hook, 'timeout') && !(typeof hook.timeout === 'number' && Number.isFinite(hook.timeout) && hook.timeout > 0)) {
     fail(`${at}.timeout must be a positive number of seconds`);
   }
-  if (hasOwn(hook, 'if') && !isNonEmptyString(hook.if)) fail(`${at}.if must be a permission rule string`);
   if (hasOwn(hook, 'statusMessage') && typeof hook.statusMessage !== 'string') fail(`${at}.statusMessage must be a string`);
-  if (hasOwn(hook, 'once') && typeof hook.once !== 'boolean') fail(`${at}.once must be true or false`);
-  checkUnknownKeys(hook, [...HOOK_COMMON_FIELDS, ...HOOK_TYPE_FIELDS[hook.type]], at, `a ${hook.type} hook field`, fail);
+  if (hasOwn(hook, 'once')) fail(`${at}.once is honoured only in skill frontmatter and ignored in a settings file`);
   if (hook.type === 'command') return checkCommandHook(hook, root, at, fail);
   for (const k of HOOK_REQUIRED_STRINGS[hook.type]) {
     if (!isNonEmptyString(hook[k])) fail(`${at}.${k} must be a non-empty string for a ${hook.type} hook`);
@@ -333,7 +388,7 @@ function checkHooks(hooks, root, fail) {
   if (!isPlainObject(hooks)) return fail('"hooks" must be an object');
   for (const event of Object.keys(hooks)) {
     if (!HOOK_EVENTS.includes(event)) {
-      fail(`hooks.${event} is not a hook event in the Claude Code reference; a typo here means the hook never runs (if the docs added it, add it to HOOK_EVENTS in scripts/check-claude-settings.js)`);
+      fail(`hooks.${event} is not a hook event in the Claude Code reference; ${SKIPPED}, so the hook never runs. If the docs added it, add it to HOOK_EVENTS in scripts/check-claude-settings.js`);
       continue;
     }
     const matchers = hooks[event];
@@ -345,16 +400,16 @@ function checkHooks(hooks, root, fail) {
       const at = `hooks.${event}[${n}]`;
       if (!isPlainObject(entry)) return fail(`${at} must be an object`);
       checkUnknownKeys(entry, ['matcher', 'hooks'], at, 'a hook group field', fail);
-      if (hasOwn(entry, 'matcher')) checkMatcher(entry.matcher, at, fail);
+      if (hasOwn(entry, 'matcher')) checkMatcher(entry.matcher, event, at, fail);
       if (!Array.isArray(entry.hooks)) return fail(`${at}.hooks must be an array`);
       if (entry.hooks.length === 0) fail(`${at}.hooks is empty`);
-      entry.hooks.forEach((hook, m) => checkHook(hook, root, `${at}.hooks[${m}]`, fail));
+      entry.hooks.forEach((hook, m) => checkHook(hook, event, root, `${at}.hooks[${m}]`, fail));
     });
   }
 }
 
 // Returns the list of problems with a parsed settings object. `root` is the
-// repository root that $CLAUDE_PROJECT_DIR stands for.
+// repository root that ${CLAUDE_PROJECT_DIR} stands for.
 function checkSettings(settings, root) {
   const problems = [];
   const fail = (msg) => problems.push(msg);
@@ -362,6 +417,7 @@ function checkSettings(settings, root) {
     fail('top level must be an object');
     return problems;
   }
+  checkTopLevel(settings, fail);
   checkPermissions(settings.permissions, fail);
   checkHooks(settings.hooks, root, fail);
   return problems;

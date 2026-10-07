@@ -67,17 +67,19 @@ prompt, `auto` and `bypassPermissions` included; `dontAsk` mode denies the
 call instead.
 
 **Personal allowances go in `settings.local.json`.** That file is listed in
-`.gitignore`, and Claude Code also adds it to your git excludes when it
-creates the file itself. It applies only to this repo on your machine. Put
-your own read allowances there, not in the committed file, which is public
-and binds every clone.
+`.gitignore` here. (In a repository that does not already ignore it, Claude
+Code adds `**/.claude/settings.local.json` to your global git excludes the
+first time it writes the file.) It applies only to this repo on your
+machine. Put your own read allowances there, not in the committed file,
+which is public and binds every clone.
 
 **The check.** `scripts/check-claude-settings.js` fails on a duplicate JSON
 key at any depth, which is how #21's rules were silently lost. It then checks
-permission keys and hook event names against the documented lists (a typo
-there is a rule Claude Code ignores silently, the same failure in another
-form), the permission lists, the fields of every hook type, and command hooks
-as described above. Its tests are in `scripts/test-check-claude-settings.js`.
+permission keys and values, hook event names and the fields of every hook
+type against the documented lists (a typo there is an entry Claude Code
+skips, with a Settings Warning in an interactive session and nothing at all
+in a `-p` or CI run: the same failure in another form), the permission
+lists, and command hooks as described above. Its tests are in `scripts/test-check-claude-settings.js`.
 CI runs both from `.github/workflows/claude-settings.yml` whenever `.claude/`
 changes. Locally:
 
