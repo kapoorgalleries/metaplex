@@ -111,10 +111,22 @@ class KeyHandling(Base):
             self.assertEqual(req.get_header("X-goog-api-key"), FAKE_KEY)
         self.assertNoKey(out, errs)
 
-    def test_no_key(self):
-        code, out, errs, rec = run(["hello"], env_key=None)
+    def test_no_key_and_no_proxy_key(self):
+        e = http_error("u", 403, "PERMISSION_DENIED", "Method doesn't allow unregistered callers")
+        code, out, errs, rec = run(["hello"], [e], env_key=None)
         self.assertEqual(code, gemini.EXIT_NO_KEY)
-        self.assertEqual(rec.requests, [])
+        self.assertIn("network proxy supplied none", errs)
+        self.assertEqual(len(rec.requests), 1)
+        self.assertIsNone(rec.requests[0].get_header("X-goog-api-key"))
+
+    def test_proxy_supplied_key(self):
+        code, out, errs, rec = run(["hello"], [MODELS, answer("via proxy")], env_key=None)
+        self.assertEqual(code, 0, errs)
+        self.assertEqual(out.strip(), "via proxy")
+        for req in rec.requests:
+            self.assertIsNone(req.get_header("X-goog-api-key"))
+        code, out, _, _ = run(["--check"], [MODELS], env_key=None)
+        self.assertIn("supplied by the network proxy", out)
 
     def test_key_echoed_in_error_is_scrubbed(self):
         e = http_error("u", 400, "INVALID_ARGUMENT", f"bad key {FAKE_KEY}")
@@ -137,7 +149,7 @@ class KeyHandling(Base):
     def test_check_prints_no_key_material(self):
         code, out, errs, _ = run(["--check"], [MODELS])
         self.assertEqual(code, 0)
-        self.assertIn("key: present", out)
+        self.assertIn("key: from GEMINI_API_KEY", out)
         self.assertIn("gemini-3.1-pro, gemini-3.8-flash", out)
         self.assertNoKey(out, errs)
 

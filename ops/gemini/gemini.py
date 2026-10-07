@@ -9,7 +9,9 @@ Guarantees:
 - The key is read from GEMINI_API_KEY only and sent only to
   https://generativelanguage.googleapis.com in the x-goog-api-key header. It is
   never printed, logged, written to disk or put in a URL. Redirects are refused,
-  so the header can never follow a redirect to another host.
+  so the header can never follow a redirect to another host. When the variable
+  is absent, requests go out without the header, for an environment whose
+  network proxy adds the key itself (a "network secret").
 - Input that looks like a secret, a session transcript or gallery data (client
   or collector records, inventory, prices, valuations, photographs) is refused
   before anything is sent. The free tier lets Google use prompts to improve its
@@ -224,7 +226,8 @@ def call(method, path, key, body=None):
         raise ApiError(0, "BAD_PATH", "refusing a request outside the Gemini API root")
     data = json.dumps(body).encode("utf-8") if body is not None else None
     req = urllib.request.Request(url, data=data, method=method)
-    req.add_header("x-goog-api-key", key)
+    if key:
+        req.add_header("x-goog-api-key", key)
     req.add_header("Content-Type", "application/json")
     try:
         with _OPENER.open(req, timeout=TIMEOUT_S) as resp:
@@ -321,13 +324,11 @@ def main(argv=None):
 
     try:
         if args.list_models or args.check:
-            if not key:
-                err(f"{KEY_ENV} is not set in this environment (see ops/gemini/README.md)")
-                return EXIT_NO_KEY
             models = list_models(key)
             picks = pick_models(models)
             if args.check:
-                print(f"key: present; {len(models)} models visible; auto picks: {', '.join(picks) or 'none'}")
+                source = "from GEMINI_API_KEY" if key else "supplied by the network proxy"
+                print(f"key: {source}; {len(models)} models visible; auto picks: {', '.join(picks) or 'none'}")
             else:
                 for m in models:
                     if "generateContent" in m.get("supportedGenerationMethods", []):
@@ -350,10 +351,6 @@ def main(argv=None):
             print(f"dry run: {len(turns)} turn(s), {chars:,} characters (~{chars // 4:,} tokens), "
                   f"model {args.model}; nothing sent")
             return 0
-        if not key:
-            err(f"{KEY_ENV} is not set in this environment (see ops/gemini/README.md)")
-            return EXIT_NO_KEY
-
         candidates = pick_models(list_models(key)) if args.model == "auto" else [args.model]
         if not candidates:
             err("no stable Gemini Pro or Flash model is visible to this key; pass --model")
@@ -387,6 +384,10 @@ def main(argv=None):
         err(f"refused: {e}")
         return EXIT_REFUSED
     except ApiError as e:
+        if not key and e.status in (401, 403):
+            err(f"no key: {KEY_ENV} is not set and the network proxy supplied none "
+                f"({e.status} {e.code}); see ops/gemini/README.md")
+            return EXIT_NO_KEY
         err(f"Gemini API error {e.status} {e.code}: {scrub(e.message, key)}")
         return EXIT_RATE if e.status == 429 else EXIT_API
 

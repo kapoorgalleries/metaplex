@@ -8,7 +8,7 @@ Why this route: the Gemini CLI's personal Google sign-in is refused (`Ineligible
 
 1. Open https://aistudio.google.com/app/apikey, choose **Create API key**, and create it in a new project. Leave billing off on that project: with no billing account, the key can only use the free tier and cannot be charged. Copy the key. It goes only into step 2's settings field, never into a chat, file or command.
 2. In the Claude app or claude.ai/code, open the cloud environment menu in a session's title bar, choose the **Kapoor Syndicate** environment, then **Edit**. Add an environment variable named `GEMINI_API_KEY` with the key as its value. If the page offers a Network secrets section, use it and keep the same name.
-3. Sessions started after that see the key; sessions already running do not. In a new session, `python3 ops/gemini/gemini.py --check` should print `key: present; N models visible; auto picks: ...`.
+3. Sessions started after that see the key; sessions already running do not. In a new session, `python3 ops/gemini/gemini.py --check` should print `key: from GEMINI_API_KEY` (an environment variable) or `key: supplied by the network proxy` (a Network secret, which the proxy adds to each request so the session never holds it), followed by `N models visible; auto picks: ...`.
 
 To revoke: delete the key in AI Studio. Every session loses access at once.
 
@@ -39,7 +39,7 @@ python3 ops/gemini/gemini.py --list-models
   - images, and data files whose names say inventory, client, price, valuation and the like
 
   These checks catch obvious cases only. Keeping client data out is still the caller's job.
-- The key is read only from `GEMINI_API_KEY`. It is sent only to `https://generativelanguage.googleapis.com` in the `x-goog-api-key` header, never in a URL. Redirects are refused, and error text is scrubbed of the key. Never print the variable, never copy it elsewhere, and never pass it on a command line.
+- The key is read only from `GEMINI_API_KEY`. It is sent only to `https://generativelanguage.googleapis.com` in the `x-goog-api-key` header, never in a URL. Redirects are refused, and error text is scrubbed of the key. Never print the variable, never copy it elsewhere, and never pass it on a command line. With no variable set, requests go out without the header and rely on the proxy adding it; if neither supplies a key, the script exits 3.
 - Free tier only. Turning on billing for the key's project, or using a paid model tier, is spending, and spending needs Sanjay's yes first (root `AGENTS.md`).
 - Choosing this route did not change any review gate. Whether a Gemini answer obtained this way satisfies a session's cross-model review requirement is Sanjay's call.
 
