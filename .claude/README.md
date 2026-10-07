@@ -54,13 +54,25 @@ it in exec form, `"command": "node", "args":
 ["${CLAUDE_PROJECT_DIR}/.claude/hooks/<name>.js"]`, which is what the hooks
 reference asks for whenever a path placeholder is involved: each element of
 `args` is one argument, with no shell quoting to differ between macOS, Linux
-and Windows. The check below requires exactly that of a command hook: the
-command is an interpreter on `PATH` such as `node`, with the script as its
-first argument (no interpreter flags or inline code), and every script named
-lives under `.claude/hooks/`, exists (symlinks resolved) and, for
-JavaScript, parses. A script as the command itself is not accepted: on
-Windows exec form needs a real executable, and `node` plus the script path
-is the pattern the hooks reference says works on every platform.
+and Windows. The check below requires exactly that of a command hook. The
+command is one of `node`, `python`, `python3`, `bash` or `sh`, or a launcher
+that runs the script itself (`env`, `nice`, `nohup`, `setsid`, `sudo`,
+`doas`), with the script as its first argument and no interpreter flags or
+inline code. Each of these stops reading its own options at the script and
+passes every later argument to it, so a hook runs the reviewed file and
+nothing else. Any other program is rejected even with a valid script beside
+it, because it can run code from its other arguments: `find <script> -exec
+sh -c …` would pass a check that looked only at the script. PowerShell is
+accepted in the form the hooks reference gives for Windows:
+`"command": "powershell.exe", "args": ["-NoProfile", "-ExecutionPolicy",
+"Bypass", "-File", "${CLAUDE_PROJECT_DIR}/.claude/hooks/<name>.ps1"]`. Only
+`-NoProfile`, `-NonInteractive`, `-NoLogo` and `-ExecutionPolicy Bypass` may
+come before `-File`, and `-File` is required, since without it Windows
+PowerShell runs its arguments as code. Every script named lives under
+`.claude/hooks/`, exists (symlinks resolved) and, for JavaScript, parses. A
+script as the command itself is not accepted: on Windows exec form needs a
+real executable, and `node` plus the script path is the pattern the hooks
+reference says works on every platform.
 
 **Sends always ask.** `permissions.ask` names the Gmail send, reply and
 forward tools and Opera's `go-to-page`, along with the Hugging Face commands
@@ -84,8 +96,11 @@ runs, and the fields of every hook type against the documented lists. A typo
 there is an entry Claude Code drops: an unknown hook event gets a Settings
 Warning in an interactive session and nothing in a `-p` or CI run, and an
 unknown permission key or hook field gets no warning anywhere. It is the
-same failure in another form. It also checks the permission lists, and
-command hooks as described above. Its tests are in
+same failure in another form. It also checks the permission lists, hook
+matchers, and command hooks as described above. A `StopFailure` or
+`FileChanged` matcher separates alternatives with `|` only: written as
+`rate_limit, server_error` or `.envrc,.env` it never fires, so the check
+rejects it. Its tests are in
 `scripts/test-check-claude-settings.js`. CI runs both from
 `.github/workflows/claude-settings.yml` whenever `.claude/` changes. Locally:
 

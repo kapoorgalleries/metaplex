@@ -6,9 +6,9 @@
 // #21's rules were never in effect (PR #23). This script fails on a duplicate
 // key at any depth, then checks the parts of the file this repository relies
 // on against the Claude Code reference: permission keys, values and lists,
-// hook event names, the hook types each event supports, hook fields, and
-// that every command hook is an interpreter in exec form whose scripts live
-// under .claude/hooks/, are present, and parse.
+// hook event names, the hook types each event supports, hook fields,
+// matchers, and that every command hook is an accepted interpreter in exec
+// form whose scripts live under .claude/hooks/, are present, and parse.
 //
 // Run: node scripts/check-claude-settings.js
 // CI:  .github/workflows/claude-settings.yml
@@ -282,15 +282,31 @@ function checkPermissions(permissions, fail) {
 }
 
 // Matcher evaluation per the hooks reference: "*", "" or omitted match all;
-// only letters, digits, _, -, space, comma and | is an exact string or list
-// (FileChanged and StopFailure: letters, digits, _ and | only, so their
-// other matchers are regular expressions, which strings of those characters
-// always are); anything else is a JavaScript regular expression, which must
-// compile.
+// only letters, digits, _, -, space, comma and | is an exact string or a list
+// split on | or comma; anything else is a JavaScript regular expression,
+// which must compile. StopFailure and FileChanged use a narrower exact set,
+// letters, digits, _ and | only, with | the only separator, so a list
+// written with commas or spaces there is a regular expression that never
+// matches. FileChanged also splits its matcher on | to build the watch list,
+// each part a literal filename in the working directory, and filters on the
+// changed file's basename.
+const EXACT_MATCHER = /^[A-Za-z0-9_\- ,|]*$/;
+const NARROW_EXACT_MATCHER = /^[A-Za-z0-9_|]*$/;
 function checkMatcher(matcher, event, at, fail) {
   if (NO_MATCHER_EVENTS.includes(event)) fail(`${at}.matcher has no effect: ${event} has no matcher support`);
   if (typeof matcher !== 'string') return fail(`${at}.matcher must be a string`);
-  if (matcher === '*' || /^[A-Za-z0-9_\- ,|]*$/.test(matcher)) return;
+  if (matcher === '*' || matcher === '') return;
+  // No StopFailure error type has a hyphen, space or comma in it.
+  if (event === 'StopFailure' && EXACT_MATCHER.test(matcher) && !NARROW_EXACT_MATCHER.test(matcher)) {
+    return fail(`${at}.matcher ${JSON.stringify(matcher)} matches no error type: StopFailure separates error types with "|" only, and a hyphen, space or comma makes the matcher a regular expression`);
+  }
+  if (event === 'FileChanged') {
+    const bad = matcher.split('|').filter((name) => name !== name.trim() || /[,/\\^$*+?()[\]{}]/.test(name));
+    if (bad.length) {
+      return fail(`${at}.matcher: each "|"-separated part of a FileChanged matcher is watched as a literal filename in the working directory and matched against the changed file's basename, so ${bad.map((b) => JSON.stringify(b)).join(', ')} never fires (no commas, surrounding spaces, paths or regular-expression syntax)`);
+    }
+  }
+  if (EXACT_MATCHER.test(matcher)) return;
   try {
     new RegExp(matcher);
   } catch (e) {
@@ -381,17 +397,54 @@ function checkPathToken(token, root, at, fail, executable) {
 // Command hooks here use exec form, which the hooks reference asks for
 // whenever a path placeholder is involved: "command" is the executable and
 // each element of "args" is one argument, with no shell on any platform.
-// The command is a bare program name (an interpreter on PATH, such as
-// "node") and the script is its first argument. A script as the command is
-// not accepted: on Windows exec form needs a real executable such as a
+// The command is one of the programs below, by name on PATH, and the script
+// is its first argument. Each of them stops reading its own options at the
+// script and hands every later argument to it, so the hook runs a file this
+// repository reviews and nothing else. A program outside the list can run
+// code from its other arguments (find ... -exec, vim -c, rsync -e), so it is
+// not accepted even with a valid script beside it. A script as the command
+// is not accepted: on Windows exec form needs a real executable such as a
 // .exe, and "node" plus the script path is the pattern the reference says
 // works on every platform. Interpreter flags and inline code ("bash -c ...",
-// "node -e ...") are not accepted either: what a hook runs must be a file
-// this repository reviews.
+// "node -e ...") are not accepted either. PowerShell is the exception the
+// reference documents for Windows: -NoProfile, -NonInteractive, -NoLogo and
+// -ExecutionPolicy Bypass, then -File and the .ps1 script. -File must come
+// last, and everything after it goes to the script as arguments; without
+// it, Windows PowerShell treats its arguments as code.
 const PROGRAM_NAME = /^[A-Za-z0-9](?:[A-Za-z0-9._+-]*[A-Za-z0-9_+-])?$/;
+const INTERPRETERS = ['node', 'python', 'python3', 'bash', 'sh'];
 // These exec() their first argument rather than reading it, so a script
 // given to one must itself be runnable.
 const EXEC_LAUNCHERS = ['env', 'nice', 'nohup', 'setsid', 'sudo', 'doas'];
+const POWERSHELLS = ['pwsh', 'powershell'];
+const POWERSHELL_SWITCHES = ['-NoProfile', '-NonInteractive', '-NoLogo'];
+// Returns the index in args of the script after -File, or -1 after failing.
+// PowerShell parameter names are case-insensitive; abbreviations such as
+// -nop or -ep are not accepted, so the list above is all a hook can pass.
+function powershellScriptIndex(args, at, fail) {
+  const noFile = `${at}: a PowerShell hook needs -File right before the \${CLAUDE_PROJECT_DIR}/.claude/hooks/ script; without -File, Windows PowerShell runs its arguments as code`;
+  for (let n = 0; n < args.length; n++) {
+    const arg = args[n].toLowerCase();
+    if (arg === '-file') return n + 1;
+    if (args[n].startsWith('${CLAUDE_PROJECT_DIR}/')) {
+      fail(noFile);
+      return -1;
+    }
+    if (POWERSHELL_SWITCHES.some((s) => s.toLowerCase() === arg)) continue;
+    if (arg === '-executionpolicy') {
+      if (n + 1 < args.length && args[n + 1].toLowerCase() === 'bypass') {
+        n++;
+        continue;
+      }
+      fail(`${at}.args[${n + 1}] must be Bypass after -ExecutionPolicy`);
+      return -1;
+    }
+    fail(`${at}.args[${n}] ${JSON.stringify(args[n])} is not accepted before -File; a PowerShell hook takes only ${POWERSHELL_SWITCHES.join(', ')} and -ExecutionPolicy Bypass, then -File and the script (no -Command or inline code)`);
+    return -1;
+  }
+  fail(noFile);
+  return -1;
+}
 function checkCommandHook(hook, root, at, fail) {
   if (!isNonEmptyString(hook.command)) return fail(`${at}.command must be a non-empty string`);
   if (!Array.isArray(hook.args)) {
@@ -402,14 +455,25 @@ function checkCommandHook(hook, root, at, fail) {
     fail(`${at}.args[${n}] must be a string`);
     return '';
   });
-  const launcher = EXEC_LAUNCHERS.includes(hook.command);
+  // Exec form resolves "node" and "node.exe" alike on Windows; the hooks
+  // reference spells PowerShell as "powershell.exe".
+  const program = hook.command.replace(/\.exe$/, '');
+  const launcher = EXEC_LAUNCHERS.includes(program);
+  const powershell = POWERSHELLS.includes(program);
   if (/CLAUDE_PROJECT_DIR/.test(hook.command)) {
     fail(`${at}.command must be a program on PATH such as "node", with the script as args[0]; a script as the command cannot be spawned on Windows, where exec form needs a real executable: ${JSON.stringify(hook.command)}`);
   } else if (!PROGRAM_NAME.test(hook.command)) {
     fail(`${at}.command must be a bare program name such as "node": ${JSON.stringify(hook.command)}`);
+  } else if (!launcher && !powershell && !INTERPRETERS.includes(program)) {
+    fail(`${at}.command ${JSON.stringify(hook.command)} is not a program this check accepts (${[...INTERPRETERS, ...POWERSHELLS, ...EXEC_LAUNCHERS].join(', ')}); a program outside the list can run code from its other arguments, such as find ... -exec, so the hook would not be limited to the reviewed script. To use another interpreter, add it to INTERPRETERS in scripts/check-claude-settings.js once you have confirmed it passes every argument after the script to the script`);
   }
-  if (args.length === 0 || !args[0].startsWith('${CLAUDE_PROJECT_DIR}/')) {
-    fail(`${at}.args[0] must be the \${CLAUDE_PROJECT_DIR}/.claude/hooks/ script; interpreter flags and inline code are not accepted, put them in the script`);
+  const first = powershell ? powershellScriptIndex(args, at, fail) : 0;
+  if (first !== -1 && (args.length <= first || !args[first].startsWith('${CLAUDE_PROJECT_DIR}/'))) {
+    fail(powershell
+      ? `${at}.args[${first}] must be the \${CLAUDE_PROJECT_DIR}/.claude/hooks/ script, right after -File`
+      : `${at}.args[0] must be the \${CLAUDE_PROJECT_DIR}/.claude/hooks/ script; interpreter flags and inline code are not accepted, put them in the script`);
+  } else if (powershell && first !== -1 && !/\.ps1$/i.test(args[first])) {
+    fail(`${at}.args[${first}] must be a .ps1 file; PowerShell's -File runs nothing else`);
   }
   args.forEach((arg, n) => checkPathToken(arg, root, `${at}.args[${n}]`, fail, launcher && n === 0));
   for (const k of ['async', 'asyncRewake']) {
@@ -527,5 +591,5 @@ function main() {
 if (require.main === module) {
   main();
 } else {
-  module.exports = { parseStrict, checkSettings, MAX_DEPTH, HOOKS_DIR, HOOK_EVENTS, PERMISSION_KEYS, EVENT_HOOK_TYPES };
+  module.exports = { parseStrict, checkSettings, MAX_DEPTH, HOOKS_DIR, HOOK_EVENTS, PERMISSION_KEYS, EVENT_HOOK_TYPES, INTERPRETERS, POWERSHELLS, POWERSHELL_SWITCHES, EXEC_LAUNCHERS };
 }
