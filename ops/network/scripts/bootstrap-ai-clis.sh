@@ -472,9 +472,11 @@ register_hf_mcp() {
 }
 
 have curl || { warn "curl is required"; exit 1; }
-if [ "$OS" = "Linux" ] && [ -r /proc/cpuinfo ] && ! grep -qw avx /proc/cpuinfo; then
+# AVX is an x86 feature: ARM machines (Raspberry Pi, Graviton) run the arm64 build without it.
+if [ "$OS" = "Linux" ] && case "$(uname -m)" in x86_64|amd64|i?86) true ;; *) false ;; esac &&
+   [ -r /proc/cpuinfo ] && ! grep -qw avx /proc/cpuinfo; then
   warn "this CPU has no AVX; Claude Code's native binary needs it (pre-2013 hardware). Skipping Claude Code on this machine."
-  SKIP_CLAUDE=1
+  SKIP_CLAUDE=1; failed claude-needs-avx   # the job needs claude everywhere: this machine cannot have it
 fi
 [ "$SKIP_CLAUDE" = 1 ] || install_claude || failed claude
 [ "$SKIP_CODEX" = 1 ]  || install_codex  || failed codex
@@ -518,13 +520,13 @@ the terminal's echo off, and it lasts for that shell only.
            API key:  printf 'key: '; read -rs K; echo; printf '%s' "$K" | codex login --with-api-key; unset K
            (exporting OPENAI_API_KEY on its own is not a login)
            check:  codex login status     credentials: ~/.codex/auth.json
-  gemini   "Sign in with Google" on a personal (free individual) account now fails: "This client
-           is no longer supported for Gemini Code Assist for individuals" (seen 2026-09-26). Use an
-           API key (this shell only; https://aistudio.google.com/app/apikey), then run `gemini`:
+  gemini   run `gemini` and choose "Sign in with Google". Over SSH (with a terminal: ssh -t) run
+           NO_BROWSER=true gemini  and paste the code back within 5 minutes. Google Workspace account (not personal Gmail): first
+           export GOOGLE_CLOUD_PROJECT=<project-id>; personal Gmail must leave it unset.
+           "no longer supported for Gemini Code Assist for individuals": that account's free tier is
+           closed to Gemini CLI; the way in (API key, paid Workspace project, or Antigravity) is Sanjay's call.
+           API key instead (this shell only; https://aistudio.google.com/app/apikey):
            printf 'key: '; read -rs GEMINI_API_KEY; echo; export GEMINI_API_KEY
-           Google Workspace account (not retested): export GOOGLE_CLOUD_PROJECT=<project-id>, run
-           `gemini` and choose "Sign in with Google"; over SSH (ssh -t) run  NO_BROWSER=true gemini
-           and paste the code back within 5 minutes. Personal Gmail must leave it unset.
   hf       run `hf auth login` (over SSH: ssh -t). "Log in with your browser" prints a URL and a code:
            open the URL on any machine and enter the code. "Paste an access token" reads a token at a
            hidden prompt: make one per machine at https://huggingface.co/settings/tokens > New token,

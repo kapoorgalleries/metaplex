@@ -75,6 +75,18 @@ local_ips() {
   esac
 }
 
+# The IPv4 address ssh would connect to for a row with no ip: the HostName ~/.ssh/config gives
+# the name (ssh -G), looked up when it is not already an address. Empty when unknown.
+dest_ip() {
+  local h
+  h="$(ssh -G -- "$1" </dev/null 2>/dev/null | awk '$1 == "hostname" { print $2; exit }')"; h="${h:-$1}"
+  case "$h" in *[!0-9.]*) ;; *) printf '%s\n' "$h"; return 0 ;; esac
+  if have getent; then getent ahostsv4 "$h" 2>/dev/null | awk '{ print $1; exit }'
+  elif have dscacheutil; then dscacheutil -q host -a name "$h" 2>/dev/null | awk '/^ip_address:/ { print $2; exit }'
+  fi
+  return 0
+}
+
 # admin, workstation and new rows are computers; nas, printer, iot and anything else are devices.
 is_computer() { case "$(lower "$1")" in admin|workstation|new) return 0 ;; esac; return 1; }
 
@@ -94,7 +106,9 @@ select_hosts() {
       if [ -n "$hosts" ]; then
         case ",$hosts," in *",$name,"*) seen="$seen$name," ;; *) continue ;; esac
       fi
-      if [ "$(lower "$role")" = "router" ] || { [ -n "$gw" ] && [ "$ip" = "$gw" ]; }; then
+      # A row without an ip is checked by where ssh would really go: a name can resolve to the router.
+      if [ "$(lower "$role")" = "router" ] || { [ -n "$gw" ] && [ "$ip" = "$gw" ]; } ||
+         { [ -n "$gw" ] && [ -z "$ip" ] && [ "$(dest_ip "$name")" = "$gw" ]; }; then
         if [ -n "$hosts" ] || [ "$(lower "${FILTER_ROLE:-}")" = router ]; then
           warn "$name: skipped, it is the router (role=router or this machine's gateway); nothing here logs into it" >&2
         fi

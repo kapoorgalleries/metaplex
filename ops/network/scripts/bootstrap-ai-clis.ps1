@@ -444,13 +444,14 @@ read it with Read-Host -AsSecureString, and it lasts for that window only.
            API key:  [Net.NetworkCredential]::new('', (Read-Host 'key' -AsSecureString)).Password | codex login --with-api-key
            (setting OPENAI_API_KEY on its own is not a login)
            check:  codex login status     credentials: %USERPROFILE%\.codex\auth.json
-  gemini   "Sign in with Google" on a personal (free individual) account now fails: "This client
-           is no longer supported for Gemini Code Assist for individuals" (seen 2026-09-26). Use an
-           API key (this window only; https://aistudio.google.com/app/apikey), then run `gemini`:
+  gemini   run `gemini` and choose "Sign in with Google". Over SSH (with a terminal: ssh -t) set
+           $env:NO_BROWSER = 'true'  first and paste the code back within 5 minutes.
+           Google Workspace account (not personal Gmail): first
+           $env:GOOGLE_CLOUD_PROJECT = '<project-id>'; personal Gmail must leave it unset.
+           "no longer supported for Gemini Code Assist for individuals": that account's free tier is
+           closed to Gemini CLI; the way in (API key, paid Workspace project, or Antigravity) is Sanjay's call.
+           API key instead (this window only; https://aistudio.google.com/app/apikey):
            $env:GEMINI_API_KEY = [Net.NetworkCredential]::new('', (Read-Host 'key' -AsSecureString)).Password
-           Google Workspace account (not retested): $env:GOOGLE_CLOUD_PROJECT = '<project-id>', run
-           `gemini` and choose "Sign in with Google"; over SSH (ssh -t) set $env:NO_BROWSER = 'true'
-           first and paste the code back within 5 minutes. Personal Gmail must leave it unset.
   hf       run `hf auth login` (over SSH: ssh -t). "Log in with your browser" prints a URL and a code:
            open the URL on any machine and enter the code. "Paste an access token" reads a token at a
            hidden prompt: make one per machine at https://huggingface.co/settings/tokens > New token,
