@@ -33,11 +33,13 @@ development project or a Supabase branch instead.
 session in this repo. What to know about it:
 
 **What is allowed without a prompt.** Only `Bash(ldd --version)`, as an exact
-command. Nothing else is in `permissions.allow`. An allow rule matches a tool
-by name alone, so a tool with a free-form string argument (an `owner`, a
-`query`, a `threadId`) would become a channel that can carry anything the
-model has read to a remote server with no prompt. The reasoning and the
-rejected candidates are in PR #23.
+command. Nothing else is in `permissions.allow`. A Bash rule can match the
+command text, as that one does. A rule for an MCP tool cannot: Claude Code
+skips any `mcp__` rule written with parentheses, so an allow rule for an MCP
+tool matches every call to it whatever the arguments. A tool with a free-form
+string argument (an `owner`, a `query`, a `threadId`) would therefore become
+a channel that can carry anything the model has read to a remote server with
+no prompt. The reasoning and the rejected candidates are in PR #23.
 
 **GitHub reads prompt.** `mcp__github__pull_request_read` and the other
 GitHub read tools are not in `allow`, for the reason above. A `PreToolUse`
@@ -46,24 +48,36 @@ typed arguments could make the two tools with no free-form fields
 (`pull_request_read`, `get_job_logs`) safe to auto-allow. That hook is not
 committed: a script that grants Claude Code permissions should be written and
 reviewed by the owner, not by the agent it governs. If one is added, register
-it under `hooks` with a `$CLAUDE_PROJECT_DIR/.claude/hooks/...` command, and
-the check below will confirm the file exists and parses.
+it in exec form, `"command": "node", "args":
+["${CLAUDE_PROJECT_DIR}/.claude/hooks/<name>.js"]`, which is what the hooks
+reference asks for whenever a path placeholder is involved: each element of
+`args` is one argument, with no shell quoting to differ between macOS, Linux
+and Windows. The check below requires exactly that of a command hook, and
+that every script it names lives under `.claude/hooks/`, exists (symlinks
+resolved) and, for JavaScript, parses.
 
 **Sends always ask.** `permissions.ask` names the Gmail send, reply and
 forward tools and Opera's `go-to-page`, along with the Hugging Face commands
-that spend or publish. An ask rule prompts in every permission mode,
-including `bypassPermissions`.
+that spend or publish. Rules are evaluated deny, then ask, then allow, and
+the first match wins: the `hf auth token` deny rules beat everything, and an
+ask rule beats a broader allow. An ask rule prompts in every mode that can
+prompt, `auto` and `bypassPermissions` included; `dontAsk` mode denies the
+call instead.
 
-**Personal allowances go in `settings.local.json`.** That file is ignored by
-git (see `.gitignore`) and applies only to this repo on your machine. Put
+**Personal allowances go in `settings.local.json`.** That file is listed in
+`.gitignore`, and Claude Code also adds it to your git excludes when it
+creates the file itself. It applies only to this repo on your machine. Put
 your own read allowances there, not in the committed file, which is public
 and binds every clone.
 
 **The check.** `scripts/check-claude-settings.js` fails on a duplicate JSON
-key at any depth, which is how #21's rules were silently lost, and checks the
-permission lists and every hook command's script. Its parser has its own
-tests in `scripts/test-check-claude-settings.js`. CI runs both from
-`.github/workflows/claude-settings.yml` whenever `.claude/` changes. Locally:
+key at any depth, which is how #21's rules were silently lost. It then checks
+permission keys and hook event names against the documented lists (a typo
+there is a rule Claude Code ignores silently, the same failure in another
+form), the permission lists, the fields of every hook type, and command hooks
+as described above. Its tests are in `scripts/test-check-claude-settings.js`.
+CI runs both from `.github/workflows/claude-settings.yml` whenever `.claude/`
+changes. Locally:
 
 ```sh
 node scripts/test-check-claude-settings.js && node scripts/check-claude-settings.js
@@ -151,7 +165,7 @@ call to any tool still works. The guards are:
     program by path or inside a subshell (docs, "What a Bash rule doesn't
     match"); the rule in `AGENTS.md` is what forbids it.
 
-An ask rule prompts in every permission mode, including `bypassPermissions`
-([docs](https://code.claude.com/docs/en/permission-modes)). The file declares
+How ask rules behave across permission modes is in "Permissions and the
+settings check" above. The file declares
 no `extraKnownMarketplaces`: HF's marketplace holds only the `hf-cli` plugin,
 which would duplicate the installer's skill.

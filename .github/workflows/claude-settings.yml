@@ -1,13 +1,16 @@
 name: Claude settings
 
 # .claude/settings.json is the committed Claude Code permission policy.
-# Neither workflow above runs on it: pull-request.yml is scoped to rust/**,
-# web.yml to js/**. This one runs scripts/check-claude-settings.js, which
+# Neither of the other workflows runs on it: pull-request.yml is scoped to
+# rust/**, web.yml to js/**. This one runs scripts/check-claude-settings.js, which
 # fails on a duplicate JSON key at any depth (PRs #20 and #21 each added their
 # own "allow" key, and JSON.parse kept only the last, so #21's rules never
-# took effect), checks the permission lists, and confirms that every hook
-# command points at a script in the repository. The workflow file itself is
-# included so that an edit to it is exercised by it.
+# took effect), checks permission keys, hook event names and hook fields
+# against the Claude Code reference, and confirms that every command hook is
+# in exec form with its scripts under .claude/hooks/, present and parsing.
+# Hook scripts must live there so that the .claude/** path filter below
+# covers an edit to one. The workflow file itself is included so that an
+# edit to it is exercised by it.
 on:
   pull_request:
     paths:
