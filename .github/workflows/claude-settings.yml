@@ -1,0 +1,46 @@
+name: Claude settings
+
+# .claude/settings.json is the committed Claude Code permission policy.
+# Neither of the other workflows runs on it: pull-request.yml is scoped to
+# rust/**, web.yml to js/**. This one runs scripts/check-claude-settings.js, which
+# fails on a duplicate JSON key at any depth (PRs #20 and #21 each added their
+# own "allow" key, and JSON.parse kept only the last, so #21's rules never
+# took effect), checks permission keys, hook event names and hook fields
+# against the Claude Code reference, and confirms that every command hook is
+# in exec form with its scripts under .claude/hooks/, present and parsing.
+# Hook scripts must live there so that the .claude/** path filter below
+# covers an edit to one. The workflow file itself is included so that an
+# edit to it is exercised by it. This is a lint for mistakes, not a security
+# boundary: it runs the pull request's own copy of the checker, so reviewing
+# the diff is what guards the policy.
+on:
+  pull_request:
+    paths:
+      - ".claude/**"
+      - "scripts/check-claude-settings.js"
+      - "scripts/test-check-claude-settings.js"
+      - ".github/workflows/claude-settings.yml"
+  push:
+    branches: [master]
+    paths:
+      - ".claude/**"
+      - "scripts/check-claude-settings.js"
+      - "scripts/test-check-claude-settings.js"
+      - ".github/workflows/claude-settings.yml"
+
+jobs:
+  claude-settings:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v7
+        with:
+          # .node-version at the repo root pins 22, as web.yml does.
+          node-version-file: .node-version
+
+      - name: Test the checker
+        run: node scripts/test-check-claude-settings.js
+
+      - name: Check settings.json
+        run: node scripts/check-claude-settings.js

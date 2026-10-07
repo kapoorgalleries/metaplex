@@ -28,3 +28,6 @@ hfuzz_workspace
 .cache
 .wrangler/
 ops/network/out/
+
+# Per-developer Claude Code permissions (see .claude/README.md). Never committed.
+.claude/settings.local.json
