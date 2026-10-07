@@ -10,7 +10,9 @@ name: Claude settings
 # in exec form with its scripts under .claude/hooks/, present and parsing.
 # Hook scripts must live there so that the .claude/** path filter below
 # covers an edit to one. The workflow file itself is included so that an
-# edit to it is exercised by it.
+# edit to it is exercised by it. This is a lint for mistakes, not a security
+# boundary: it runs the pull request's own copy of the checker, so reviewing
+# the diff is what guards the policy.
 on:
   pull_request:
     paths:

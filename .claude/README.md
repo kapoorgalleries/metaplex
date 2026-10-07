@@ -55,12 +55,16 @@ it in exec form, `"command": "node", "args":
 reference asks for whenever a path placeholder is involved: each element of
 `args` is one argument, with no shell quoting to differ between macOS, Linux
 and Windows. The check below requires exactly that of a command hook: the
-command is an interpreter on `PATH` such as `node`, with the script as its
-first argument (no interpreter flags or inline code), and every script named
-lives under `.claude/hooks/`, exists (symlinks resolved) and, for
-JavaScript, parses. A script as the command itself is not accepted: on
-Windows exec form needs a real executable, and `node` plus the script path
-is the pattern the hooks reference says works on every platform.
+command is one of `node`, `python3`, `bash`, `sh` or `pwsh`, with the script
+as its first argument and any further arguments after it. Interpreter flags
+before the script (PowerShell's `-File` included) and inline code are not
+accepted, nor is any other program, since a program such as `find` or `rm`
+given the script as an argument would do something else with it. Every
+script named lives under `.claude/hooks/`, exists (symlinks resolved) and,
+for JavaScript, parses. A script as the command itself is not accepted: on
+Windows exec form needs a real executable, and an interpreter plus the
+script path is the pattern the hooks reference says works on every
+platform.
 
 **Sends always ask.** `permissions.ask` names the Gmail send, reply and
 forward tools and Opera's `go-to-page`, along with the Hugging Face commands
@@ -87,7 +91,12 @@ unknown permission key or hook field gets no warning anywhere. It is the
 same failure in another form. It also checks the permission lists, and
 command hooks as described above. Its tests are in
 `scripts/test-check-claude-settings.js`. CI runs both from
-`.github/workflows/claude-settings.yml` whenever `.claude/` changes. Locally:
+`.github/workflows/claude-settings.yml` whenever `.claude/` changes.
+
+The check is a lint that catches mistakes, not a security boundary. CI runs
+the pull request's own copy of the checker, so a pull request can change the
+checker along with the settings and pass. The security boundary is reviewing
+the diff, including any change to the checker itself. Locally:
 
 ```sh
 node scripts/test-check-claude-settings.js && node scripts/check-claude-settings.js
