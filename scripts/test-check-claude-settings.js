@@ -23,7 +23,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { spawnSync } = require('child_process');
-const { parseStrict, checkSettings, MAX_DEPTH, HOOK_EVENTS, PERMISSION_KEYS } = require('./check-claude-settings.js');
+const { parseStrict, checkSettings, MAX_DEPTH, HOOK_EVENTS, PERMISSION_KEYS, EVENT_HOOK_TYPES } = require('./check-claude-settings.js');
 
 let failures = 0;
 const check = (name, fn) => {
@@ -134,7 +134,21 @@ const DOCUMENTED_PERMISSION_KEYS = [
 ];
 const NO_MATCHER_EVENTS = ['CwdChanged', 'UserPromptSubmit', 'PostToolBatch', 'Stop', 'TeammateIdle', 'TaskCreated', 'TaskCompleted', 'WorktreeCreate', 'WorktreeRemove', 'MessageDisplay'];
 const TOOL_EVENTS = ['PreToolUse', 'PostToolUse', 'PostToolUseFailure', 'PermissionRequest', 'PermissionDenied'];
+// hooks.md "Prompt-based hooks" and "Setup decision control".
+const ALL5 = ['command', 'http', 'mcp_tool', 'prompt', 'agent'];
+const NO_LLM = ['command', 'http', 'mcp_tool'];
+const DOCUMENTED_EVENT_TYPES = {};
+for (const e of ['PermissionDenied', 'PostToolBatch', 'PostToolUse', 'PostToolUseFailure', 'PreToolUse', 'Stop', 'SubagentStop', 'TaskCompleted', 'TaskCreated', 'TeammateIdle', 'UserPromptExpansion', 'UserPromptSubmit']) DOCUMENTED_EVENT_TYPES[e] = ALL5;
+DOCUMENTED_EVENT_TYPES.PermissionRequest = ['command', 'http', 'mcp_tool', 'prompt'];
+for (const e of ['ConfigChange', 'CwdChanged', 'DirectoryAdded', 'Elicitation', 'ElicitationResult', 'FileChanged', 'InstructionsLoaded', 'MessageDisplay', 'Notification', 'PostCompact', 'PostModelSwitch', 'PreCompact', 'PreModelSwitch', 'SessionEnd', 'StopFailure', 'SubagentStart', 'WorktreeCreate', 'WorktreeRemove']) DOCUMENTED_EVENT_TYPES[e] = NO_LLM;
+DOCUMENTED_EVENT_TYPES.SessionStart = ['command', 'mcp_tool'];
+DOCUMENTED_EVENT_TYPES.Setup = ['command'];
 check('HOOK_EVENTS equals the documented list', () => assert.deepStrictEqual([...HOOK_EVENTS].sort(), [...DOCUMENTED_EVENTS].sort()));
+check('the event-to-hook-type map covers every documented event', () => assert.deepStrictEqual(Object.keys(DOCUMENTED_EVENT_TYPES).sort(), [...DOCUMENTED_EVENTS].sort()));
+check('EVENT_HOOK_TYPES equals the documented map', () => {
+  assert.deepStrictEqual(Object.keys(EVENT_HOOK_TYPES).sort(), Object.keys(DOCUMENTED_EVENT_TYPES).sort());
+  for (const e of Object.keys(DOCUMENTED_EVENT_TYPES)) assert.deepStrictEqual([...EVENT_HOOK_TYPES[e]].sort(), [...DOCUMENTED_EVENT_TYPES[e]].sort(), e);
+});
 check('PERMISSION_KEYS equals the documented list', () => assert.deepStrictEqual([...PERMISSION_KEYS].sort(), [...DOCUMENTED_PERMISSION_KEYS].sort()));
 
 // Throwaway repositories. `repo` has hooks that exist, parse, don't parse,
@@ -160,6 +174,7 @@ write(path.join(hooksDir, 'ok.sh'), '#!/bin/sh\nexit 0\n', 0o755);
 write(path.join(hooksDir, 'noexec.sh'), '#!/bin/sh\nexit 0\n', 0o644);
 write(path.join(hooksDir, 'noshebang.js'), 'process.exit(0);\n', 0o755);
 write(path.join(hooksDir, 'shebang.js'), '#!/usr/bin/env node\nprocess.exit(0);\n', 0o755);
+write(path.join(hooksDir, 'noshebang-noexec.js'), 'process.exit(0);\n', 0o644);
 write(path.join(hooksDir, 'with space.js'), 'process.exit(0);\n');
 write(path.join(hooksDir, 'bad.js'), 'function (\n');
 write(path.join(hooksDir, 'bad.mjs'), 'export {\n');
@@ -218,7 +233,7 @@ flags('hooks must be an object (null)', { ...P, hooks: null }, /"hooks" must be 
 // Permission keys, values and lists.
 clean('three disjoint lists', { permissions: { allow: ['A'], ask: ['B'], deny: ['C'] } });
 clean('the other documented permission keys', { permissions: { additionalDirectories: ['../docs'], defaultMode: 'plan', disableBypassPermissionsMode: 'disable', disableAutoMode: 'disable', blockReadsOutsideWorkingDirectories: true } });
-flags('a misspelled list name ("Allow") is a typo, not a list', { permissions: { allow: ['A'], Allow: ['B'] } }, /permissions\.Allow is not a permissions key/);
+flags('a misspelled list name ("Allow") is a typo, not a list', { permissions: { allow: ['A'], Allow: ['B'] } }, /permissions\.Allow is not a permissions key.*ignores it without any warning/);
 flags('defaultMode must be a documented mode', { permissions: { defaultMode: 'plann' } }, /defaultMode must be one of "default", "acceptEdits"/);
 for (const mode of ['default', 'acceptEdits', 'plan', 'dontAsk', 'manual']) {
   clean(`defaultMode "${mode}" takes effect from a project file`, { permissions: { defaultMode: mode } });
@@ -245,10 +260,25 @@ flags('the same rule in two lists', { permissions: { allow: ['X'], deny: ['X'] }
 flags('the same rule in ask and deny', { permissions: { ask: ['X'], deny: ['X'] } }, /appears in both permissions\.ask and permissions\.deny/);
 
 // Hook events and groups.
+const hookOfType = {
+  command: { type: 'command', command: 'node', args: [OK] },
+  http: { type: 'http', url: 'https://example.com/hook' },
+  mcp_tool: { type: 'mcp_tool', server: 's', tool: 't' },
+  prompt: { type: 'prompt', prompt: 'ok' },
+  agent: { type: 'agent', prompt: 'ok' },
+};
 for (const event of DOCUMENTED_EVENTS) {
-  clean(`event ${event} is accepted`, { ...P, hooks: { [event]: [{ hooks: [prompt] }] } });
+  clean(`event ${event} is accepted`, { ...P, hooks: { [event]: [{ hooks: [hookOfType.command] }] } });
+  for (const type of ALL5) {
+    const settings = { ...P, hooks: { [event]: [{ hooks: [hookOfType[type]] }] } };
+    if (DOCUMENTED_EVENT_TYPES[event].includes(type)) {
+      clean(`${type} hook runs on ${event}`, settings);
+    } else {
+      flags(`${type} hook is skipped on ${event}`, settings, new RegExp(`${event} does not run ${type} hooks.*Claude Code skips it`));
+    }
+  }
 }
-flags('a misspelled event name never fires', { ...P, hooks: { PreToolUs: [{ hooks: [prompt] }] } }, /hooks\.PreToolUs is not a hook event/);
+flags('a misspelled event name never fires', { ...P, hooks: { PreToolUs: [{ hooks: [prompt] }] } }, /hooks\.PreToolUs is not a hook event.*Settings Warning in an interactive session/);
 flags('event value must be an array', { ...P, hooks: { PreToolUse: {} } }, /hooks\.PreToolUse must be an array/);
 flags('event value must be an array (null)', { ...P, hooks: { PreToolUse: null } }, /hooks\.PreToolUse must be an array/);
 flags('group must be an object', { ...P, hooks: { PreToolUse: ['x'] } }, /PreToolUse\[0\] must be an object/);
@@ -290,7 +320,7 @@ flags('unknown field on an agent hook', entry({ type: 'agent', prompt: 'ok', tim
 clean('continueOnBlock on a prompt hook', entry({ ...prompt, continueOnBlock: true }));
 flags('continueOnBlock must be boolean', entry({ ...prompt, continueOnBlock: 'yes' }), /\.continueOnBlock must be true or false/);
 flags('agent hooks have no continueOnBlock', entry({ type: 'agent', prompt: 'ok', continueOnBlock: true }), /\.continueOnBlock is not a agent hook field/);
-flags('mcp_tool on Setup is skipped', entry({ type: 'mcp_tool', server: 's', tool: 't' }, {}, 'Setup'), /Setup fires before MCP servers are available/);
+flags('mcp_tool on Setup is skipped, with the reason', entry({ type: 'mcp_tool', server: 's', tool: 't' }, {}, 'Setup'), /Setup does not run mcp_tool hooks \(Setup fires before MCP servers are available\)/);
 clean('mcp_tool on SessionStart can run (after /clear or compaction)', { ...P, hooks: { SessionStart: [{ hooks: [{ type: 'mcp_tool', server: 's', tool: 't' }] }] } });
 clean('fractional timeout in seconds', cmd([OK], { timeout: 2.5 }));
 clean('if, statusMessage, async, asyncRewake on a tool event', cmd([OK], { if: 'Bash(git *)', statusMessage: 'checking', async: true, asyncRewake: false }));
@@ -314,10 +344,10 @@ clean('a path with a space is one argument', cmd(['${CLAUDE_PROJECT_DIR}/.claude
 clean('a second script reference inside an option argument', cmd([OK, '--config=${CLAUDE_PROJECT_DIR}/.claude/hooks/ok.js']));
 clean('extra arguments after the script', cmd([OK, '--repo', 'kapoorgalleries/metaplex']));
 clean('an argument that merely mentions the variable name', cmd([OK, '--env-name=CLAUDE_PROJECT_DIR']));
-clean('the script itself is the executable', entry({ type: 'command', command: '${CLAUDE_PROJECT_DIR}/.claude/hooks/ok.sh', args: [] }));
-clean('the script itself is the executable, with arguments', entry({ type: 'command', command: '${CLAUDE_PROJECT_DIR}/.claude/hooks/ok.sh', args: ['--flag', 'value'] }));
+flags('a script as the command does not spawn on Windows', entry({ type: 'command', command: '${CLAUDE_PROJECT_DIR}/.claude/hooks/ok.sh', args: [] }), /command must be a program on PATH such as "node".*cannot be spawned on Windows/);
+flags('a script as the command, with the script also in args', entry({ type: 'command', command: '${CLAUDE_PROJECT_DIR}/.claude/hooks/ok.sh', args: [OK] }), /command must be a program on PATH/);
 clean('a shell script via bash', entry({ type: 'command', command: 'bash', args: ['${CLAUDE_PROJECT_DIR}/.claude/hooks/ok.sh', '--flag'] }));
-clean('a JavaScript file with a #! line as the command', entry({ type: 'command', command: '${CLAUDE_PROJECT_DIR}/.claude/hooks/shebang.js', args: [] }));
+clean('a JavaScript file with a #! line via env', entry({ type: 'command', command: 'env', args: ['${CLAUDE_PROJECT_DIR}/.claude/hooks/shebang.js'] }));
 clean('an executable script via env', entry({ type: 'command', command: 'env', args: ['${CLAUDE_PROJECT_DIR}/.claude/hooks/ok.sh'] }));
 clean('program names with digits, dots and plus signs', entry({ type: 'command', command: 'python3.12', args: [OK] }));
 clean('an ES module', cmd(['${CLAUDE_PROJECT_DIR}/.claude/hooks/ok.mjs']));
@@ -326,9 +356,11 @@ clean('two scripts, both valid', cmd([OK, '${CLAUDE_PROJECT_DIR}/.claude/hooks/w
 // Command hooks: rejected.
 flags('shell form (no args) is rejected', entry({ type: 'command', command: 'node ${CLAUDE_PROJECT_DIR}/.claude/hooks/ok.js' }), /must use exec form/);
 flags('a command line in "command"', entry({ type: 'command', command: 'node --no-warnings', args: [OK] }), /command must be a bare program name/);
-flags('a command line ending in the script', entry({ type: 'command', command: 'node ${CLAUDE_PROJECT_DIR}/.claude/hooks/ok.sh', args: [] }), /command must be exactly the \$\{CLAUDE_PROJECT_DIR\}\/\.claude\/hooks\/ script path/);
-flags('a prefix before the placeholder', entry({ type: 'command', command: './${CLAUDE_PROJECT_DIR}/.claude/hooks/ok.sh', args: [] }), /command must be exactly the/);
-flags('a file run directly needs a #! line', entry({ type: 'command', command: '${CLAUDE_PROJECT_DIR}/.claude/hooks/noshebang.js', args: [] }), /noshebang\.js has no #! line/);
+flags('a command line ending in the script', entry({ type: 'command', command: 'node ${CLAUDE_PROJECT_DIR}/.claude/hooks/ok.sh', args: [] }), /command must be a program on PATH/);
+flags('a prefix before the placeholder', entry({ type: 'command', command: './${CLAUDE_PROJECT_DIR}/.claude/hooks/ok.sh', args: [] }), /command must be a program on PATH/);
+flags('the bare placeholder spelling in command', entry({ type: 'command', command: '$CLAUDE_PROJECT_DIR/.claude/hooks/ok.sh', args: [] }), /command must be a program on PATH/);
+flags('a script given to env needs a #! line', entry({ type: 'command', command: 'env', args: ['${CLAUDE_PROJECT_DIR}/.claude/hooks/noshebang.js'] }), /noshebang\.js has no #! line; it is spawned directly/);
+clean('a script given to node needs no #! line', entry({ type: 'command', command: 'node', args: ['${CLAUDE_PROJECT_DIR}/.claude/hooks/noshebang-noexec.js'] }));
 for (const c of ['--version', '.', '..', 'node.', '-node']) {
   flags(`program name ${JSON.stringify(c)} cannot resolve`, entry({ type: 'command', command: c, args: [OK] }), /command must be a bare program name/);
 }
@@ -354,6 +386,7 @@ flags('placeholder without a slash', cmd(['${CLAUDE_PROJECT_DIR}']), /must refer
 flags('placeholder with nothing after the slash', cmd(['${CLAUDE_PROJECT_DIR}/']), /names the project directory, not a script/);
 flags('the hooks directory itself', cmd(['${CLAUDE_PROJECT_DIR}/.claude/hooks/']), /names the hooks directory, not a script/);
 flags('the hooks directory with a dot segment', cmd(['${CLAUDE_PROJECT_DIR}/.claude/hooks/.']), /names the hooks directory, not a script/);
+flags('the hooks directory without a trailing slash', cmd([OK, '${CLAUDE_PROJECT_DIR}/.claude/hooks']), /args\[1\] names the hooks directory, not a script/);
 flags('the hooks directory reached through sub/..', cmd(['${CLAUDE_PROJECT_DIR}/.claude/hooks/sub/..']), /names the hooks directory, not a script/);
 if (haveSymlink) flags('a symlink back to the hooks directory', cmd(['${CLAUDE_PROJECT_DIR}/.claude/hooks/self']), /names the hooks directory, not a script/);
 flags('a plugin placeholder beside a valid script', cmd([OK, '${CLAUDE_PLUGIN_ROOT}/scripts/x.js']), /plugin placeholders do not apply to a settings\.json hook/);
@@ -371,7 +404,6 @@ flags('an ES module that does not parse', cmd(['${CLAUDE_PROJECT_DIR}/.claude/ho
 flags('the second of two scripts is checked too', cmd([OK, '${CLAUDE_PROJECT_DIR}/.claude/hooks/bad.js']), /bad\.js does not parse/);
 flags('both of two missing scripts are reported', cmd(['${CLAUDE_PROJECT_DIR}/.claude/hooks/m1.js', '${CLAUDE_PROJECT_DIR}/.claude/hooks/m2.js']), /m1\.js does not exist/, /m2\.js does not exist/);
 if (process.platform !== 'win32') {
-  flags('the script as executable must have the executable bit', entry({ type: 'command', command: '${CLAUDE_PROJECT_DIR}/.claude/hooks/noexec.sh', args: [] }), /noexec\.sh is not executable/);
   clean('the same script via an interpreter needs no executable bit', entry({ type: 'command', command: 'sh', args: ['${CLAUDE_PROJECT_DIR}/.claude/hooks/noexec.sh'] }));
   for (const c of ['env', 'nice', 'nohup']) {
     flags(`${c} runs its argument directly, so it needs the executable bit`, entry({ type: 'command', command: c, args: ['${CLAUDE_PROJECT_DIR}/.claude/hooks/noexec.sh'] }), /noexec\.sh is not executable/);

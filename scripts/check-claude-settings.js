@@ -6,9 +6,9 @@
 // #21's rules were never in effect (PR #23). This script fails on a duplicate
 // key at any depth, then checks the parts of the file this repository relies
 // on against the Claude Code reference: permission keys, values and lists,
-// hook event names and fields, and that every command hook is in exec form
-// with its scripts under .claude/hooks/, present, executable where it must
-// be, and parsing.
+// hook event names, the hook types each event supports, hook fields, and
+// that every command hook is an interpreter in exec form whose scripts live
+// under .claude/hooks/, are present, and parse.
 //
 // Run: node scripts/check-claude-settings.js
 // CI:  .github/workflows/claude-settings.yml
@@ -31,11 +31,13 @@ const HOOKS_DIR = '.claude/hooks/';
 
 // Documented names, from code.claude.com/docs/en/settings-reference and
 // code.claude.com/docs/en/hooks. An entry outside these lists is most likely
-// a typo: Claude Code skips it, with a Settings Warning at the start of an
-// interactive session and nothing at all in a -p or CI run, which is the
-// class of failure this script exists to catch. When the docs add a name,
-// add it here.
-const SKIPPED = 'Claude Code skips it (a Settings Warning in an interactive session, nothing in a -p or CI run)';
+// a typo that Claude Code drops, which is the class of failure this script
+// exists to catch. An unknown hook event gets a Settings Warning at the start
+// of an interactive session and nothing in a -p or CI run; an unknown
+// permission key or hook field gets no warning anywhere. When the docs add a
+// name, add it here.
+const SKIPPED_EVENT = 'Claude Code skips it (a Settings Warning in an interactive session, nothing in a -p or CI run)';
+const IGNORED_KEY = 'Claude Code ignores it without any warning, interactive or -p';
 const PERMISSION_KEYS = [
   'allow', 'ask', 'deny', 'additionalDirectories', 'defaultMode',
   'blockReadsOutsideWorkingDirectories', 'disableBypassPermissionsMode', 'disableAutoMode',
@@ -60,6 +62,25 @@ const NO_MATCHER_EVENTS = [
   'TaskCompleted', 'WorktreeCreate', 'WorktreeRemove', 'MessageDisplay',
 ];
 const HOOK_TYPES = ['command', 'http', 'mcp_tool', 'prompt', 'agent'];
+// Which hook types each event runs (hooks reference, "Prompt-based hooks",
+// and "Setup decision control" for Setup). Claude Code skips the others.
+const ALL_TYPES = HOOK_TYPES;
+const NO_LLM_TYPES = ['command', 'http', 'mcp_tool'];
+const EVENT_HOOK_TYPES = {
+  PermissionDenied: ALL_TYPES, PostToolBatch: ALL_TYPES, PostToolUse: ALL_TYPES,
+  PostToolUseFailure: ALL_TYPES, PreToolUse: ALL_TYPES, Stop: ALL_TYPES, SubagentStop: ALL_TYPES,
+  TaskCompleted: ALL_TYPES, TaskCreated: ALL_TYPES, TeammateIdle: ALL_TYPES,
+  UserPromptExpansion: ALL_TYPES, UserPromptSubmit: ALL_TYPES,
+  PermissionRequest: ['command', 'http', 'mcp_tool', 'prompt'],
+  ConfigChange: NO_LLM_TYPES, CwdChanged: NO_LLM_TYPES, DirectoryAdded: NO_LLM_TYPES,
+  Elicitation: NO_LLM_TYPES, ElicitationResult: NO_LLM_TYPES, FileChanged: NO_LLM_TYPES,
+  InstructionsLoaded: NO_LLM_TYPES, MessageDisplay: NO_LLM_TYPES, Notification: NO_LLM_TYPES,
+  PostCompact: NO_LLM_TYPES, PostModelSwitch: NO_LLM_TYPES, PreCompact: NO_LLM_TYPES,
+  PreModelSwitch: NO_LLM_TYPES, SessionEnd: NO_LLM_TYPES, StopFailure: NO_LLM_TYPES,
+  SubagentStart: NO_LLM_TYPES, WorktreeCreate: NO_LLM_TYPES, WorktreeRemove: NO_LLM_TYPES,
+  SessionStart: ['command', 'mcp_tool'],
+  Setup: ['command'],
+};
 // "once" is documented but honoured only in skill frontmatter; see checkHook.
 const HOOK_COMMON_FIELDS = ['type', 'if', 'timeout', 'statusMessage', 'once'];
 const HOOK_TYPE_FIELDS = {
@@ -200,7 +221,7 @@ function editDistance(a, b) {
 function checkUnknownKeys(obj, known, at, what, fail) {
   for (const key of Object.keys(obj)) {
     if (!known.includes(key)) {
-      fail(`${at}.${key} is not ${what} in the Claude Code reference; ${SKIPPED}. If the docs added it, add it to the list in scripts/check-claude-settings.js`);
+      fail(`${at}.${key} is not ${what} in the Claude Code reference; ${IGNORED_KEY}. If the docs added it, add it to the list in scripts/check-claude-settings.js`);
     }
   }
 }
@@ -261,8 +282,11 @@ function checkPermissions(permissions, fail) {
 }
 
 // Matcher evaluation per the hooks reference: "*", "" or omitted match all;
-// only letters, digits, _, -, space, comma and | is an exact string or list;
-// anything else is a JavaScript regular expression, which must compile.
+// only letters, digits, _, -, space, comma and | is an exact string or list
+// (FileChanged and StopFailure: letters, digits, _ and | only, so their
+// other matchers are regular expressions, which strings of those characters
+// always are); anything else is a JavaScript regular expression, which must
+// compile.
 function checkMatcher(matcher, event, at, fail) {
   if (NO_MATCHER_EVENTS.includes(event)) fail(`${at}.matcher has no effect: ${event} has no matcher support`);
   if (typeof matcher !== 'string') return fail(`${at}.matcher must be a string`);
@@ -298,6 +322,10 @@ function checkPathToken(token, root, at, fail, executable) {
   }
   if (rel === '') {
     fail(`${at} names the project directory, not a script: ${JSON.stringify(token)}`);
+    return true;
+  }
+  if (rel === HOOKS_DIR.slice(0, -1)) {
+    fail(`${at} names the hooks directory, not a script: ${JSON.stringify(token)}`);
     return true;
   }
   if (!rel.startsWith(HOOKS_DIR)) {
@@ -340,7 +368,7 @@ function checkPathToken(token, root, at, fail, executable) {
     const shebang = n >= 2 && head[0] === 0x23 && head[1] === 0x21;
     const elf = n >= 4 && head[0] === 0x7f && head.toString('latin1', 1, 4) === 'ELF';
     if (!shebang && !elf) {
-      fail(`${at}: ${rel} has no #! line; it is run directly, so without one the system hands it to /bin/sh`);
+      fail(`${at}: ${rel} has no #! line; it is spawned directly, and without one it fails to start or, on some runtimes, runs under /bin/sh`);
     }
   }
   if (/\.[cm]?js$/.test(rel)) {
@@ -353,10 +381,13 @@ function checkPathToken(token, root, at, fail, executable) {
 // Command hooks here use exec form, which the hooks reference asks for
 // whenever a path placeholder is involved: "command" is the executable and
 // each element of "args" is one argument, with no shell on any platform.
-// Either the command is the repository script itself, or it is a bare
-// program name (an interpreter on PATH) and the script is its first
-// argument. Interpreter flags and inline code ("bash -c ...", "node -e ...")
-// are not accepted: what a hook runs must be a file this repository reviews.
+// The command is a bare program name (an interpreter on PATH, such as
+// "node") and the script is its first argument. A script as the command is
+// not accepted: on Windows exec form needs a real executable such as a
+// .exe, and "node" plus the script path is the pattern the reference says
+// works on every platform. Interpreter flags and inline code ("bash -c ...",
+// "node -e ...") are not accepted either: what a hook runs must be a file
+// this repository reviews.
 const PROGRAM_NAME = /^[A-Za-z0-9](?:[A-Za-z0-9._+-]*[A-Za-z0-9_+-])?$/;
 // These exec() their first argument rather than reading it, so a script
 // given to one must itself be runnable.
@@ -371,21 +402,14 @@ function checkCommandHook(hook, root, at, fail) {
     fail(`${at}.args[${n}] must be a string`);
     return '';
   });
-  let launcher = false;
-  if (/\$\{?CLAUDE_PROJECT_DIR/.test(hook.command)) {
-    if (/\$\{CLAUDE_PROJECT_DIR\}/.test(hook.command) && !hook.command.startsWith('${CLAUDE_PROJECT_DIR}/')) {
-      fail(`${at}.command must be exactly the \${CLAUDE_PROJECT_DIR}/.claude/hooks/ script path, not a command line; exec form spawns the whole string as one executable, so put the interpreter in "command" and the script in "args": ${JSON.stringify(hook.command)}`);
-    } else {
-      checkPathToken(hook.command, root, `${at}.command`, fail, true);
-    }
-  } else {
-    launcher = EXEC_LAUNCHERS.includes(hook.command);
-    if (!PROGRAM_NAME.test(hook.command)) {
-      fail(`${at}.command must be a bare program name such as "node", or the \${CLAUDE_PROJECT_DIR}/.claude/hooks/ script itself: ${JSON.stringify(hook.command)}`);
-    }
-    if (args.length === 0 || !args[0].startsWith('${CLAUDE_PROJECT_DIR}/')) {
-      fail(`${at}.args[0] must be the \${CLAUDE_PROJECT_DIR}/.claude/hooks/ script; interpreter flags and inline code are not accepted, put them in the script`);
-    }
+  const launcher = EXEC_LAUNCHERS.includes(hook.command);
+  if (/CLAUDE_PROJECT_DIR/.test(hook.command)) {
+    fail(`${at}.command must be a program on PATH such as "node", with the script as args[0]; a script as the command cannot be spawned on Windows, where exec form needs a real executable: ${JSON.stringify(hook.command)}`);
+  } else if (!PROGRAM_NAME.test(hook.command)) {
+    fail(`${at}.command must be a bare program name such as "node": ${JSON.stringify(hook.command)}`);
+  }
+  if (args.length === 0 || !args[0].startsWith('${CLAUDE_PROJECT_DIR}/')) {
+    fail(`${at}.args[0] must be the \${CLAUDE_PROJECT_DIR}/.claude/hooks/ script; interpreter flags and inline code are not accepted, put them in the script`);
   }
   args.forEach((arg, n) => checkPathToken(arg, root, `${at}.args[${n}]`, fail, launcher && n === 0));
   for (const k of ['async', 'asyncRewake']) {
@@ -407,10 +431,11 @@ function checkHook(hook, event, root, at, fail) {
   }
   if (hasOwn(hook, 'statusMessage') && typeof hook.statusMessage !== 'string') fail(`${at}.statusMessage must be a string`);
   if (hasOwn(hook, 'once')) fail(`${at}.once is honoured only in skill frontmatter and ignored in a settings file`);
-  if (hook.type === 'command') return checkCommandHook(hook, root, at, fail);
-  if (hook.type === 'mcp_tool' && event === 'Setup') {
-    fail(`${at}: Setup fires before MCP servers are available, so Claude Code skips mcp_tool hooks on it; use a command hook`);
+  if (!EVENT_HOOK_TYPES[event].includes(hook.type)) {
+    const why = event === 'Setup' && hook.type === 'mcp_tool' ? ' (Setup fires before MCP servers are available)' : '';
+    fail(`${at}: ${event} does not run ${hook.type} hooks${why}; Claude Code skips it. ${event} supports ${EVENT_HOOK_TYPES[event].join(', ')}`);
   }
+  if (hook.type === 'command') return checkCommandHook(hook, root, at, fail);
   if (hook.type === 'prompt' && hasOwn(hook, 'continueOnBlock') && typeof hook.continueOnBlock !== 'boolean') {
     fail(`${at}.continueOnBlock must be true or false`);
   }
@@ -424,7 +449,7 @@ function checkHooks(hooks, root, fail) {
   if (!isPlainObject(hooks)) return fail('"hooks" must be an object');
   for (const event of Object.keys(hooks)) {
     if (!HOOK_EVENTS.includes(event)) {
-      fail(`hooks.${event} is not a hook event in the Claude Code reference; ${SKIPPED}, so the hook never runs. If the docs added it, add it to HOOK_EVENTS in scripts/check-claude-settings.js`);
+      fail(`hooks.${event} is not a hook event in the Claude Code reference; ${SKIPPED_EVENT}, so the hook never runs. If the docs added it, add it to HOOK_EVENTS in scripts/check-claude-settings.js`);
       continue;
     }
     const matchers = hooks[event];
@@ -502,5 +527,5 @@ function main() {
 if (require.main === module) {
   main();
 } else {
-  module.exports = { parseStrict, checkSettings, MAX_DEPTH, HOOKS_DIR, HOOK_EVENTS, PERMISSION_KEYS };
+  module.exports = { parseStrict, checkSettings, MAX_DEPTH, HOOKS_DIR, HOOK_EVENTS, PERMISSION_KEYS, EVENT_HOOK_TYPES };
 }

@@ -32,8 +32,10 @@ development project or a Supabase branch instead.
 `settings.json` is the committed permission policy for every Claude Code
 session in this repo. What to know about it:
 
-**What is allowed without a prompt.** Only `Bash(ldd --version)`, as an exact
-command. Nothing else is in `permissions.allow`. A Bash rule can match the
+**What is allowed without a prompt.** The committed `permissions.allow` holds
+one rule, `Bash(ldd --version)`, as an exact command. (Claude Code's built-in
+read-only commands, such as `ls`, `cat` and `git status`, run without a
+prompt in every mode whatever this file says.) A Bash rule can match the
 command text, as that one does. A rule for an MCP tool cannot: Claude Code
 skips any `mcp__` rule written with parentheses, so an allow rule for an MCP
 tool matches every call to it whatever the arguments. A tool with a free-form
@@ -53,10 +55,12 @@ it in exec form, `"command": "node", "args":
 reference asks for whenever a path placeholder is involved: each element of
 `args` is one argument, with no shell quoting to differ between macOS, Linux
 and Windows. The check below requires exactly that of a command hook: the
-command is the script itself (executable, starting with `#!`) or a bare
-interpreter name with the script as its first argument (no interpreter flags
-or inline code), and every script named lives under `.claude/hooks/`, exists
-(symlinks resolved) and, for JavaScript, parses.
+command is an interpreter on `PATH` such as `node`, with the script as its
+first argument (no interpreter flags or inline code), and every script named
+lives under `.claude/hooks/`, exists (symlinks resolved) and, for
+JavaScript, parses. A script as the command itself is not accepted: on
+Windows exec form needs a real executable, and `node` plus the script path
+is the pattern the hooks reference says works on every platform.
 
 **Sends always ask.** `permissions.ask` names the Gmail send, reply and
 forward tools and Opera's `go-to-page`, along with the Hugging Face commands
@@ -75,13 +79,15 @@ which is public and binds every clone.
 
 **The check.** `scripts/check-claude-settings.js` fails on a duplicate JSON
 key at any depth, which is how #21's rules were silently lost. It then checks
-permission keys and values, hook event names and the fields of every hook
-type against the documented lists (a typo there is an entry Claude Code
-skips, with a Settings Warning in an interactive session and nothing at all
-in a `-p` or CI run: the same failure in another form), the permission
-lists, and command hooks as described above. Its tests are in `scripts/test-check-claude-settings.js`.
-CI runs both from `.github/workflows/claude-settings.yml` whenever `.claude/`
-changes. Locally:
+permission keys and values, hook event names, the hook types each event
+runs, and the fields of every hook type against the documented lists. A typo
+there is an entry Claude Code drops: an unknown hook event gets a Settings
+Warning in an interactive session and nothing in a `-p` or CI run, and an
+unknown permission key or hook field gets no warning anywhere. It is the
+same failure in another form. It also checks the permission lists, and
+command hooks as described above. Its tests are in
+`scripts/test-check-claude-settings.js`. CI runs both from
+`.github/workflows/claude-settings.yml` whenever `.claude/` changes. Locally:
 
 ```sh
 node scripts/test-check-claude-settings.js && node scripts/check-claude-settings.js
