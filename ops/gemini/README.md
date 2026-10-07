@@ -1,6 +1,6 @@
 # Gemini from an agent session
 
-`gemini.py` lets a Claude, Codex or other agent session ask Gemini directly, so Sanjay no longer has to copy messages between a Gemini chat and the sessions. Sanjay chose this route on 2026-10-07: a free Google AI Studio API key, stored as the `GEMINI_API_KEY` environment variable of the cloud environment.
+`gemini.py` lets a Claude, Codex or other agent session ask Gemini directly, so Sanjay no longer has to copy messages between a Gemini chat and the sessions. Sanjay chose this route on 2026-10-07: a free Google AI Studio API key, attached to the cloud environment as a network secret, so the agent proxy adds it to each request and sessions never hold it.
 
 Why this route: the Gemini CLI's personal Google sign-in is refused (`IneligibleTierError ... no longer supported for Gemini Code Assist for individuals`). Antigravity (`agy`) on DESKTOP-4D08JI5 works, but only while that PC is reachable and only within its individual quota (exhausted on 2026-10-07 until 2026-10-10 05:52 UTC). The Gemini API answers from the cloud sessions directly.
 
@@ -32,21 +32,27 @@ python3 ops/gemini/gemini.py --list-models
 ```
 
 - The answer goes to stdout. The model, token counts and finish reason go to stderr.
-- `--model auto` (the default) uses the newest stable Gemini Pro the key can see. On a 429 (rate limit or free-tier quota) it retries once on the newest stable Flash. `--model <id>` or `GEMINI_MODEL` pins one.
+- `--model auto` (the default) tries the newest stable Gemini Pro the key can see, then the newest stable Flash if Pro answers 429 (rate limit or no free-tier quota) or 500/503/504. Pro may have no free quota at all, in which case every call spends one free request on that attempt. `--model <id>` or `GEMINI_MODEL` pins one (for example `GEMINI_MODEL=gemini-2.5-flash`). `--check` lists what auto would try, not what will answer.
+- A finishReason other than STOP (for example MAX_TOKENS) prints a warning on stderr: the answer may be cut short.
+- `-f` reads regular files only. For a pipe or a command's output, use `-` and stdin.
 - Threads live in `~/.local/state/kg-gemini/threads/` (mode 600, outside the repo). A cloud container's threads disappear when the container is reclaimed.
 - Exit codes: 0 ok, 2 usage, 3 no key, 4 input refused, 5 API error, 6 rate limited or quota exhausted, 7 response blocked or empty.
 
 ## Rules
 
 - On the free tier, Google may use prompts and answers to improve its products, and people may read them. So never send client or collector records, consignor names, inventory, prices, valuations, gallery photographs, or anything from a session transcript. Send code, plans, public facts and redacted summaries only.
-- The script refuses inputs that look like secrets (private keys, Google, GitHub, OpenAI/Anthropic, Hugging Face, Slack or AWS keys, JWTs, `password=`-style assignments) and the key itself. It also refuses some paths outright:
-  - transcripts (`.claude/projects`, `.codex/sessions`, `.pi/agent/sessions`)
-  - `~/.ssh`, `~/.gemini`, `.env*` and key files
-  - `ops/network/inventory.csv`, `status.md` and `out/`
-  - images, and data files whose names say inventory, client, price, valuation and the like
+- Everything sent is checked first: the prompt, stdin, `-f` files, `--system` and the saved thread. The script refuses:
+  - anything shaped like a secret: private keys; Google, GitHub, GitLab, npm, OpenAI/Anthropic, Stripe, Supabase, SendGrid, Hugging Face, Slack or AWS keys; JWTs; Solana keypairs; `Authorization: Bearer` tokens; netrc passwords; passwords in URLs; `KEY=`/`password:`-style assignments with a real-looking value (references such as `process.env.X` or `${{ secrets.X }}` and placeholders such as `YOUR_API_KEY` pass); the key itself
+  - session transcripts and run logs, by path (`.claude/projects`, `.claude/history.jsonl`, `.config/claude`, `.codex`, `.pi`, `tasks/*.output`, any `.jsonl`) and by content (Claude and Codex JSON-lines records)
+  - credentials by path: `~/.ssh`, `~/.gnupg`, `~/.gemini`, `~/.aws`, `~/.config/solana`, `.netrc`, `.pgpass`, `.git-credentials`, `.npmrc`, `.dev.vars`, `.envrc`, `.env*` and `*.env` (`.env.example`, `.sample`, `.template` and `.dist` pass), key files
+  - the network map: `ops/network/inventory.csv`, `status.md` and `out/`, and the inventory header row in any input
+  - mail, contacts and calendars (`.eml`, `.msg`, `.mbox`, `.pst`, `.vcf`, `.ics`); spreadsheets, CSVs, databases and SQL dumps; images
+  - documents whose path names gallery data (client, collector, inventory, price, valuation, consignment, invoice, order, sale, donation, auction, offer, provenance and the like, in the file or folder name)
+  - table header rows with client or price columns, and diffs that touch any refused path
 
-  These checks catch obvious cases only. Keeping client data out is still the caller's job.
-- The key is read only from `GEMINI_API_KEY`. It is sent only to `https://generativelanguage.googleapis.com` in the `x-goog-api-key` header, never in a URL. Redirects are refused, and error text is scrubbed of the key. Never print the variable, never copy it elsewhere, and never pass it on a command line. With no variable set, requests go out without the header and rely on the proxy adding it; if neither supplies a key, the script exits 3.
+  Path and case checks are case-insensitive. These checks catch obvious cases only, and some legitimate files are refused (anything with a private-key header, for instance this client's own tests); keeping client data out is still the caller's job.
+- A secret-shaped string in one of Gemini's own answers is redacted before the thread is saved, so it never blocks the thread.
+- With a network secret, the agent proxy adds the key; the proxy also terminates TLS, so it handles every request either way. With `GEMINI_API_KEY` instead, the key is checked for shape (a malformed value exits 3 without being printed) and sent only to `https://generativelanguage.googleapis.com` in the `x-goog-api-key` header, never in a URL. Redirects are refused, and error text is scrubbed of the key. Never print the variable, never copy it elsewhere, and never pass it on a command line. With no variable set, requests go out without the header and rely on the proxy adding it; if neither supplies a key, the script exits 3.
 - Free tier only. Turning on billing for the key's project, or using a paid model tier, is spending, and spending needs Sanjay's yes first (root `AGENTS.md`).
 - Choosing this route did not change any review gate. Whether a Gemini answer obtained this way satisfies a session's cross-model review requirement is Sanjay's call.
 
