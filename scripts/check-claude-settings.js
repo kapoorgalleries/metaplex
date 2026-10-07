@@ -47,8 +47,15 @@ const HOOK_EVENTS = [
 ];
 const HOOK_TYPES = ['command', 'http', 'mcp_tool', 'prompt', 'agent'];
 const HOOK_COMMON_FIELDS = ['type', 'if', 'timeout', 'statusMessage', 'once'];
-const HOOK_COMMAND_FIELDS = ['command', 'args', 'async', 'asyncRewake', 'shell'];
+const HOOK_TYPE_FIELDS = {
+  command: ['command', 'args', 'async', 'asyncRewake', 'shell'],
+  http: ['url', 'headers', 'allowedEnvVars'],
+  mcp_tool: ['server', 'tool', 'input'],
+  prompt: ['prompt', 'model'],
+  agent: ['prompt', 'model'],
+};
 const HOOK_REQUIRED_STRINGS = { http: ['url'], mcp_tool: ['server', 'tool'], prompt: ['prompt'], agent: ['prompt'] };
+const PERMISSION_MODES = ['default', 'acceptEdits', 'plan', 'auto', 'dontAsk', 'bypassPermissions', 'manual'];
 
 // A small JSON parser that rejects duplicate keys. Objects are returned as
 // prototype-less so a key such as "__proto__" cannot shadow anything.
@@ -174,7 +181,15 @@ function checkPermissions(permissions, fail) {
   if (permissions === undefined) return;
   if (!isPlainObject(permissions)) return fail('"permissions" must be an object');
   checkUnknownKeys(permissions, PERMISSION_KEYS, 'permissions', 'a permissions key', fail);
-  if (hasOwn(permissions, 'defaultMode') && !isNonEmptyString(permissions.defaultMode)) fail('permissions.defaultMode must be a string');
+  if (hasOwn(permissions, 'defaultMode') && !PERMISSION_MODES.includes(permissions.defaultMode)) {
+    fail(`permissions.defaultMode must be one of ${PERMISSION_MODES.map((m) => `"${m}"`).join(', ')}`);
+  }
+  if (hasOwn(permissions, 'blockReadsOutsideWorkingDirectories') && typeof permissions.blockReadsOutsideWorkingDirectories !== 'boolean') {
+    fail('permissions.blockReadsOutsideWorkingDirectories must be true or false');
+  }
+  if (hasOwn(permissions, 'disableBypassPermissionsMode') && permissions.disableBypassPermissionsMode !== 'disable') {
+    fail('permissions.disableBypassPermissionsMode must be the string "disable"');
+  }
   if (hasOwn(permissions, 'additionalDirectories')) {
     const dirs = permissions.additionalDirectories;
     if (!Array.isArray(dirs) || !dirs.every(isNonEmptyString)) fail('permissions.additionalDirectories must be an array of strings');
@@ -230,6 +245,10 @@ function checkPathToken(token, root, at, fail) {
     return true;
   }
   const rel = m[1];
+  if (rel.includes('\\')) {
+    fail(`${at}: ${rel} must use forward slashes, which Claude Code resolves on every platform`);
+    return true;
+  }
   if (!rel.startsWith(HOOKS_DIR)) {
     fail(`${at}: ${rel} is not under ${HOOKS_DIR}`);
     return true;
@@ -261,19 +280,32 @@ function checkPathToken(token, root, at, fail) {
 // Command hooks here use exec form, which the hooks reference asks for
 // whenever a path placeholder is involved: "command" is the executable and
 // each element of "args" is one argument, with no shell on any platform.
+// Either the command is the repository script itself, or it is a bare
+// program name (an interpreter on PATH) and the script is its first
+// argument. Interpreter flags and inline code ("bash -c ...", "node -e ...")
+// are not accepted: what a hook runs must be a file this repository reviews.
+const PROGRAM_NAME = /^[A-Za-z0-9._+-]+$/;
 function checkCommandHook(hook, root, at, fail) {
-  checkUnknownKeys(hook, [...HOOK_COMMON_FIELDS, ...HOOK_COMMAND_FIELDS], at, 'a command hook field', fail);
   if (!isNonEmptyString(hook.command)) return fail(`${at}.command must be a non-empty string`);
   if (!Array.isArray(hook.args)) {
     return fail(`${at} must use exec form: the executable in "command" and the script path as one element of "args" (shell form is not used in this repository; see "Exec form and shell form" in the hooks reference)`);
   }
-  if (/\s/.test(hook.command)) fail(`${at}.command must be one executable in exec form, not a command line: ${JSON.stringify(hook.command)}`);
-  let found = checkPathToken(hook.command, root, `${at}.command`, fail);
-  hook.args.forEach((arg, n) => {
-    if (typeof arg !== 'string') return fail(`${at}.args[${n}] must be a string`);
-    if (checkPathToken(arg, root, `${at}.args[${n}]`, fail)) found = true;
+  const args = hook.args.map((arg, n) => {
+    if (typeof arg === 'string') return arg;
+    fail(`${at}.args[${n}] must be a string`);
+    return '';
   });
-  if (!found) fail(`${at} does not reference a script via \${CLAUDE_PROJECT_DIR}; hooks here must live in ${HOOKS_DIR}`);
+  if (hook.command.includes('CLAUDE_PROJECT_DIR')) {
+    checkPathToken(hook.command, root, `${at}.command`, fail);
+  } else {
+    if (!PROGRAM_NAME.test(hook.command)) {
+      fail(`${at}.command must be a bare program name such as "node", or the \${CLAUDE_PROJECT_DIR}/.claude/hooks/ script itself: ${JSON.stringify(hook.command)}`);
+    }
+    if (args.length === 0 || !args[0].startsWith('${CLAUDE_PROJECT_DIR}/')) {
+      fail(`${at}.args[0] must be the \${CLAUDE_PROJECT_DIR}/.claude/hooks/ script; interpreter flags and inline code are not accepted, put them in the script`);
+    }
+  }
+  args.forEach((arg, n) => checkPathToken(arg, root, `${at}.args[${n}]`, fail));
   for (const k of ['async', 'asyncRewake']) {
     if (hasOwn(hook, k) && typeof hook[k] !== 'boolean') fail(`${at}.${k} must be true or false`);
   }
@@ -289,6 +321,7 @@ function checkHook(hook, root, at, fail) {
   if (hasOwn(hook, 'if') && !isNonEmptyString(hook.if)) fail(`${at}.if must be a permission rule string`);
   if (hasOwn(hook, 'statusMessage') && typeof hook.statusMessage !== 'string') fail(`${at}.statusMessage must be a string`);
   if (hasOwn(hook, 'once') && typeof hook.once !== 'boolean') fail(`${at}.once must be true or false`);
+  checkUnknownKeys(hook, [...HOOK_COMMON_FIELDS, ...HOOK_TYPE_FIELDS[hook.type]], at, `a ${hook.type} hook field`, fail);
   if (hook.type === 'command') return checkCommandHook(hook, root, at, fail);
   for (const k of HOOK_REQUIRED_STRINGS[hook.type]) {
     if (!isNonEmptyString(hook[k])) fail(`${at}.${k} must be a non-empty string for a ${hook.type} hook`);

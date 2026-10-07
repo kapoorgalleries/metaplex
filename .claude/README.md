@@ -52,9 +52,11 @@ it in exec form, `"command": "node", "args":
 ["${CLAUDE_PROJECT_DIR}/.claude/hooks/<name>.js"]`, which is what the hooks
 reference asks for whenever a path placeholder is involved: each element of
 `args` is one argument, with no shell quoting to differ between macOS, Linux
-and Windows. The check below requires exactly that of a command hook, and
-that every script it names lives under `.claude/hooks/`, exists (symlinks
-resolved) and, for JavaScript, parses.
+and Windows. The check below requires exactly that of a command hook: the
+command is the script itself or a bare interpreter name with the script as
+its first argument (no interpreter flags or inline code), and every script
+named lives under `.claude/hooks/`, exists (symlinks resolved) and, for
+JavaScript, parses.
 
 **Sends always ask.** `permissions.ask` names the Gmail send, reply and
 forward tools and Opera's `go-to-page`, along with the Hugging Face commands
