@@ -384,9 +384,13 @@ def main(argv=None):
         err(f"refused: {e}")
         return EXIT_REFUSED
     except ApiError as e:
-        if not key and e.status in (401, 403):
+        if not key and e.status == 403 and "unregistered callers" in e.message:
             err(f"no key: {KEY_ENV} is not set and the network proxy supplied none "
                 f"({e.status} {e.code}); see ops/gemini/README.md")
+            return EXIT_NO_KEY
+        if not key and e.status == 401:
+            err(f"a credential reached Google but was rejected ({e.status} {e.code}): the network "
+                f"secret must use header x-goog-api-key with no Bearer prefix; see ops/gemini/README.md")
             return EXIT_NO_KEY
         err(f"Gemini API error {e.status} {e.code}: {scrub(e.message, key)}")
         return EXIT_RATE if e.status == 429 else EXIT_API

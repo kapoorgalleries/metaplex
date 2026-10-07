@@ -119,6 +119,12 @@ class KeyHandling(Base):
         self.assertEqual(len(rec.requests), 1)
         self.assertIsNone(rec.requests[0].get_header("X-goog-api-key"))
 
+    def test_proxy_bearer_header_is_diagnosed(self):
+        e = http_error("u", 401, "UNAUTHENTICATED", "Request had invalid authentication credentials.")
+        code, _, errs, _ = run(["--check"], [e], env_key=None)
+        self.assertEqual(code, gemini.EXIT_NO_KEY)
+        self.assertIn("x-goog-api-key", errs)
+
     def test_proxy_supplied_key(self):
         code, out, errs, rec = run(["hello"], [MODELS, answer("via proxy")], env_key=None)
         self.assertEqual(code, 0, errs)

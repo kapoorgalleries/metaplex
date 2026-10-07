@@ -7,8 +7,15 @@ Why this route: the Gemini CLI's personal Google sign-in is refused (`Ineligible
 ## One-time setup (Sanjay)
 
 1. Open https://aistudio.google.com/app/apikey, choose **Create API key**, and create it in a new project. Leave billing off on that project: with no billing account, the key can only use the free tier and cannot be charged. Copy the key. It goes only into step 2's settings field, never into a chat, file or command.
-2. In the Claude app or claude.ai/code, open the cloud environment menu in a session's title bar, choose the **Kapoor Syndicate** environment, then **Edit**. Add an environment variable named `GEMINI_API_KEY` with the key as its value. If the page offers a Network secrets section, use it and keep the same name.
-3. Sessions started after that see the key; sessions already running do not. In a new session, `python3 ops/gemini/gemini.py --check` should print `key: from GEMINI_API_KEY` (an environment variable) or `key: supplied by the network proxy` (a Network secret, which the proxy adds to each request so the session never holds it), followed by `N models visible; auto picks: ...`.
+2. At claude.ai/code, open the cloud environment menu in a session's title bar, choose **Kapoor Syndicate**, then **Edit**. Under **Network secrets**, choose **Add secret** and fill in:
+   - **Name**: `Gemini API`. This is only a label.
+   - **Allowed websites**: `generativelanguage.googleapis.com`
+   - **Custom headers**: change the header **Name** from `Authorization` to `x-goog-api-key`, clear the **Prefix** (delete `Bearer`), and paste the key as the **Value**. Gemini rejects an API key sent as `Authorization: Bearer`.
+
+   Then choose **Connect**. A secret can't be edited afterwards; to fix one, delete it and add it again. The agent proxy adds the key to every request for that host, so sessions never see it. If the list marks the secret **Not sent**, the note under it says why.
+
+   On a plan without Network secrets, add an environment variable `GEMINI_API_KEY` instead. Anyone who uses the environment can read environment variables.
+3. `python3 ops/gemini/gemini.py --check` should then print `key: supplied by the network proxy` (or `key: from GEMINI_API_KEY` for the variable), followed by `N models visible; auto picks: ...`. A 403 "unregistered callers" means no key reached Google: wrong environment, wrong website, or a **Not sent** secret. A 401 "invalid authentication credentials" means the header is still `Authorization: Bearer`.
 
 To revoke: delete the key in AI Studio. Every session loses access at once.
 
