@@ -401,6 +401,9 @@ entry = {"url": url, "type": "http", "headers": {"Authorization": "Bearer ${HF_T
 doc = (json.dumps({"mcpServers": {"huggingface": entry}}, indent=2) + "\n").encode()
 try:
     os.makedirs(os.path.dirname(cfg), exist_ok=True)
+except OSError:  # e.g. a file or dangling link named .gemini: there is no settings.json to report
+    sys.exit(1)
+try:
     # O_EXCL: refuses any existing name, a symlink included, so nothing is ever overwritten.
     fd = os.open(cfg, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
 except FileExistsError:
@@ -411,10 +414,24 @@ except FileExistsError:
 except OSError:
     sys.exit(1)
 try:
-    os.write(fd, doc)
-    os.fsync(fd)
-finally:
-    os.close(fd)
+    try:
+        done = 0
+        while done < len(doc):  # os.write may take only part, as on a disk that is filling up
+            n = os.write(fd, doc[done:])
+            if n <= 0:
+                raise OSError("settings.json: write made no progress")
+            done += n
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+except OSError:
+    # The file is this run's own, half written: remove it, so neither Gemini nor the next run reads a
+    # broken settings.json as the user's own.
+    try:
+        os.unlink(cfg)
+    except OSError:
+        print(f"gemini: could not remove the partly written {cfg}; delete it, then rerun", file=sys.stderr)
+    sys.exit(1)
 PYJSON
 }
 register_hf_mcp() {
@@ -434,7 +451,7 @@ register_hf_mcp() {
       elif [ "$state" = 4 ]; then
         warn "gemini: user settings exist; huggingface entry not added (manual step above)"; failed hf-mcp-gemini
       else
-        warn "gemini: could not create user settings; nothing changed"; failed hf-mcp-gemini
+        warn "gemini: could not create user settings"; failed hf-mcp-gemini
       fi
     else
       warn "gemini: user settings need manual review (commented/unsupported JSON, incompatible URL or missing blocked tools); left unchanged"; failed hf-mcp-gemini
@@ -458,9 +475,11 @@ register_hf_mcp() {
 }
 
 have curl || { warn "curl is required"; exit 1; }
-if [ "$OS" = "Linux" ] && [ -r /proc/cpuinfo ] && ! grep -qw avx /proc/cpuinfo; then
+# AVX is an x86 feature: ARM machines (Raspberry Pi, Graviton) run the arm64 build without it.
+if [ "$OS" = "Linux" ] && case "$(uname -m)" in x86_64|amd64|i?86) true ;; *) false ;; esac &&
+   [ -r /proc/cpuinfo ] && ! grep -qw avx /proc/cpuinfo; then
   warn "this CPU has no AVX; Claude Code's native binary needs it (pre-2013 hardware). Skipping Claude Code on this machine."
-  SKIP_CLAUDE=1
+  SKIP_CLAUDE=1; failed claude-needs-avx   # the job needs claude everywhere: this machine cannot have it
 fi
 [ "$SKIP_CLAUDE" = 1 ] || install_claude || failed claude
 [ "$SKIP_CODEX" = 1 ]  || install_codex  || failed codex
@@ -504,13 +523,13 @@ the terminal's echo off, and it lasts for that shell only.
            API key:  printf 'key: '; read -rs K; echo; printf '%s' "$K" | codex login --with-api-key; unset K
            (exporting OPENAI_API_KEY on its own is not a login)
            check:  codex login status     credentials: ~/.codex/auth.json
-  gemini   "Sign in with Google" on a personal (free individual) account now fails: "This client
-           is no longer supported for Gemini Code Assist for individuals" (seen 2026-09-26). Use an
-           API key (this shell only; https://aistudio.google.com/app/apikey), then run `gemini`:
+  gemini   run `gemini` and choose "Sign in with Google". Over SSH (with a terminal: ssh -t) run
+           NO_BROWSER=true gemini  and paste the code back within 5 minutes. Google Workspace account (not personal Gmail): first
+           export GOOGLE_CLOUD_PROJECT=<project-id>; personal Gmail must leave it unset.
+           "no longer supported for Gemini Code Assist for individuals": that account's free tier is
+           closed to Gemini CLI; the way in (API key, paid Workspace project, or Antigravity) is Sanjay's call.
+           API key instead (this shell only; https://aistudio.google.com/app/apikey):
            printf 'key: '; read -rs GEMINI_API_KEY; echo; export GEMINI_API_KEY
-           Google Workspace account (not retested): export GOOGLE_CLOUD_PROJECT=<project-id>, run
-           `gemini` and choose "Sign in with Google"; over SSH (ssh -t) run  NO_BROWSER=true gemini
-           and paste the code back within 5 minutes. Personal Gmail must leave it unset.
   hf       run `hf auth login` (over SSH: ssh -t). "Log in with your browser" prints a URL and a code:
            open the URL on any machine and enter the code. "Paste an access token" reads a token at a
            hidden prompt: make one per machine at https://huggingface.co/settings/tokens > New token,

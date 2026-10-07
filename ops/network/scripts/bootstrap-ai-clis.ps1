@@ -266,6 +266,7 @@ function Add-GeminiHf {
   # GetAttributes sees the name itself, a dangling link included, so nothing is created through one.
   $taken = { try { [void][IO.File]::GetAttributes($cfg); $true } catch { $false } }
   if (-not (& $taken)) {
+    $made = $false
     try {
       New-Item -ItemType Directory -Force -Path $dir | Out-Null
       # Only this user can open the new file, from the moment it exists. CreateNew refuses any
@@ -277,9 +278,18 @@ function Add-GeminiHf {
       $fs = if ($PSVersionTable.PSEdition -ceq 'Core') {
         [IO.FileSystemAclExtensions]::Create([IO.FileInfo]$cfg, [IO.FileMode]::CreateNew, $w, [IO.FileShare]::None, 4096, [IO.FileOptions]::None, $acl)
       } else { New-Object IO.FileStream($cfg, [IO.FileMode]::CreateNew, $w, [IO.FileShare]::None, 4096, [IO.FileOptions]::None, $acl) }
+      $made = $true
       try { $bytes = [Text.Encoding]::UTF8.GetBytes($doc + "`n"); $fs.Write($bytes, 0, $bytes.Length); $fs.Flush($true) } finally { $fs.Dispose() }
       return 0
-    } catch { if (-not (& $taken)) { return 1 } }
+    } catch {
+      # After CreateNew the file is this run's own, half written: remove it, so neither Gemini nor the
+      # next run reads a broken settings.json as the user's own.
+      if ($made) {
+        try { [IO.File]::Delete($cfg) } catch { Write-Warning "gemini: could not remove the partly written $cfg; delete it, then rerun" }
+        return 1
+      }
+      if (-not (& $taken)) { return 1 }
+    }
   }
   Write-Host ("gemini: $cfg already exists and was left unchanged. To finish, add this entry inside its top-level " +
     '"mcpServers" object (create "mcpServers": { } if it has none), then rerun:')
@@ -393,7 +403,7 @@ if (-not $SkipHf) {
       $rc = Add-GeminiHf
       if ($rc -eq 0 -and (Get-HfClientState 'gemini') -eq 0) { Log 'gemini: created user settings with the huggingface MCP server' }
       elseif ($rc -eq 4) { Add-Failure 'hf-mcp-gemini' 'gemini: user settings exist; huggingface entry not added (manual step above)' }
-      else { Add-Failure 'hf-mcp-gemini' 'gemini: could not create user settings; nothing changed' }
+      else { Add-Failure 'hf-mcp-gemini' 'gemini: could not create user settings' }
     } else { Add-Failure 'hf-mcp-gemini' 'gemini: user settings need manual review (commented/unsupported JSON, incompatible URL or missing blocked tools); left unchanged' }
   }
   if ($WithClaudeHfMcp -and -not $SkipClaude -and (Have 'claude')) {
@@ -434,13 +444,14 @@ read it with Read-Host -AsSecureString, and it lasts for that window only.
            API key:  [Net.NetworkCredential]::new('', (Read-Host 'key' -AsSecureString)).Password | codex login --with-api-key
            (setting OPENAI_API_KEY on its own is not a login)
            check:  codex login status     credentials: %USERPROFILE%\.codex\auth.json
-  gemini   "Sign in with Google" on a personal (free individual) account now fails: "This client
-           is no longer supported for Gemini Code Assist for individuals" (seen 2026-09-26). Use an
-           API key (this window only; https://aistudio.google.com/app/apikey), then run `gemini`:
+  gemini   run `gemini` and choose "Sign in with Google". Over SSH (with a terminal: ssh -t) set
+           $env:NO_BROWSER = 'true'  first and paste the code back within 5 minutes.
+           Google Workspace account (not personal Gmail): first
+           $env:GOOGLE_CLOUD_PROJECT = '<project-id>'; personal Gmail must leave it unset.
+           "no longer supported for Gemini Code Assist for individuals": that account's free tier is
+           closed to Gemini CLI; the way in (API key, paid Workspace project, or Antigravity) is Sanjay's call.
+           API key instead (this window only; https://aistudio.google.com/app/apikey):
            $env:GEMINI_API_KEY = [Net.NetworkCredential]::new('', (Read-Host 'key' -AsSecureString)).Password
-           Google Workspace account (not retested): $env:GOOGLE_CLOUD_PROJECT = '<project-id>', run
-           `gemini` and choose "Sign in with Google"; over SSH (ssh -t) set $env:NO_BROWSER = 'true'
-           first and paste the code back within 5 minutes. Personal Gmail must leave it unset.
   hf       run `hf auth login` (over SSH: ssh -t). "Log in with your browser" prints a URL and a code:
            open the URL on any machine and enter the code. "Paste an access token" reads a token at a
            hidden prompt: make one per machine at https://huggingface.co/settings/tokens > New token,

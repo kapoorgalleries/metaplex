@@ -13,7 +13,7 @@ Where the same thing lives per vendor:
 | Enable SSH | Control Panel → Terminal & SNMP; the user must be in the administrators group | Control Panel → Network & File Services → Telnet / SSH, then "Edit Access Permission" (administrators only) | System → Services → SSH (off by default); the user needs a home directory, a shell, and the public key pasted in Credentials → Users → SSH Public Key | already on |
 | Admin login for SSH | the named admin you created (the built-in `admin` should be disabled) | `admin` | `truenas_admin` (root login is disabled) | your user |
 | Updates | Control Panel → Update & Restore | Control Panel → Firmware Update | System → Update | `apt` / vendor |
-| USB backup to an external drive | Hyper Backup → local folder & USB; format the drive first under Control Panel → External Devices (ext4; exFAT is included from DSM 7.3) | HBS 3 → local; exFAT is free from QTS 5.0.1 | make the USB disk its own ZFS pool, then Data Protection → Replication (local); the UI cannot write NTFS or exFAT | `rsync -aHAX --delete` cron |
+| USB backup to an external drive (**ASK** before formatting a drive or making it a pool: name it by serial number; it erases the drive) | Hyper Backup → local folder & USB; format the drive first under Control Panel → External Devices (ext4; exFAT is included from DSM 7.3) | HBS 3 → local; exFAT is free from QTS 5.0.1 | make the USB disk its own ZFS pool, then Data Protection → Replication (local); the UI cannot write NTFS or exFAT | `rsync -aHAX` cron; `--delete` (mirror deletions onto the backup) only with Sanjay's yes, and never with a destination that could be the wrong mount |
 
 ## Not reachable at all (no ping)
 

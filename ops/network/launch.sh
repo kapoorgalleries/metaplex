@@ -67,16 +67,29 @@ if [ "$PULL" = 1 ] && [ -n "$REPO" ]; then
     sw="$(git -C "$REPO" ls-files -v -- ops/network/inventory.csv ops/network/status.md | awk '/^S /{print $2}')"
     # shellcheck disable=SC2086  # repo-relative paths without spaces
     if [ -n "$sw" ]; then git -C "$REPO" update-index --no-skip-worktree $sw; fi
-    if ! git -C "$REPO" pull --ff-only --autostash -q; then
-      warn "could not update the kit (network, sign-in or local commits); starting with the version already here"
-    fi
     if [ -n "$(git -C "$REPO" diff --name-only --diff-filter=U)" ]; then
-      for f in inventory.csv status.md; do
-        git -C "$REPO" checkout HEAD -- "ops/network/$f" 2>/dev/null || true
-        if [ -f "$bak/$f" ]; then cp -p "$bak/$f" "$OPS/$f"; fi
-      done
-      git -C "$REPO" stash drop -q 2>/dev/null || true
-      warn "the inventory/status templates changed upstream; your copies were kept as they were (compare: git diff)"
+      warn "this clone has unresolved merge conflicts (git status), so the kit was not updated; starting with the version already here"
+    else
+      # The top stash before the pull: only a stash the autostash itself left behind is ever dropped.
+      stash_before="$(git -C "$REPO" rev-parse -q --verify refs/stash 2>/dev/null || true)"
+      if ! git -C "$REPO" pull --ff-only --autostash -q; then
+        warn "could not update the kit (network, sign-in or local commits); starting with the version already here"
+      fi
+      conflicts="$(git -C "$REPO" diff --name-only --diff-filter=U)"
+      if [ -n "$conflicts" ]; then
+        for f in inventory.csv status.md; do
+          git -C "$REPO" checkout HEAD -- "ops/network/$f" 2>/dev/null || true
+          if [ -f "$bak/$f" ]; then cp -p "$bak/$f" "$OPS/$f"; fi
+        done
+        others="$(printf '%s\n' "$conflicts" | grep -v -x -e ops/network/inventory.csv -e ops/network/status.md || true)"
+        stash_after="$(git -C "$REPO" rev-parse -q --verify refs/stash 2>/dev/null || true)"
+        if [ -n "$others" ]; then
+          warn "your local edits to these files conflict with the update; resolve them (git status), your originals are in 'git stash list': $(printf '%s' "$others" | tr '\n' ' ')"
+        elif [ -n "$stash_after" ] && [ "$stash_after" != "$stash_before" ]; then
+          git -C "$REPO" stash drop -q 2>/dev/null || true
+        fi
+        warn "the inventory/status templates changed upstream; your copies were kept as they were (compare: git diff)"
+      fi
     fi
     # shellcheck disable=SC2086
     if [ -n "$sw" ]; then git -C "$REPO" update-index --skip-worktree $sw; fi
