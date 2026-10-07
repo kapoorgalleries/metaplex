@@ -41,6 +41,8 @@ const PERMISSION_KEYS = [
   'blockReadsOutsideWorkingDirectories', 'disableBypassPermissionsMode', 'disableAutoMode',
 ];
 const PERMISSION_MODES = ['default', 'acceptEdits', 'plan', 'auto', 'dontAsk', 'bypassPermissions', 'manual'];
+// Documented as having no effect from project or local settings.
+const PROJECT_INEFFECTIVE_MODES = ['auto', 'bypassPermissions'];
 const HOOK_EVENTS = [
   'SessionStart', 'Setup', 'InstructionsLoaded', 'UserPromptSubmit', 'UserPromptExpansion',
   'MessageDisplay', 'PreToolUse', 'PermissionRequest', 'PostToolUse', 'PostToolUseFailure',
@@ -64,7 +66,7 @@ const HOOK_TYPE_FIELDS = {
   command: ['command', 'args', 'async', 'asyncRewake', 'shell'],
   http: ['url', 'headers', 'allowedEnvVars'],
   mcp_tool: ['server', 'tool', 'input'],
-  prompt: ['prompt', 'model'],
+  prompt: ['prompt', 'model', 'continueOnBlock'],
   agent: ['prompt', 'model'],
 };
 const HOOK_REQUIRED_STRINGS = { http: ['url'], mcp_tool: ['server', 'tool'], prompt: ['prompt'], agent: ['prompt'] };
@@ -216,8 +218,12 @@ function checkPermissions(permissions, fail) {
   if (permissions === undefined) return;
   if (!isPlainObject(permissions)) return fail('"permissions" must be an object');
   checkUnknownKeys(permissions, PERMISSION_KEYS, 'permissions', 'a permissions key', fail);
-  if (hasOwn(permissions, 'defaultMode') && !PERMISSION_MODES.includes(permissions.defaultMode)) {
-    fail(`permissions.defaultMode must be one of ${PERMISSION_MODES.map((m) => `"${m}"`).join(', ')}`);
+  if (hasOwn(permissions, 'defaultMode')) {
+    if (!PERMISSION_MODES.includes(permissions.defaultMode)) {
+      fail(`permissions.defaultMode must be one of ${PERMISSION_MODES.map((m) => `"${m}"`).join(', ')}`);
+    } else if (PROJECT_INEFFECTIVE_MODES.includes(permissions.defaultMode)) {
+      fail(`permissions.defaultMode "${permissions.defaultMode}" does not take effect from a project .claude/settings.json; set it in ~/.claude/settings.json instead`);
+    }
   }
   if (hasOwn(permissions, 'blockReadsOutsideWorkingDirectories') && typeof permissions.blockReadsOutsideWorkingDirectories !== 'boolean') {
     fail('permissions.blockReadsOutsideWorkingDirectories must be true or false');
@@ -290,8 +296,8 @@ function checkPathToken(token, root, at, fail, executable) {
     fail(`${at}: ${rel} must use forward slashes, which Claude Code resolves on every platform`);
     return true;
   }
-  if (rel === '' || rel.replace(/\/+$/, '') === HOOKS_DIR.slice(0, -1)) {
-    fail(`${at} names the hooks directory, not a script: ${JSON.stringify(token)}`);
+  if (rel === '') {
+    fail(`${at} names the project directory, not a script: ${JSON.stringify(token)}`);
     return true;
   }
   if (!rel.startsWith(HOOKS_DIR)) {
@@ -307,6 +313,10 @@ function checkPathToken(token, root, at, fail, executable) {
     fail(`${at}: ${rel} does not exist`);
     return true;
   }
+  if (real === hooksRoot.slice(0, -1)) {
+    fail(`${at} names the hooks directory, not a script: ${JSON.stringify(token)}`);
+    return true;
+  }
   if (!real.startsWith(hooksRoot)) {
     fail(`${at}: ${rel} resolves outside ${HOOKS_DIR}`);
     return true;
@@ -315,11 +325,22 @@ function checkPathToken(token, root, at, fail, executable) {
     fail(`${at}: ${rel} is not a file`);
     return true;
   }
-  if (executable && process.platform !== 'win32') {
-    try {
-      fs.accessSync(real, fs.constants.X_OK);
-    } catch (e) {
-      fail(`${at}: ${rel} is not executable; exec form spawns it directly, so chmod +x it and commit the mode`);
+  if (executable) {
+    if (process.platform !== 'win32') {
+      try {
+        fs.accessSync(real, fs.constants.X_OK);
+      } catch (e) {
+        fail(`${at}: ${rel} is not executable; it is run directly, so chmod +x it and commit the mode`);
+      }
+    }
+    const head = Buffer.alloc(4);
+    const fd = fs.openSync(real, 'r');
+    const n = fs.readSync(fd, head, 0, 4, 0);
+    fs.closeSync(fd);
+    const shebang = n >= 2 && head[0] === 0x23 && head[1] === 0x21;
+    const elf = n >= 4 && head[0] === 0x7f && head.toString('latin1', 1, 4) === 'ELF';
+    if (!shebang && !elf) {
+      fail(`${at}: ${rel} has no #! line; it is run directly, so without one the system hands it to /bin/sh`);
     }
   }
   if (/\.[cm]?js$/.test(rel)) {
@@ -336,7 +357,10 @@ function checkPathToken(token, root, at, fail, executable) {
 // program name (an interpreter on PATH) and the script is its first
 // argument. Interpreter flags and inline code ("bash -c ...", "node -e ...")
 // are not accepted: what a hook runs must be a file this repository reviews.
-const PROGRAM_NAME = /^[A-Za-z0-9._+-]+$/;
+const PROGRAM_NAME = /^[A-Za-z0-9](?:[A-Za-z0-9._+-]*[A-Za-z0-9_+-])?$/;
+// These exec() their first argument rather than reading it, so a script
+// given to one must itself be runnable.
+const EXEC_LAUNCHERS = ['env', 'nice', 'nohup', 'setsid', 'sudo', 'doas'];
 function checkCommandHook(hook, root, at, fail) {
   if (!isNonEmptyString(hook.command)) return fail(`${at}.command must be a non-empty string`);
   if (!Array.isArray(hook.args)) {
@@ -347,9 +371,15 @@ function checkCommandHook(hook, root, at, fail) {
     fail(`${at}.args[${n}] must be a string`);
     return '';
   });
+  let launcher = false;
   if (/\$\{?CLAUDE_PROJECT_DIR/.test(hook.command)) {
-    checkPathToken(hook.command, root, `${at}.command`, fail, true);
+    if (/\$\{CLAUDE_PROJECT_DIR\}/.test(hook.command) && !hook.command.startsWith('${CLAUDE_PROJECT_DIR}/')) {
+      fail(`${at}.command must be exactly the \${CLAUDE_PROJECT_DIR}/.claude/hooks/ script path, not a command line; exec form spawns the whole string as one executable, so put the interpreter in "command" and the script in "args": ${JSON.stringify(hook.command)}`);
+    } else {
+      checkPathToken(hook.command, root, `${at}.command`, fail, true);
+    }
   } else {
+    launcher = EXEC_LAUNCHERS.includes(hook.command);
     if (!PROGRAM_NAME.test(hook.command)) {
       fail(`${at}.command must be a bare program name such as "node", or the \${CLAUDE_PROJECT_DIR}/.claude/hooks/ script itself: ${JSON.stringify(hook.command)}`);
     }
@@ -357,7 +387,7 @@ function checkCommandHook(hook, root, at, fail) {
       fail(`${at}.args[0] must be the \${CLAUDE_PROJECT_DIR}/.claude/hooks/ script; interpreter flags and inline code are not accepted, put them in the script`);
     }
   }
-  args.forEach((arg, n) => checkPathToken(arg, root, `${at}.args[${n}]`, fail, false));
+  args.forEach((arg, n) => checkPathToken(arg, root, `${at}.args[${n}]`, fail, launcher && n === 0));
   for (const k of ['async', 'asyncRewake']) {
     if (hasOwn(hook, k) && typeof hook[k] !== 'boolean') fail(`${at}.${k} must be true or false`);
   }
@@ -378,6 +408,12 @@ function checkHook(hook, event, root, at, fail) {
   if (hasOwn(hook, 'statusMessage') && typeof hook.statusMessage !== 'string') fail(`${at}.statusMessage must be a string`);
   if (hasOwn(hook, 'once')) fail(`${at}.once is honoured only in skill frontmatter and ignored in a settings file`);
   if (hook.type === 'command') return checkCommandHook(hook, root, at, fail);
+  if (hook.type === 'mcp_tool' && event === 'Setup') {
+    fail(`${at}: Setup fires before MCP servers are available, so Claude Code skips mcp_tool hooks on it; use a command hook`);
+  }
+  if (hook.type === 'prompt' && hasOwn(hook, 'continueOnBlock') && typeof hook.continueOnBlock !== 'boolean') {
+    fail(`${at}.continueOnBlock must be true or false`);
+  }
   for (const k of HOOK_REQUIRED_STRINGS[hook.type]) {
     if (!isNonEmptyString(hook[k])) fail(`${at}.${k} must be a non-empty string for a ${hook.type} hook`);
   }

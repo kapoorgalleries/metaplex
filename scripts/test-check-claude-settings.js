@@ -158,6 +158,8 @@ write(path.join(hooksDir, 'ok.js'), 'process.exit(0);\n');
 write(path.join(hooksDir, 'ok.mjs'), 'export {};\n');
 write(path.join(hooksDir, 'ok.sh'), '#!/bin/sh\nexit 0\n', 0o755);
 write(path.join(hooksDir, 'noexec.sh'), '#!/bin/sh\nexit 0\n', 0o644);
+write(path.join(hooksDir, 'noshebang.js'), 'process.exit(0);\n', 0o755);
+write(path.join(hooksDir, 'shebang.js'), '#!/usr/bin/env node\nprocess.exit(0);\n', 0o755);
 write(path.join(hooksDir, 'with space.js'), 'process.exit(0);\n');
 write(path.join(hooksDir, 'bad.js'), 'function (\n');
 write(path.join(hooksDir, 'bad.mjs'), 'export {\n');
@@ -169,6 +171,7 @@ try {
   fs.symlinkSync(path.join(outside, 'evil.js'), path.join(hooksDir, 'escape.js'));
   fs.symlinkSync(path.join(repo, '.claude', 'hooks-old', 'evil.js'), path.join(hooksDir, 'sibling.js'));
   fs.symlinkSync(outside, path.join(linkedRepo, '.claude', 'hooks'), 'dir');
+  fs.symlinkSync('.', path.join(hooksDir, 'self'), 'dir');
 } catch (e) {
   haveSymlink = false;
 }
@@ -217,6 +220,12 @@ clean('three disjoint lists', { permissions: { allow: ['A'], ask: ['B'], deny: [
 clean('the other documented permission keys', { permissions: { additionalDirectories: ['../docs'], defaultMode: 'plan', disableBypassPermissionsMode: 'disable', disableAutoMode: 'disable', blockReadsOutsideWorkingDirectories: true } });
 flags('a misspelled list name ("Allow") is a typo, not a list', { permissions: { allow: ['A'], Allow: ['B'] } }, /permissions\.Allow is not a permissions key/);
 flags('defaultMode must be a documented mode', { permissions: { defaultMode: 'plann' } }, /defaultMode must be one of "default", "acceptEdits"/);
+for (const mode of ['default', 'acceptEdits', 'plan', 'dontAsk', 'manual']) {
+  clean(`defaultMode "${mode}" takes effect from a project file`, { permissions: { defaultMode: mode } });
+}
+for (const mode of ['auto', 'bypassPermissions']) {
+  flags(`defaultMode "${mode}" has no effect from a project file`, { permissions: { defaultMode: mode } }, new RegExp(`defaultMode "${mode}" does not take effect from a project \\.claude/settings\\.json`));
+}
 flags('defaultMode must be a string', { permissions: { defaultMode: 1 } }, /defaultMode must be one of/);
 flags('blockReadsOutsideWorkingDirectories must be boolean', { permissions: { blockReadsOutsideWorkingDirectories: 'true' } }, /blockReadsOutsideWorkingDirectories must be true or false/);
 flags('disableBypassPermissionsMode must be "disable"', { permissions: { disableBypassPermissionsMode: true } }, /disableBypassPermissionsMode must be the string "disable"/);
@@ -278,6 +287,11 @@ flags('a command-only field on a prompt hook', entry({ ...prompt, async: true })
 flags('unknown field on an http hook', entry({ type: 'http', url: 'https://x', body: {} }), /\.body is not a http hook field/);
 flags('unknown field on an mcp_tool hook', entry({ type: 'mcp_tool', server: 's', tool: 't', arguments: {} }), /\.arguments is not a mcp_tool hook field/);
 flags('unknown field on an agent hook', entry({ type: 'agent', prompt: 'ok', timeoutSeconds: 5 }), /\.timeoutSeconds is not a agent hook field/);
+clean('continueOnBlock on a prompt hook', entry({ ...prompt, continueOnBlock: true }));
+flags('continueOnBlock must be boolean', entry({ ...prompt, continueOnBlock: 'yes' }), /\.continueOnBlock must be true or false/);
+flags('agent hooks have no continueOnBlock', entry({ type: 'agent', prompt: 'ok', continueOnBlock: true }), /\.continueOnBlock is not a agent hook field/);
+flags('mcp_tool on Setup is skipped', entry({ type: 'mcp_tool', server: 's', tool: 't' }, {}, 'Setup'), /Setup fires before MCP servers are available/);
+clean('mcp_tool on SessionStart can run (after /clear or compaction)', { ...P, hooks: { SessionStart: [{ hooks: [{ type: 'mcp_tool', server: 's', tool: 't' }] }] } });
 clean('fractional timeout in seconds', cmd([OK], { timeout: 2.5 }));
 clean('if, statusMessage, async, asyncRewake on a tool event', cmd([OK], { if: 'Bash(git *)', statusMessage: 'checking', async: true, asyncRewake: false }));
 for (const event of TOOL_EVENTS) {
@@ -303,12 +317,21 @@ clean('an argument that merely mentions the variable name', cmd([OK, '--env-name
 clean('the script itself is the executable', entry({ type: 'command', command: '${CLAUDE_PROJECT_DIR}/.claude/hooks/ok.sh', args: [] }));
 clean('the script itself is the executable, with arguments', entry({ type: 'command', command: '${CLAUDE_PROJECT_DIR}/.claude/hooks/ok.sh', args: ['--flag', 'value'] }));
 clean('a shell script via bash', entry({ type: 'command', command: 'bash', args: ['${CLAUDE_PROJECT_DIR}/.claude/hooks/ok.sh', '--flag'] }));
+clean('a JavaScript file with a #! line as the command', entry({ type: 'command', command: '${CLAUDE_PROJECT_DIR}/.claude/hooks/shebang.js', args: [] }));
+clean('an executable script via env', entry({ type: 'command', command: 'env', args: ['${CLAUDE_PROJECT_DIR}/.claude/hooks/ok.sh'] }));
+clean('program names with digits, dots and plus signs', entry({ type: 'command', command: 'python3.12', args: [OK] }));
 clean('an ES module', cmd(['${CLAUDE_PROJECT_DIR}/.claude/hooks/ok.mjs']));
 clean('two scripts, both valid', cmd([OK, '${CLAUDE_PROJECT_DIR}/.claude/hooks/with space.js']));
 
 // Command hooks: rejected.
 flags('shell form (no args) is rejected', entry({ type: 'command', command: 'node ${CLAUDE_PROJECT_DIR}/.claude/hooks/ok.js' }), /must use exec form/);
 flags('a command line in "command"', entry({ type: 'command', command: 'node --no-warnings', args: [OK] }), /command must be a bare program name/);
+flags('a command line ending in the script', entry({ type: 'command', command: 'node ${CLAUDE_PROJECT_DIR}/.claude/hooks/ok.sh', args: [] }), /command must be exactly the \$\{CLAUDE_PROJECT_DIR\}\/\.claude\/hooks\/ script path/);
+flags('a prefix before the placeholder', entry({ type: 'command', command: './${CLAUDE_PROJECT_DIR}/.claude/hooks/ok.sh', args: [] }), /command must be exactly the/);
+flags('a file run directly needs a #! line', entry({ type: 'command', command: '${CLAUDE_PROJECT_DIR}/.claude/hooks/noshebang.js', args: [] }), /noshebang\.js has no #! line/);
+for (const c of ['--version', '.', '..', 'node.', '-node']) {
+  flags(`program name ${JSON.stringify(c)} cannot resolve`, entry({ type: 'command', command: c, args: [OK] }), /command must be a bare program name/);
+}
 flags('an executable by path', entry({ type: 'command', command: '/usr/local/bin/node', args: [OK] }), /command must be a bare program name/);
 flags('a Windows executable by path', entry({ type: 'command', command: 'C:\\Program Files\\nodejs\\node.exe', args: [OK] }), /command must be a bare program name/);
 flags('command must be a non-empty string', entry({ type: 'command', command: '  ', args: [OK] }), /command must be a non-empty string/);
@@ -328,8 +351,11 @@ flags('bare $CLAUDE_PROJECT_DIR is not substituted in exec form', cmd(['$CLAUDE_
 flags('mismatched braces: ${CLAUDE_PROJECT_DIR/', cmd(['${CLAUDE_PROJECT_DIR/.claude/hooks/ok.js']), /must reference the script as \$\{CLAUDE_PROJECT_DIR\}/);
 flags('mismatched braces: $CLAUDE_PROJECT_DIR}/', cmd(['$CLAUDE_PROJECT_DIR}/.claude/hooks/ok.js']), /must reference the script as \$\{CLAUDE_PROJECT_DIR\}/);
 flags('placeholder without a slash', cmd(['${CLAUDE_PROJECT_DIR}']), /must reference the script as \$\{CLAUDE_PROJECT_DIR\}/);
-flags('placeholder with nothing after the slash', cmd(['${CLAUDE_PROJECT_DIR}/']), /names the hooks directory, not a script/);
+flags('placeholder with nothing after the slash', cmd(['${CLAUDE_PROJECT_DIR}/']), /names the project directory, not a script/);
 flags('the hooks directory itself', cmd(['${CLAUDE_PROJECT_DIR}/.claude/hooks/']), /names the hooks directory, not a script/);
+flags('the hooks directory with a dot segment', cmd(['${CLAUDE_PROJECT_DIR}/.claude/hooks/.']), /names the hooks directory, not a script/);
+flags('the hooks directory reached through sub/..', cmd(['${CLAUDE_PROJECT_DIR}/.claude/hooks/sub/..']), /names the hooks directory, not a script/);
+if (haveSymlink) flags('a symlink back to the hooks directory', cmd(['${CLAUDE_PROJECT_DIR}/.claude/hooks/self']), /names the hooks directory, not a script/);
 flags('a plugin placeholder beside a valid script', cmd([OK, '${CLAUDE_PLUGIN_ROOT}/scripts/x.js']), /plugin placeholders do not apply to a settings\.json hook/);
 flags('a plugin data placeholder', cmd([OK, '${CLAUDE_PLUGIN_DATA}/x']), /plugin placeholders do not apply/);
 flags('a backslash in the script path', cmd(['${CLAUDE_PROJECT_DIR}/.claude/hooks\\ok.js']), /must use forward slashes/);
@@ -347,6 +373,9 @@ flags('both of two missing scripts are reported', cmd(['${CLAUDE_PROJECT_DIR}/.c
 if (process.platform !== 'win32') {
   flags('the script as executable must have the executable bit', entry({ type: 'command', command: '${CLAUDE_PROJECT_DIR}/.claude/hooks/noexec.sh', args: [] }), /noexec\.sh is not executable/);
   clean('the same script via an interpreter needs no executable bit', entry({ type: 'command', command: 'sh', args: ['${CLAUDE_PROJECT_DIR}/.claude/hooks/noexec.sh'] }));
+  for (const c of ['env', 'nice', 'nohup']) {
+    flags(`${c} runs its argument directly, so it needs the executable bit`, entry({ type: 'command', command: c, args: ['${CLAUDE_PROJECT_DIR}/.claude/hooks/noexec.sh'] }), /noexec\.sh is not executable/);
+  }
 } else {
   console.log('skip executable-bit tests (Windows)');
 }
