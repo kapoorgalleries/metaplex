@@ -54,13 +54,20 @@ it in exec form, `"command": "node", "args":
 ["${CLAUDE_PROJECT_DIR}/.claude/hooks/<name>.js"]`, which is what the hooks
 reference asks for whenever a path placeholder is involved: each element of
 `args` is one argument, with no shell quoting to differ between macOS, Linux
-and Windows. The check below requires exactly that of a command hook: the
-command is an interpreter on `PATH` such as `node`, with the script as its
-first argument (no interpreter flags or inline code), and every script named
-lives under `.claude/hooks/`, exists (symlinks resolved) and, for
-JavaScript, parses. A script as the command itself is not accepted: on
-Windows exec form needs a real executable, and `node` plus the script path
-is the pattern the hooks reference says works on every platform.
+and Windows. The check below requires exactly that of a command hook. The
+command is one of `node`, `python3`, `bash`, `sh` or `pwsh`, by name, with
+the script as its first argument; anything after the script reaches the
+script as its own arguments. Every script named lives under
+`.claude/hooks/`, exists (symlinks resolved) and, for JavaScript, parses.
+Any other program is refused, because the check cannot tell what it does
+with the script: `find` or `rm` can be handed a hook script and then run
+something else. Interpreter flags and inline code are refused too, including
+the reference's PowerShell example (`powershell` with `-NoProfile
+-ExecutionPolicy Bypass -File`); use `node`, or `pwsh` with the script
+first, which needs no `-File`. A script as the command itself is not
+accepted: on Windows exec form needs a real executable, and `node` plus the
+script path is the pattern the hooks reference says works on every
+platform.
 
 **Sends always ask.** `permissions.ask` names the Gmail send, reply and
 forward tools and Opera's `go-to-page`, along with the Hugging Face commands
@@ -84,8 +91,14 @@ runs, and the fields of every hook type against the documented lists. A typo
 there is an entry Claude Code drops: an unknown hook event gets a Settings
 Warning in an interactive session and nothing in a `-p` or CI run, and an
 unknown permission key or hook field gets no warning anywhere. It is the
-same failure in another form. It also checks the permission lists, and
-command hooks as described above. Its tests are in
+same failure in another form. It also checks the permission lists, command
+hooks as described above, and that `FileChanged` and `StopFailure` matchers
+separate alternatives with `|` alone: on those two events a comma or a
+space around `|` leaves a matcher that never matches. The check catches
+mistakes; it is not a security boundary. CI runs the pull request's own
+copy of the checker, so a change that adds a hook can loosen the check in
+the same diff. Reviewing the diff to `.claude/` and `scripts/` is what
+protects the policy. The checker's tests are in
 `scripts/test-check-claude-settings.js`. CI runs both from
 `.github/workflows/claude-settings.yml` whenever `.claude/` changes. Locally:
 

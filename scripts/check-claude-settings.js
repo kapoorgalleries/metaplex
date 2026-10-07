@@ -7,8 +7,12 @@
 // key at any depth, then checks the parts of the file this repository relies
 // on against the Claude Code reference: permission keys, values and lists,
 // hook event names, the hook types each event supports, hook fields, and
-// that every command hook is an interpreter in exec form whose scripts live
-// under .claude/hooks/, are present, and parse.
+// that every command hook is a listed interpreter in exec form whose scripts
+// live under .claude/hooks/, are present, and parse.
+//
+// It catches mistakes; it is not a security boundary. CI runs the pull
+// request's own copy of this file, so a change that adds a hook can loosen
+// the check in the same diff. Reviewing the diff is what protects the policy.
 //
 // Run: node scripts/check-claude-settings.js
 // CI:  .github/workflows/claude-settings.yml
@@ -283,13 +287,20 @@ function checkPermissions(permissions, fail) {
 
 // Matcher evaluation per the hooks reference: "*", "" or omitted match all;
 // only letters, digits, _, -, space, comma and | is an exact string or list
-// (FileChanged and StopFailure: letters, digits, _ and | only, so their
-// other matchers are regular expressions, which strings of those characters
-// always are); anything else is a JavaScript regular expression, which must
-// compile.
+// separated by | or comma; anything else is a JavaScript regular expression,
+// which must compile. FileChanged and StopFailure are narrower: their exact
+// set is letters, digits, _ and | only, a hyphen, comma or space keeps the
+// matcher on the regular-expression path (harmless for a hyphen, which a
+// regular expression reads literally), and FileChanged splits it on | alone
+// into the literal filenames it watches. There "a,b" or "a | b" never
+// matches a or b.
+const PIPE_ONLY_MATCHER_EVENTS = ['FileChanged', 'StopFailure'];
 function checkMatcher(matcher, event, at, fail) {
   if (NO_MATCHER_EVENTS.includes(event)) fail(`${at}.matcher has no effect: ${event} has no matcher support`);
   if (typeof matcher !== 'string') return fail(`${at}.matcher must be a string`);
+  if (PIPE_ONLY_MATCHER_EVENTS.includes(event) && matcher.split('|').some((s) => s.includes(',') || s !== s.trim())) {
+    fail(`${at}.matcher ${JSON.stringify(matcher)}: ${event} separates alternatives with "|" alone, so a comma or a space around "|" leaves alternatives that never match; write "a|b"`);
+  }
   if (matcher === '*' || /^[A-Za-z0-9_\- ,|]*$/.test(matcher)) return;
   try {
     new RegExp(matcher);
@@ -298,13 +309,13 @@ function checkMatcher(matcher, event, at, fail) {
   }
 }
 
-// One exec-form token: the command, or an element of args. Returns true when
-// the token referenced a path placeholder, whether or not it was valid. The
-// project placeholder is the braced form the hooks reference defines; the
-// bare $CLAUDE_PROJECT_DIR spelling is a shell variable, and exec form has no
-// shell to expand it (Claude Code does not rewrite that form).
+// One element of args. Returns true when the token referenced a path
+// placeholder, whether or not it was valid. The project placeholder is the
+// braced form the hooks reference defines; the bare $CLAUDE_PROJECT_DIR
+// spelling is a shell variable, and exec form has no shell to expand it
+// (Claude Code does not rewrite that form).
 const PLACEHOLDER = /\$\{CLAUDE_PROJECT_DIR\}\/(.*)$/;
-function checkPathToken(token, root, at, fail, executable) {
+function checkPathToken(token, root, at, fail) {
   if (/\$\{?CLAUDE_PLUGIN_(ROOT|DATA)/.test(token)) {
     fail(`${at}: plugin placeholders do not apply to a settings.json hook: ${JSON.stringify(token)}`);
     return true;
@@ -353,24 +364,6 @@ function checkPathToken(token, root, at, fail, executable) {
     fail(`${at}: ${rel} is not a file`);
     return true;
   }
-  if (executable) {
-    if (process.platform !== 'win32') {
-      try {
-        fs.accessSync(real, fs.constants.X_OK);
-      } catch (e) {
-        fail(`${at}: ${rel} is not executable; it is run directly, so chmod +x it and commit the mode`);
-      }
-    }
-    const head = Buffer.alloc(4);
-    const fd = fs.openSync(real, 'r');
-    const n = fs.readSync(fd, head, 0, 4, 0);
-    fs.closeSync(fd);
-    const shebang = n >= 2 && head[0] === 0x23 && head[1] === 0x21;
-    const elf = n >= 4 && head[0] === 0x7f && head.toString('latin1', 1, 4) === 'ELF';
-    if (!shebang && !elf) {
-      fail(`${at}: ${rel} has no #! line; it is spawned directly, and without one it fails to start or, on some runtimes, runs under /bin/sh`);
-    }
-  }
   if (/\.[cm]?js$/.test(rel)) {
     const r = spawnSync(process.execPath, ['--check', real], { encoding: 'utf8' });
     if (r.status !== 0) fail(`${at}: ${rel} does not parse: ${r.stderr.trim()}`);
@@ -381,17 +374,19 @@ function checkPathToken(token, root, at, fail, executable) {
 // Command hooks here use exec form, which the hooks reference asks for
 // whenever a path placeholder is involved: "command" is the executable and
 // each element of "args" is one argument, with no shell on any platform.
-// The command is a bare program name (an interpreter on PATH, such as
-// "node") and the script is its first argument. A script as the command is
-// not accepted: on Windows exec form needs a real executable such as a
-// .exe, and "node" plus the script path is the pattern the reference says
-// works on every platform. Interpreter flags and inline code ("bash -c ...",
-// "node -e ...") are not accepted either: what a hook runs must be a file
-// this repository reviews.
-const PROGRAM_NAME = /^[A-Za-z0-9](?:[A-Za-z0-9._+-]*[A-Za-z0-9_+-])?$/;
-// These exec() their first argument rather than reading it, so a script
-// given to one must itself be runnable.
-const EXEC_LAUNCHERS = ['env', 'nice', 'nohup', 'setsid', 'sudo', 'doas'];
+// The command is one of the interpreters below, by name, and the script is
+// its first argument; anything after the script reaches the script as its
+// own arguments. Any other program is refused, because the check could not
+// tell what it does with the script: "find <script> -exec sh -c ..." or
+// "rm <script> -rf ..." name a reviewed file and then run something else.
+// A script as the command is not accepted either: on Windows exec form
+// needs a real executable such as a .exe, and "node" plus the script path is
+// the pattern the reference says works on every platform. Interpreter flags
+// and inline code ("bash -c ...", "node -e ...", the reference's
+// "powershell -NoProfile -ExecutionPolicy Bypass -File ...") are not
+// accepted: what a hook runs must be a file this repository reviews, and
+// pwsh takes a script as its first argument without -File.
+const INTERPRETERS = ['node', 'python3', 'bash', 'sh', 'pwsh'];
 function checkCommandHook(hook, root, at, fail) {
   if (!isNonEmptyString(hook.command)) return fail(`${at}.command must be a non-empty string`);
   if (!Array.isArray(hook.args)) {
@@ -402,16 +397,15 @@ function checkCommandHook(hook, root, at, fail) {
     fail(`${at}.args[${n}] must be a string`);
     return '';
   });
-  const launcher = EXEC_LAUNCHERS.includes(hook.command);
   if (/CLAUDE_PROJECT_DIR/.test(hook.command)) {
     fail(`${at}.command must be a program on PATH such as "node", with the script as args[0]; a script as the command cannot be spawned on Windows, where exec form needs a real executable: ${JSON.stringify(hook.command)}`);
-  } else if (!PROGRAM_NAME.test(hook.command)) {
-    fail(`${at}.command must be a bare program name such as "node": ${JSON.stringify(hook.command)}`);
+  } else if (!INTERPRETERS.includes(hook.command)) {
+    fail(`${at}.command must be one of ${INTERPRETERS.map((c) => `"${c}"`).join(', ')}, by name; any other program could do something other than run the script: ${JSON.stringify(hook.command)}`);
   }
   if (args.length === 0 || !args[0].startsWith('${CLAUDE_PROJECT_DIR}/')) {
     fail(`${at}.args[0] must be the \${CLAUDE_PROJECT_DIR}/.claude/hooks/ script; interpreter flags and inline code are not accepted, put them in the script`);
   }
-  args.forEach((arg, n) => checkPathToken(arg, root, `${at}.args[${n}]`, fail, launcher && n === 0));
+  args.forEach((arg, n) => checkPathToken(arg, root, `${at}.args[${n}]`, fail));
   for (const k of ['async', 'asyncRewake']) {
     if (hasOwn(hook, k) && typeof hook[k] !== 'boolean') fail(`${at}.${k} must be true or false`);
   }
@@ -527,5 +521,5 @@ function main() {
 if (require.main === module) {
   main();
 } else {
-  module.exports = { parseStrict, checkSettings, MAX_DEPTH, HOOKS_DIR, HOOK_EVENTS, PERMISSION_KEYS, EVENT_HOOK_TYPES };
+  module.exports = { parseStrict, checkSettings, MAX_DEPTH, HOOKS_DIR, HOOK_EVENTS, PERMISSION_KEYS, EVENT_HOOK_TYPES, INTERPRETERS };
 }
