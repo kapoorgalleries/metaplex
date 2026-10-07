@@ -266,6 +266,7 @@ function Add-GeminiHf {
   # GetAttributes sees the name itself, a dangling link included, so nothing is created through one.
   $taken = { try { [void][IO.File]::GetAttributes($cfg); $true } catch { $false } }
   if (-not (& $taken)) {
+    $made = $false
     try {
       New-Item -ItemType Directory -Force -Path $dir | Out-Null
       # Only this user can open the new file, from the moment it exists. CreateNew refuses any
@@ -277,9 +278,18 @@ function Add-GeminiHf {
       $fs = if ($PSVersionTable.PSEdition -ceq 'Core') {
         [IO.FileSystemAclExtensions]::Create([IO.FileInfo]$cfg, [IO.FileMode]::CreateNew, $w, [IO.FileShare]::None, 4096, [IO.FileOptions]::None, $acl)
       } else { New-Object IO.FileStream($cfg, [IO.FileMode]::CreateNew, $w, [IO.FileShare]::None, 4096, [IO.FileOptions]::None, $acl) }
+      $made = $true
       try { $bytes = [Text.Encoding]::UTF8.GetBytes($doc + "`n"); $fs.Write($bytes, 0, $bytes.Length); $fs.Flush($true) } finally { $fs.Dispose() }
       return 0
-    } catch { if (-not (& $taken)) { return 1 } }
+    } catch {
+      # After CreateNew the file is this run's own, half written: remove it, so neither Gemini nor the
+      # next run reads a broken settings.json as the user's own.
+      if ($made) {
+        try { [IO.File]::Delete($cfg) } catch { Write-Warning "gemini: could not remove the partly written $cfg; delete it, then rerun" }
+        return 1
+      }
+      if (-not (& $taken)) { return 1 }
+    }
   }
   Write-Host ("gemini: $cfg already exists and was left unchanged. To finish, add this entry inside its top-level " +
     '"mcpServers" object (create "mcpServers": { } if it has none), then rerun:')

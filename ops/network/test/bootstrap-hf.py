@@ -263,6 +263,58 @@ failed() { FAILED="$FAILED $1"; }
         self.assertEqual(target.read_text(), '{"created": "meanwhile"}\n')
         self.assertEqual(list(target.parent.iterdir()), [target])
 
+    def test_failed_write_leaves_no_settings_file(self):
+        # settings.json is created, then the write fails (a full disk). That half-written file is this
+        # run's own: it is removed, so neither Gemini nor the next run reads it as the user's settings.
+        hook = self.root / 'hook'
+        hook.mkdir()
+        (hook / 'sitecustomize.py').write_text(
+            'import errno, os, sys\n'
+            'mode = os.environ.get("FAULT", "")\n'
+            'real_write, calls = os.write, []\n'
+            'def write(fd, data):\n'
+            '    if sys.argv[0] != "-" or len(sys.argv) <= 3:\n'
+            '        return real_write(fd, data)\n'
+            '    calls.append(1)\n'
+            '    if len(calls) == 1 and mode in ("short", "raise", "unlink"):\n'
+            '        n = real_write(fd, bytes(data)[:7])\n'
+            '        if mode == "short":\n'
+            '            return n\n'
+            '    if mode != "fsync":\n'
+            '        raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC))\n'
+            '    return real_write(fd, data)\n'
+            'def fsync(fd):\n'
+            '    raise OSError(errno.EIO, os.strerror(errno.EIO))\n'
+            'def unlink(path, *a, **k):\n'
+            '    raise OSError(errno.EACCES, os.strerror(errno.EACCES))\n'
+            'os.write = write\n'
+            'if mode == "fsync":\n'
+            '    os.fsync = fsync\n'
+            'if mode == "unlink":\n'
+            '    os.unlink = unlink\n')
+        target = self.root / '.gemini/settings.json'
+        for mode in ['raise', 'short', 'fsync']:
+            with self.subTest(mode=mode):
+                shutil.rmtree(target.parent, ignore_errors=True)
+                self.env.update(PYTHONPATH=str(hook), FAULT=mode)
+                result = self.run_registration('gemini')
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn('could not create user settings', result.stdout)
+                self.assertIn('INSTALL INCOMPLETE: hf-mcp-gemini', result.stdout)
+                self.assertNotIn('Traceback', result.stderr)
+                self.assertEqual(list(target.parent.iterdir()), [])
+                self.env.pop('PYTHONPATH')  # the next run starts clean and creates the file
+                again = self.run_registration('gemini')
+                self.assertEqual(again.returncode, 0, again.stdout + again.stderr)
+                self.assertIn('created user settings', again.stdout)
+        # If even the removal fails, the run says which file to delete.
+        shutil.rmtree(target.parent, ignore_errors=True)
+        self.env.update(PYTHONPATH=str(hook), FAULT='unlink')
+        result = self.run_registration('gemini')
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn(f'could not remove the partly written {target}; delete it, then rerun', result.stderr)
+        self.assertNotIn('Traceback', result.stderr)
+
     def test_symlinked_settings_are_never_written_through(self):
         real = self.write('dotfiles/gemini-settings.json', '{"theme": "light"}\n')
         link = self.root / '.gemini/settings.json'

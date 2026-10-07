@@ -411,10 +411,24 @@ except FileExistsError:
 except OSError:
     sys.exit(1)
 try:
-    os.write(fd, doc)
-    os.fsync(fd)
-finally:
-    os.close(fd)
+    try:
+        done = 0
+        while done < len(doc):  # os.write may take only part, as on a disk that is filling up
+            n = os.write(fd, doc[done:])
+            if n <= 0:
+                raise OSError("settings.json: write made no progress")
+            done += n
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+except OSError:
+    # The file is this run's own, half written: remove it, so neither Gemini nor the next run reads a
+    # broken settings.json as the user's own.
+    try:
+        os.unlink(cfg)
+    except OSError:
+        print(f"gemini: could not remove the partly written {cfg}; delete it, then rerun", file=sys.stderr)
+    sys.exit(1)
 PYJSON
 }
 register_hf_mcp() {
