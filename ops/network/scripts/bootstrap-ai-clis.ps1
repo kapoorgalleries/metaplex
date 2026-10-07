@@ -403,7 +403,7 @@ if (-not $SkipHf) {
       $rc = Add-GeminiHf
       if ($rc -eq 0 -and (Get-HfClientState 'gemini') -eq 0) { Log 'gemini: created user settings with the huggingface MCP server' }
       elseif ($rc -eq 4) { Add-Failure 'hf-mcp-gemini' 'gemini: user settings exist; huggingface entry not added (manual step above)' }
-      else { Add-Failure 'hf-mcp-gemini' 'gemini: could not create user settings; nothing changed' }
+      else { Add-Failure 'hf-mcp-gemini' 'gemini: could not create user settings' }
     } else { Add-Failure 'hf-mcp-gemini' 'gemini: user settings need manual review (commented/unsupported JSON, incompatible URL or missing blocked tools); left unchanged' }
   }
   if ($WithClaudeHfMcp -and -not $SkipClaude -and (Have 'claude')) {

@@ -401,6 +401,9 @@ entry = {"url": url, "type": "http", "headers": {"Authorization": "Bearer ${HF_T
 doc = (json.dumps({"mcpServers": {"huggingface": entry}}, indent=2) + "\n").encode()
 try:
     os.makedirs(os.path.dirname(cfg), exist_ok=True)
+except OSError:  # e.g. a file or dangling link named .gemini: there is no settings.json to report
+    sys.exit(1)
+try:
     # O_EXCL: refuses any existing name, a symlink included, so nothing is ever overwritten.
     fd = os.open(cfg, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
 except FileExistsError:
@@ -448,7 +451,7 @@ register_hf_mcp() {
       elif [ "$state" = 4 ]; then
         warn "gemini: user settings exist; huggingface entry not added (manual step above)"; failed hf-mcp-gemini
       else
-        warn "gemini: could not create user settings; nothing changed"; failed hf-mcp-gemini
+        warn "gemini: could not create user settings"; failed hf-mcp-gemini
       fi
     else
       warn "gemini: user settings need manual review (commented/unsupported JSON, incompatible URL or missing blocked tools); left unchanged"; failed hf-mcp-gemini
