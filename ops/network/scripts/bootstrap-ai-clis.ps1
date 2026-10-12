@@ -94,13 +94,16 @@ function Find-Winget {
 $Winget = Find-Winget
 # -UserScope asks winget for the per-user installer: without elevation a machine-wide one waits on a UAC
 # prompt that nobody answers in a non-interactive session. Only for packages that ship one (Python does).
-function Winget-Install($id, [switch]$UserScope) {
+# -Custom adds installer arguments to winget's silent defaults (Python's per-user install still installs the
+# py launcher for all users, which elevates, unless told InstallLauncherAllUsers=0).
+function Winget-Install($id, [switch]$UserScope, [string]$Custom = '') {
   if (-not $Winget) {
     Write-Warning "winget not found, so $id cannot be installed. Install 'App Installer' from the Microsoft Store (or run: Add-AppxPackage -RegisterByFamilyName -MainPackage Microsoft.DesktopAppInstaller_8wekyb3d8bbwe), log in to the desktop once, then rerun."
     return $false
   }
   $wa = @('install', '--id', $id, '-e', '--silent', '--disable-interactivity', '--accept-source-agreements', '--accept-package-agreements')
   if ($UserScope) { $wa += @('--scope', 'user') }
+  if ($Custom) { $wa += @('--custom', $Custom) }
   $rc = Invoke-Native $Winget $wa
   if ($rc -eq -1978334967) { Write-Warning "$id is installed; restart this PC to finish (winget 0x8A150109)"; return $true }
   # benign: 0x8A15002B no applicable update, 0x8A150061 package already installed, 0x8A15010D another version
@@ -384,7 +387,7 @@ if (-not $SkipHf) {
     if (-not (Test-Python)) {
       $pyElev = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
       if ($pyElev) { Log 'installing Python 3.13 (the hf installer needs 3.10+)'; $pyOk = Winget-Install 'Python.Python.3.13' }
-      else { Log 'installing Python 3.13 for this user (the hf installer needs 3.10+; not elevated, so the per-user installer)'; $pyOk = Winget-Install 'Python.Python.3.13' -UserScope }
+      else { Log 'installing Python 3.13 for this user (the hf installer needs 3.10+; not elevated, so the per-user installer)'; $pyOk = Winget-Install 'Python.Python.3.13' -UserScope -Custom 'InstallLauncherAllUsers=0' }
       if ($pyOk) { Refresh-Path }
     }
     if (-not (Test-Python)) { Add-Failure 'hf' 'hf needs Python 3.10+ (py -3 or python on PATH): install it and rerun' }
