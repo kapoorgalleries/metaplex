@@ -454,13 +454,14 @@ if (haveSymlink) {
 
 // locateInHooksDir, against a fake file system that ignores case and Unicode
 // normalization, as APFS does: every spelling of a path has the same
-// identity. Entries are [path, kind] or [path, kind, dev, ino].
-function fakeIo(entries) {
+// identity. Entries are [path, kind] or [path, kind, dev, ino]; `key` makes
+// it case-sensitive instead.
+function fakeIo(entries, key = (p) => p.normalize('NFC').toLowerCase()) {
   const byKey = new Map();
   let next = 100n;
-  for (const [p, kind, dev = 1n, ino = next++] of entries) byKey.set(p.normalize('NFC').toLowerCase(), { kind, dev, ino });
+  for (const [p, kind, dev = 1n, ino = next++] of entries) byKey.set(key(p), { kind, dev, ino });
   const look = (p, follow) => {
-    const e = byKey.get(p.normalize('NFC').toLowerCase());
+    const e = byKey.get(key(p));
     if (!e) throw Object.assign(new Error(`ENOENT: ${p}`), { code: 'ENOENT' });
     return { dev: e.dev, ino: e.ino, isDirectory: () => e.kind === 'dir' || (follow && e.kind === 'symlink') };
   };
@@ -495,14 +496,21 @@ locate('inode 0 on the hooks directory proves nothing', at('.claude', 'hooks', '
 locate('the same directory under another name (a bind mount, an inode clash) is outside', at('elsewhere', 'x.js'), 'outside',
   [...baseFs, [at('elsewhere'), 'dir', 1n, 7n], [at('elsewhere', 'x.js'), 'file']].map((e) => (e[0] === HOOKS ? [e[0], 'dir', 1n, 7n] : e)));
 check('locateInHooksDir: a root spelled in another Unicode normalization is inside', () => {
-  const nfc = path.resolve(path.sep, 'café');
-  const nfd = path.resolve(path.sep, 'café');
+  const nfc = path.resolve(path.sep, 'caf\u00e9');
+  const nfd = path.resolve(path.sep, 'cafe\u0301');
   const hooks = path.join(nfc, '.claude', 'hooks');
   const io = fakeIo([[path.parse(nfc).root, 'dir'], [nfc, 'dir'], [path.dirname(hooks), 'dir'], [hooks, 'dir'], [path.join(hooks, 'x.js'), 'file']]);
   assert.strictEqual(locateInHooksDir(path.join(nfd, '.claude', 'hooks', 'x.js'), hooks, io), 'inside');
 });
-locate('the same inode on another device is outside', at('.claude', 'hooks-old', 'evil.js'), 'outside',
-  baseFs.map((e) => (e[0] === HOOKS ? [e[0], 'dir', 1n, 7n] : e[0] === at('.claude', 'hooks-old') ? [e[0], 'dir', 2n, 7n] : e)));
+check('locateInHooksDir: a different .Claude/Hooks on another device with the same inode is outside', () => {
+  // Case-sensitive: .Claude/Hooks is a separate directory, a mount whose
+  // root happens to share the hooks directory's inode number.
+  const io = fakeIo([
+    ...baseFs.map((e) => (e[0] === HOOKS ? [e[0], 'dir', 1n, 7n] : e)),
+    [at('.Claude'), 'dir', 1n, 50n], [at('.Claude', 'Hooks'), 'dir', 2n, 7n], [at('.Claude', 'Hooks', 'x.js'), 'file', 2n, 8n],
+  ], (p) => p);
+  assert.strictEqual(locateInHooksDir(at('.Claude', 'Hooks', 'x.js'), HOOKS, io), 'outside');
+});
 
 // The same cases on a real case-insensitive file system: the macOS and
 // Windows defaults, or a directory named by CHECK_SETTINGS_CASE_DIR (on
