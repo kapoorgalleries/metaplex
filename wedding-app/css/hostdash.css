@@ -1,0 +1,102 @@
+/* Hosts dashboard — Supabase (shared-site) mode extras.
+   Kept separate from styles.css; only admin.html links this file. */
+.hd-h3 {
+  font-family: var(--display);
+  color: var(--maroon);
+  font-size: 1.35rem;
+  margin: 1.6rem 0 0.6rem;
+}
+.hd-tag {
+  font-family: inherit;
+  font-size: 0.72rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted, #7a6f63);
+  font-weight: 600;
+}
+.hd-row {
+  background: #fff;
+  border: 1px solid rgba(26, 20, 16, 0.14);
+  border-radius: 10px;
+  padding: 0.65rem 1rem;
+  margin-bottom: 0.5rem;
+  font-size: 0.95rem;
+}
+.hd-row--flex {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+.hd-row--urgent {
+  border-left: 4px solid var(--maroon, #7a1f23);
+}
+.hd-sub {
+  color: var(--muted, #7a6f63);
+  font-size: 0.85rem;
+  margin-top: 0.2rem;
+}
+.hd-ev {
+  color: var(--maroon, #7a1f23);
+  font-size: 0.85rem;
+  margin-top: 0.2rem;
+}
+.hd-warn {
+  color: var(--maroon, #7a1f23);
+}
+.hd-mini {
+  display: flex;
+  gap: 6px;
+  flex: none;
+  align-items: center;
+}
+.hd-pgrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 12px;
+  margin-bottom: 0.6rem;
+}
+.hd-pcard {
+  border: 1px solid rgba(26, 20, 16, 0.14);
+  border-radius: 10px;
+  overflow: hidden;
+  background: #fff;
+}
+.hd-pcard img {
+  width: 100%;
+  height: 120px;
+  object-fit: cover;
+  display: block;
+}
+.hd-pa {
+  display: flex;
+  gap: 6px;
+  padding: 8px;
+}
+.hd-pa button,
+.hd-mini button {
+  flex: 1;
+  font-size: 0.72rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 7px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(26, 20, 16, 0.18);
+  background: #fff;
+  cursor: pointer;
+  font-weight: 600;
+}
+.hd-pa button:disabled,
+.hd-mini button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.hd-approve {
+  background: var(--gold, #a8842e);
+  border-color: var(--gold, #a8842e);
+  color: #fff;
+}
+.hd-reject {
+  color: var(--maroon, #7a1f23);
+}
