@@ -60,8 +60,12 @@ as its first argument and any further arguments after it. Interpreter flags
 before the script (PowerShell's `-File` included) and inline code are not
 accepted, nor is any other program, since a program such as `find` or `rm`
 given the script as an argument would do something else with it. Every
-script named lives under `.claude/hooks/`, exists (symlinks resolved) and,
-for JavaScript, parses. A script as the command itself is not accepted: on
+script named lives under `.claude/hooks/`, exists (symlinks resolved, and
+neither `.claude` nor `.claude/hooks` may itself be a symlink) and, for
+JavaScript, parses. Where the file system ignores case, as the macOS and
+Windows defaults do, a script counts as under `.claude/hooks/` when the file
+system says so, whatever case a symlink or the working directory spells the
+path in. A script as the command itself is not accepted: on
 Windows exec form needs a real executable, and an interpreter plus the
 script path is the pattern the hooks reference says works on every
 platform.

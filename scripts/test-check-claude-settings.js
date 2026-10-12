@@ -15,6 +15,11 @@
 // misspelled in the checker fails. Part 3 runs the CLI itself.
 //
 // Run: node scripts/test-check-claude-settings.js
+//
+// The case-insensitive file system tests run by themselves on the macOS and
+// Windows defaults and are skipped on a case-sensitive one. To run them on
+// Linux, point CHECK_SETTINGS_CASE_DIR at a case-insensitive directory, for
+// example a ciopfs mount made with -o use_ino.
 
 'use strict';
 
@@ -23,7 +28,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { spawnSync } = require('child_process');
-const { parseStrict, checkSettings, MAX_DEPTH, HOOK_EVENTS, PERMISSION_KEYS, EVENT_HOOK_TYPES, INTERPRETERS } = require('./check-claude-settings.js');
+const { parseStrict, checkSettings, locateInHooksDir, MAX_DEPTH, HOOK_EVENTS, PERMISSION_KEYS, EVENT_HOOK_TYPES, INTERPRETERS } = require('./check-claude-settings.js');
 
 let failures = 0;
 const check = (name, fn) => {
@@ -156,16 +161,22 @@ check('INTERPRETERS is exactly node, python3, bash, sh, pwsh', () => assert.deep
 // Throwaway repositories. `repo` has hooks that exist, parse, don't parse,
 // have a space in the name, or are a directory; a script outside
 // .claude/hooks/; a sibling directory sharing the prefix; and symlinks that
-// point outside. `linkedRepo` has .claude/hooks itself symlinked outside.
+// point outside. `linkedRepo` has .claude/hooks itself symlinked outside;
+// `linkedClaudeRepo` has .claude symlinked to a directory inside the same
+// repository, and `linkedHooksRepo` has .claude/hooks symlinked to one.
 const tmp = (prefix) => fs.mkdtempSync(path.join(os.tmpdir(), prefix));
 const repo = tmp('claude-settings-test-');
 const outside = tmp('claude-settings-outside-');
 const linkedRepo = tmp('claude-settings-linked-');
+const linkedClaudeRepo = tmp('claude-settings-linked-claude-');
+const linkedHooksRepo = tmp('claude-settings-linked-hooks-');
 const hooksDir = path.join(repo, '.claude', 'hooks');
 fs.mkdirSync(path.join(hooksDir, 'sub'), { recursive: true });
 fs.mkdirSync(path.join(repo, '.claude', 'hooks-old'));
 fs.mkdirSync(path.join(repo, 'scripts'));
 fs.mkdirSync(path.join(linkedRepo, '.claude'));
+fs.mkdirSync(path.join(linkedClaudeRepo, 'claude-real', 'hooks'), { recursive: true });
+fs.mkdirSync(path.join(linkedHooksRepo, '.claude', 'hooks-real'), { recursive: true });
 const write = (p, text, mode) => {
   fs.writeFileSync(p, text);
   if (mode !== undefined) fs.chmodSync(p, mode);
@@ -183,17 +194,23 @@ write(path.join(hooksDir, 'bad.mjs'), 'export {\n');
 write(path.join(repo, '.claude', 'hooks-old', 'evil.js'), 'process.exit(0);\n');
 write(path.join(repo, 'scripts', 'elsewhere.js'), 'process.exit(0);\n');
 write(path.join(outside, 'evil.js'), 'process.exit(0);\n');
+write(path.join(linkedClaudeRepo, 'claude-real', 'hooks', 'ok.js'), 'process.exit(0);\n');
+write(path.join(linkedHooksRepo, '.claude', 'hooks-real', 'ok.js'), 'process.exit(0);\n');
 let haveSymlink = true;
 try {
   fs.symlinkSync(path.join(outside, 'evil.js'), path.join(hooksDir, 'escape.js'));
   fs.symlinkSync(path.join(repo, '.claude', 'hooks-old', 'evil.js'), path.join(hooksDir, 'sibling.js'));
   fs.symlinkSync(outside, path.join(linkedRepo, '.claude', 'hooks'), 'dir');
   fs.symlinkSync('.', path.join(hooksDir, 'self'), 'dir');
+  fs.symlinkSync('claude-real', path.join(linkedClaudeRepo, '.claude'), 'dir');
+  fs.symlinkSync('hooks-real', path.join(linkedHooksRepo, '.claude', 'hooks'), 'dir');
 } catch (e) {
   haveSymlink = false;
 }
+// Directories made by later sections that need removing too.
+const extraTmp = [];
 const cleanup = () => {
-  for (const d of [repo, outside, linkedRepo]) fs.rmSync(d, { recursive: true, force: true });
+  for (const d of [repo, outside, linkedRepo, linkedClaudeRepo, linkedHooksRepo, ...extraTmp]) fs.rmSync(d, { recursive: true, force: true });
 };
 process.on('exit', cleanup);
 for (const sig of ['SIGINT', 'SIGTERM']) process.once(sig, () => process.exit(1));
@@ -429,8 +446,113 @@ if (haveSymlink) {
   flags('a symlink under .claude/hooks/ that points outside the repository', cmd(['${CLAUDE_PROJECT_DIR}/.claude/hooks/escape.js']), /escape\.js resolves outside \.claude\/hooks\//);
   flags('a symlink to a sibling directory that shares the prefix', cmd(['${CLAUDE_PROJECT_DIR}/.claude/hooks/sibling.js']), /sibling\.js resolves outside \.claude\/hooks\//);
   flags('.claude/hooks itself symlinked outside the repository', cmd(['${CLAUDE_PROJECT_DIR}/.claude/hooks/evil.js']), linkedRepo, /evil\.js resolves outside \.claude\/hooks\//);
+  flags('.claude symlinked to a directory inside the repository', cmd([OK]), linkedClaudeRepo, /ok\.js resolves outside \.claude\/hooks\//);
+  flags('.claude/hooks symlinked to a directory inside the repository', cmd([OK]), linkedHooksRepo, /ok\.js resolves outside \.claude\/hooks\//);
 } else {
   console.log('skip symlink tests (cannot create symlinks here)');
+}
+
+// locateInHooksDir, against a fake file system that ignores case and Unicode
+// normalization, as APFS does: every spelling of a path has the same
+// identity. Entries are [path, kind] or [path, kind, dev, ino].
+function fakeIo(entries) {
+  const byKey = new Map();
+  let next = 100n;
+  for (const [p, kind, dev = 1n, ino = next++] of entries) byKey.set(p.normalize('NFC').toLowerCase(), { kind, dev, ino });
+  const look = (p, follow) => {
+    const e = byKey.get(p.normalize('NFC').toLowerCase());
+    if (!e) throw Object.assign(new Error(`ENOENT: ${p}`), { code: 'ENOENT' });
+    return { dev: e.dev, ino: e.ino, isDirectory: () => e.kind === 'dir' || (follow && e.kind === 'symlink') };
+  };
+  return { lstat: (p) => look(p, false), stat: (p) => look(p, true) };
+}
+const R = path.resolve(path.sep, 'r');
+const at = (...parts) => path.join(R, ...parts);
+const HOOKS = at('.claude', 'hooks');
+const baseFs = [
+  [path.parse(R).root, 'dir'], [R, 'dir'], [at('.claude'), 'dir'], [HOOKS, 'dir'], [at('.claude', 'hooks', 'x.js'), 'file'],
+  [at('.claude', 'hooks', 'sub'), 'dir'], [at('.claude', 'hooks', 'sub', 'y.js'), 'file'],
+  [at('.claude', 'hooks-old'), 'dir'], [at('.claude', 'hooks-old', 'evil.js'), 'file'],
+];
+const locate = (name, real, want, entries = baseFs) =>
+  check(`locateInHooksDir: ${name}`, () => assert.strictEqual(locateInHooksDir(real, HOOKS, fakeIo(entries)), want));
+locate('a script reached through another spelling is inside', at('.Claude', 'Hooks', 'x.js'), 'inside');
+locate('a script in a subdirectory, another spelling, is inside', at('.claude', 'HOOKS', 'Sub', 'y.js'), 'inside');
+locate('the hooks directory in another spelling is itself', at('.CLAUDE', 'HOOKS'), 'self');
+locate('a sibling directory sharing the prefix is outside', at('.Claude', 'Hooks-Old', 'evil.js'), 'outside');
+locate('the project root is outside', R, 'outside');
+locate('a path that does not exist is outside', at('.claude', 'hooks', 'ghost', 'z.js'), 'outside');
+locate('.claude as a symlink is outside', at('.claude', 'hooks', 'x.js'), 'outside',
+  baseFs.map((e) => (e[0] === at('.claude') ? [e[0], 'symlink'] : e)));
+locate('.claude/hooks as a symlink is outside', at('.claude', 'hooks', 'x.js'), 'outside',
+  baseFs.map((e) => (e[0] === HOOKS ? [e[0], 'symlink'] : e)));
+locate('.claude/hooks as a file is outside', at('.claude', 'hooks', 'x.js'), 'outside',
+  baseFs.map((e) => (e[0] === HOOKS ? [e[0], 'file'] : e)));
+locate('no .claude/hooks directory is outside', at('.claude', 'hooks', 'x.js'), 'outside',
+  baseFs.filter((e) => e[0] !== HOOKS));
+locate('inode 0 on the hooks directory proves nothing', at('.claude', 'hooks', 'x.js'), 'outside',
+  baseFs.map((e) => (e[0] === HOOKS ? [e[0], 'dir', 1n, 0n] : e)));
+locate('the same directory under another name (a bind mount, an inode clash) is outside', at('elsewhere', 'x.js'), 'outside',
+  [...baseFs, [at('elsewhere'), 'dir', 1n, 7n], [at('elsewhere', 'x.js'), 'file']].map((e) => (e[0] === HOOKS ? [e[0], 'dir', 1n, 7n] : e)));
+check('locateInHooksDir: a root spelled in another Unicode normalization is inside', () => {
+  const nfc = path.resolve(path.sep, 'café');
+  const nfd = path.resolve(path.sep, 'café');
+  const hooks = path.join(nfc, '.claude', 'hooks');
+  const io = fakeIo([[path.parse(nfc).root, 'dir'], [nfc, 'dir'], [path.dirname(hooks), 'dir'], [hooks, 'dir'], [path.join(hooks, 'x.js'), 'file']]);
+  assert.strictEqual(locateInHooksDir(path.join(nfd, '.claude', 'hooks', 'x.js'), hooks, io), 'inside');
+});
+locate('the same inode on another device is outside', at('.claude', 'hooks-old', 'evil.js'), 'outside',
+  baseFs.map((e) => (e[0] === HOOKS ? [e[0], 'dir', 1n, 7n] : e[0] === at('.claude', 'hooks-old') ? [e[0], 'dir', 2n, 7n] : e)));
+
+// The same cases on a real case-insensitive file system: the macOS and
+// Windows defaults, or a directory named by CHECK_SETTINGS_CASE_DIR (on
+// Linux, for example, a ciopfs mount made with -o use_ino so that inode
+// numbers are the real ones). Skipped where the temporary directory is
+// case-sensitive, which includes the Linux CI runner.
+const caseBase = fs.mkdtempSync(path.join(process.env.CHECK_SETTINGS_CASE_DIR || os.tmpdir(), 'claude-settings-case-'));
+extraTmp.push(caseBase);
+fs.mkdirSync(path.join(caseBase, 'Probe'));
+const caseInsensitive = fs.existsSync(path.join(caseBase, 'probe'));
+let caseLinks = false;
+if (caseInsensitive) {
+  try {
+    // b: the hooks directory is .Claude/Hooks on disk, and x.js is an
+    // absolute symlink that spells it that way.
+    const b = path.join(caseBase, 'b');
+    fs.mkdirSync(path.join(b, '.Claude', 'Hooks'), { recursive: true });
+    write(path.join(b, '.Claude', 'Hooks', 'real.js'), 'process.exit(0);\n');
+    write(path.join(b, '.Claude', 'Hooks', 'plain.js'), 'process.exit(0);\n');
+    fs.symlinkSync(path.join(b, '.Claude', 'Hooks', 'real.js'), path.join(b, '.Claude', 'Hooks', 'x.js'));
+    fs.symlinkSync(path.join(outside, 'evil.js'), path.join(b, '.Claude', 'Hooks', 'escape.js'));
+    // d: lowercase on disk, with an absolute symlink; the root is passed in
+    // another case, as when the checker runs from a directory typed that way.
+    const d = path.join(caseBase, 'd');
+    fs.mkdirSync(path.join(d, '.claude', 'hooks'), { recursive: true });
+    write(path.join(d, '.claude', 'hooks', 'real.js'), 'process.exit(0);\n');
+    fs.symlinkSync(path.join(d, '.claude', 'hooks', 'real.js'), path.join(d, '.claude', 'hooks', 'x.js'));
+    // c: .Claude is a symlink to a directory inside the repository.
+    const c = path.join(caseBase, 'c');
+    fs.mkdirSync(path.join(c, 'claude-real', 'hooks'), { recursive: true });
+    write(path.join(c, 'claude-real', 'hooks', 'ok.js'), 'process.exit(0);\n');
+    fs.symlinkSync('claude-real', path.join(c, '.Claude'), 'dir');
+    caseLinks = true;
+  } catch (e) {
+    caseLinks = false;
+  }
+}
+if (caseLinks) {
+  const b = path.join(caseBase, 'b');
+  const d = path.join(caseBase, 'd');
+  const c = path.join(caseBase, 'c');
+  clean('case-insensitive: a plain script in .Claude/Hooks on disk', cmd(['${CLAUDE_PROJECT_DIR}/.claude/hooks/plain.js']), b);
+  clean('case-insensitive: a symlink whose target spells .Claude/Hooks', cmd(['${CLAUDE_PROJECT_DIR}/.claude/hooks/x.js']), b);
+  clean('case-insensitive: the root passed in another case', cmd(['${CLAUDE_PROJECT_DIR}/.claude/hooks/x.js']), path.join(caseBase, 'D'));
+  clean('case-insensitive: the root in another case, lowercase on disk', cmd(['${CLAUDE_PROJECT_DIR}/.claude/hooks/real.js']), path.join(caseBase, 'D'));
+  flags('case-insensitive: a symlink that points outside is still flagged', cmd(['${CLAUDE_PROJECT_DIR}/.claude/hooks/escape.js']), b, /escape\.js resolves outside \.claude\/hooks\//);
+  flags('case-insensitive: a symlinked .Claude is still flagged', cmd([OK]), c, /ok\.js resolves outside \.claude\/hooks\//);
+  flags('case-insensitive: the hooks directory in another case', cmd(['${CLAUDE_PROJECT_DIR}/.claude/hooks/.']), d, /names the hooks directory, not a script/);
+} else {
+  console.log(`skip case-insensitive tests (${caseInsensitive ? 'cannot create symlinks there' : 'the temporary directory is case-sensitive'})`);
 }
 
 // ---------------------------------------------------------- the CLI itself

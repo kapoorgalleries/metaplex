@@ -307,6 +307,62 @@ function checkMatcher(matcher, event, at, fail) {
   }
 }
 
+// Where `real`, a resolved script path, sits relative to `hooksDir`, the
+// resolved project root joined with .claude/hooks: 'self', 'inside' or
+// 'outside'. checkPathToken first compares the two as text, which can fail
+// for a script that really is in the hooks directory. On a case-insensitive
+// file system (the macOS and Windows defaults) a symlink's target may spell
+// part of the path in another case, and the root may come from a path typed
+// in another case: fs.realpathSync (the JavaScript one) keeps the case of the
+// text it is given and copies symlink targets verbatim. Switching to
+// fs.realpathSync.native would not help, because it returns the on-disk case,
+// which differs from HOOKS_DIR whenever the directory is cased differently on
+// disk. So before rejecting, this asks the file system instead: is `real`, or
+// one of its parent directories, the hooks directory itself, by device and
+// inode? A match counts only when that path also equals the hooks path apart
+// from case and Unicode normalization, so this accepts nothing but a
+// difference in spelling: a bind mount, or two directories that report the
+// same inode (some overlay and FUSE mounts can), gets the text comparison's
+// answer. Neither .claude nor hooks may be a symlink, so a hooks directory
+// that points somewhere else is still rejected, as the text comparison
+// rejects it.
+const fsIo = {
+  lstat: (p) => fs.lstatSync(p, { bigint: true }),
+  stat: (p) => fs.statSync(p, { bigint: true }),
+};
+function locateInHooksDir(real, hooksDir, io = fsIo) {
+  // lstat does not follow a symlink, so a symlinked .claude or hooks is not
+  // a directory here.
+  let anchor;
+  try {
+    for (const dir of [path.dirname(hooksDir), hooksDir]) {
+      anchor = io.lstat(dir);
+      if (!anchor.isDirectory()) return 'outside';
+    }
+  } catch (e) {
+    return 'outside';
+  }
+  // Some file systems report inode 0 for everything; identity means nothing
+  // there, so the text comparison's answer stands.
+  if (anchor.ino === 0n) return 'outside';
+  const fold = (p) => p.normalize('NFC').toLowerCase();
+  for (let p = real; ; ) {
+    let st;
+    try {
+      st = io.stat(p);
+    } catch (e) {
+      return 'outside';
+    }
+    if (st.dev === anchor.dev && st.ino === anchor.ino) {
+      if (fold(p) !== fold(hooksDir)) return 'outside';
+      return p === real ? 'self' : 'inside';
+    }
+    const up = path.dirname(p);
+    if (up === p) return 'outside';
+    p = up;
+  }
+}
+
 // One exec-form token: the command, or an element of args. Returns true when
 // the token referenced a path placeholder, whether or not it was valid. The
 // project placeholder is the braced form the hooks reference defines; the
@@ -350,11 +406,13 @@ function checkPathToken(token, root, at, fail) {
     fail(`${at}: ${rel} does not exist`);
     return true;
   }
-  if (real === hooksRoot.slice(0, -1)) {
+  let where = real === hooksRoot.slice(0, -1) ? 'self' : real.startsWith(hooksRoot) ? 'inside' : 'outside';
+  if (where === 'outside') where = locateInHooksDir(real, hooksRoot.slice(0, -1));
+  if (where === 'self') {
     fail(`${at} names the hooks directory, not a script: ${JSON.stringify(token)}`);
     return true;
   }
-  if (!real.startsWith(hooksRoot)) {
+  if (where === 'outside') {
     fail(`${at}: ${rel} resolves outside ${HOOKS_DIR}`);
     return true;
   }
@@ -517,5 +575,5 @@ function main() {
 if (require.main === module) {
   main();
 } else {
-  module.exports = { parseStrict, checkSettings, MAX_DEPTH, HOOKS_DIR, HOOK_EVENTS, PERMISSION_KEYS, EVENT_HOOK_TYPES, INTERPRETERS };
+  module.exports = { parseStrict, checkSettings, locateInHooksDir, MAX_DEPTH, HOOKS_DIR, HOOK_EVENTS, PERMISSION_KEYS, EVENT_HOOK_TYPES, INTERPRETERS };
 }
