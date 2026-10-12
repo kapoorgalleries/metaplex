@@ -35,7 +35,8 @@ printf "os=%s\n" "${os:-$(uname -sr)}"'
 
 # Fed to "powershell -Command -", which runs stdin one statement at a time and
 # drops an unfinished multi-line statement at EOF: keep each statement on one line.
-WIN_PROBE='$env:Path = "$env:USERPROFILE\.local\bin;$env:LOCALAPPDATA\Programs\OpenAI\Codex\bin;$env:LOCALAPPDATA\agy\bin;$env:APPDATA\npm;" + $env:Path
+WIN_PROBE='$la = $env:LOCALAPPDATA; if (-not $la) { $la = [Environment]::GetFolderPath("LocalApplicationData") }; if (-not $la) { $la = "$env:USERPROFILE\AppData\Local" }
+$env:Path = "$env:USERPROFILE\.local\bin;$la\Programs\OpenAI\Codex\bin;$la\agy\bin;$env:APPDATA\npm;" + $env:Path
 $env:HF_HUB_DISABLE_UPDATE_CHECK = "1"
 foreach ($c in "claude","codex","gemini","agy","hf","node") { $v = "missing"; if (Get-Command $c -ErrorAction SilentlyContinue) { try { $global:LASTEXITCODE = 0; $o = @(& $c --version 2>&1 | ForEach-Object { "$_" }); $v = "$($o | Select-Object -First 1)"; if ($LASTEXITCODE -ne 0) { $v = "error: $v" } elseif (-not $v) { $v = "error: printed no version" } } catch { $v = "error: " + $_.Exception.Message } }; "$c=$v" }
 "os=" + (Get-CimInstance Win32_OperatingSystem).Caption'

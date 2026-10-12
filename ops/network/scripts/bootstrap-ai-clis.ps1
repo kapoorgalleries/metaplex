@@ -377,7 +377,11 @@ if (-not $SkipAgy) {
   } else {
     Log 'installing Antigravity CLI (agy; official installer, updates itself)'
     $rc = Invoke-Installer 'https://antigravity.google/cli/install.ps1'
-    if ($env:LOCALAPPDATA) { Add-UserPath (Join-Path $env:LOCALAPPDATA 'agy\bin') }
+    # LOCALAPPDATA can be unset (some SSH and service sessions): ask .NET, then fall back to the profile.
+    $localApp = $env:LOCALAPPDATA
+    if (-not $localApp) { $localApp = [Environment]::GetFolderPath('LocalApplicationData') }
+    if (-not $localApp -and $env:USERPROFILE) { $localApp = Join-Path $env:USERPROFILE 'AppData\Local' }
+    if ($localApp) { Add-UserPath (Join-Path $localApp 'agy\bin') }
     Refresh-Path
     if ($rc -ne 0 -or -not (Have 'agy')) { Add-Failure 'agy' "Antigravity CLI install FAILED (installer exit $rc; https://antigravity.google/cli/install.ps1)" }
   }
@@ -438,8 +442,9 @@ if (-not $SkipHf) {
 Refresh-Path
 
 Log "versions on ${env:COMPUTERNAME}:"
+$skipped = @{ node = $SkipNode; claude = $SkipClaude; codex = $SkipCodex; gemini = $SkipGemini; agy = $SkipAgy; hf = $SkipHf }
 foreach ($c in 'node', 'claude', 'codex', 'gemini', 'agy', 'hf') {
-  if (Have $c) { $v = Get-CliVersion $c } else { $v = 'MISSING' }
+  if (Have $c) { $v = Get-CliVersion $c } elseif ($skipped[$c]) { $v = 'not installed (skipped)' } else { $v = 'MISSING' }
   Write-Host ("  {0,-7} {1}" -f $c, $v)
 }
 @'

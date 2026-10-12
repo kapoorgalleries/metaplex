@@ -257,8 +257,9 @@ install_agy() {
   log "installing Antigravity CLI (agy; official installer, updates itself)"
   fetch_run https://antigravity.google/cli/install.sh bash </dev/null \
     || { warn "Antigravity CLI install FAILED (https://antigravity.google/cli/install.sh)"; return 1; }
+  [ -x "$HOME/.local/bin/agy" ] || { warn "the Antigravity CLI installer finished, but there is no executable ~/.local/bin/agy"; return 1; }
   ensure_path "$HOME/.local/bin"
-  have agy || { warn "the Antigravity CLI installer finished, but there is no agy in ~/.local/bin"; return 1; }
+  have agy || { warn "agy is in ~/.local/bin, but not on PATH after adding ~/.local/bin"; return 1; }
 }
 
 # The hf installer builds a venv, so it needs Python 3.10+ with venv and ensurepip, and installs
