@@ -101,16 +101,29 @@ const HOOK_REQUIRED_STRINGS = { http: ['url'], mcp_tool: ['server', 'tool'], pro
 // file. A tool that can run commands, write files or send data would let a
 // hook do that from inline input that no reviewed script holds, which is
 // what the command-hook rules forbid. So only the server/tool pairs listed
-// here are accepted, matched exactly. A pair binds only a server name, which
-// Claude Code looks up among the servers configured on the machine running
-// the hook. So each entry also pins that server's definition in the
-// committed .mcp.json, { server, tool, definition }: the server must be
-// defined there, exactly as pinned, and an edit to .mcp.json fails the check
-// until the pin is reviewed and updated. Add a pair only after confirming
-// that the tool can do none of those things, whatever its input. A server
-// of the same name in a developer's own local or user scope still takes
-// its place on that machine, which no check in this repository can see.
+// here are accepted, matched exactly. Add a pair only after confirming that
+// the tool can do none of those things, whatever its input.
+//
+// A pair binds only a server name, which Claude Code looks up among the
+// servers configured on the machine running the hook. So each entry also
+// pins that server's definition in the committed .mcp.json,
+// { server, tool, definition }: the server must be defined there, exactly as
+// pinned, and an edit to .mcp.json fails the check until the pin is reviewed
+// and updated. A pinned definition may not use ${VAR} expansion, which
+// differs per machine; a stdio server should name an exact package version,
+// since `npx -y pkg` runs whatever is published. No other .mcp.json may be
+// tracked while any pair is listed: Claude Code reads every .mcp.json from
+// the directory a session starts in up to the filesystem root, and the
+// nearest definition of a name wins. What no check here can see: a
+// local-scope, managed or --mcp-config server of the same name replaces the
+// project one on that machine (a user-scope one only while the project
+// server is not approved), and so does a .mcp.json above the repository.
 const MCP_TOOL_HOOKS = [];
+// An http hook posts every hook input (tool inputs, prompts) to its URL,
+// and the reply can approve a tool call or add to Claude's context. So only
+// URLs listed here are accepted, matched exactly. Add one only after
+// confirming who runs that endpoint and what it does with what it receives.
+const HTTP_HOOK_URLS = [];
 // What this file holds at the top level. Anything within two edits of one
 // of these names is a misspelling that would silently drop the whole block.
 const TOP_LEVEL_KEYS_HERE = ['permissions', 'hooks'];
@@ -260,8 +273,11 @@ function checkTopLevel(settings, fail) {
     if (near) {
       fail(`"${key}" looks like a misspelling of "${near}"; Claude Code does not read it, so nothing in it applies`);
     } else {
-      fail(`"${key}" is not accepted in this file, which holds only ${TOP_LEVEL_KEYS.map((k) => `"${k}"`).join(', ')}: other settings can bring in code no reviewed script holds (enabledPlugins and extraKnownMarketplaces load a plugin with its own hooks; apiKeyHelper, statusLine, awsAuthRefresh, awsCredentialExport and otelHeadersHelper run commands). Put personal settings in .claude/settings.local.json, or add a key that runs nothing to TOP_LEVEL_KEYS in scripts/check-claude-settings.js`);
+      fail(`"${key}" is not accepted in this file, which holds only ${TOP_LEVEL_KEYS.map((k) => `"${k}"`).join(', ')}: other settings can bring in code no reviewed script holds (enabledPlugins and extraKnownMarketplaces load a plugin with its own hooks; apiKeyHelper, statusLine, awsAuthRefresh, awsCredentialExport and otelHeadersHelper run commands). Put personal settings in your untracked .claude/settings.local.json, or add a key that runs nothing to TOP_LEVEL_KEYS in scripts/check-claude-settings.js`);
     }
+  }
+  if (hasOwn(settings, '$schema') && typeof settings.$schema !== 'string') {
+    fail('"$schema" must be a string: Claude Code skips a settings file that fails its schema, so none of this policy would apply');
   }
   // Claude Code passes "env" to every hook process: NODE_OPTIONS, BASH_ENV
   // or PYTHONPATH would make an allowed interpreter load code from outside
@@ -448,7 +464,7 @@ function checkCommandHook(hook, root, at, fail) {
   if (hasOwn(hook, 'shell')) fail(`${at}.shell has no effect in exec form`);
 }
 
-function checkHook(hook, event, root, at, fail, { mcpToolHooks, allowAgentHooks }) {
+function checkHook(hook, event, root, at, fail, { mcpToolHooks, allowAgentHooks, httpHookUrls }) {
   if (!isPlainObject(hook)) return fail(`${at} must be an object`);
   if (!HOOK_TYPES.includes(hook.type)) return fail(`${at}.type must be one of ${HOOK_TYPES.map((t) => `"${t}"`).join(', ')}`);
   checkUnknownKeys(hook, [...HOOK_COMMON_FIELDS, ...HOOK_TYPE_FIELDS[hook.type]], at, `a ${hook.type} hook field`, fail);
@@ -477,6 +493,9 @@ function checkHook(hook, event, root, at, fail, { mcpToolHooks, allowAgentHooks 
   // included, which would get around MCP_TOOL_HOOKS. Prompt hooks get no tools.
   if (hook.type === 'agent' && !allowAgentHooks) {
     fail(`${at}: agent hooks are not accepted in this file: the hook agent runs in dontAsk mode with every allow rule from every settings scope, so its inline prompt can call any allowed tool, MCP tools included, and get around MCP_TOOL_HOOKS. Use a command hook with a reviewed script, or a prompt hook, which has no tools`);
+  }
+  if (hook.type === 'http' && isNonEmptyString(hook.url) && !httpHookUrls.includes(hook.url)) {
+    fail(`${at}: http hook URL ${JSON.stringify(hook.url)} is not in HTTP_HOOK_URLS in scripts/check-claude-settings.js. Claude Code posts every hook input, tool inputs and prompts included, to it, and its reply can approve a tool call or add to Claude's context, so add the URL there only after confirming who runs that endpoint and what it does with what it receives`);
   }
   if (hook.type === 'mcp_tool' && isNonEmptyString(hook.server) && isNonEmptyString(hook.tool)
     && !mcpToolHooks.some((p) => p.server === hook.server && p.tool === hook.tool)) {
@@ -537,15 +556,46 @@ function checkMcpToolPins(root, mcpToolHooks, fail) {
       fail(`MCP_TOOL_HOOKS pair ${pair} names a server that the committed .mcp.json does not define; a pair must name a server defined there`);
     } else if (canonicalJson(servers[p.server]) !== canonicalJson(p.definition)) {
       fail(`.mcp.json's definition of ${JSON.stringify(p.server)} differs from the one pinned with ${pair} in MCP_TOOL_HOOKS; review what the new definition can do, then update the pin`);
+    } else if (canonicalJson(p.definition).includes('${')) {
+      fail(`the definition pinned with ${pair} in MCP_TOOL_HOOKS uses \${...} expansion, which resolves differently on each machine; pin a definition with literal values`);
     }
   }
 }
 
+// Claude Code also loads .claude/settings.json and .claude/settings.local.json
+// from the directory a session starts in, and treats a tracked
+// settings.local.json as repository-supplied. Neither would be checked here,
+// so only the root .claude/settings.json may be tracked. While any
+// MCP_TOOL_HOOKS pair is listed, no .mcp.json other than the root one may be
+// tracked either (see MCP_TOOL_HOOKS). `tracked` lists the tracked paths,
+// relative to the repository root with forward slashes.
+function checkTrackedFiles(tracked, { mcpToolHooks = MCP_TOOL_HOOKS } = {}) {
+  const problems = [];
+  for (const file of tracked) {
+    if (/(^|\/)\.claude\/settings\.local\.json$/.test(file)) {
+      problems.push(`${file} is tracked: Claude Code treats a tracked settings.local.json as repository-supplied, and this check does not read it. Keep it untracked (git rm --cached ${file})`);
+    } else if (/(^|\/)\.claude\/settings\.json$/.test(file) && file !== '.claude/settings.json') {
+      problems.push(`${file} is tracked: Claude Code loads it for a session started in ${file.slice(0, -'/.claude/settings.json'.length)}, and this check reads only the root .claude/settings.json. Keep the policy in the root file`);
+    } else if (mcpToolHooks.length && /(^|\/)\.mcp\.json$/.test(file) && file !== '.mcp.json') {
+      problems.push(`${file} is tracked: Claude Code lets a .mcp.json nearer the session's directory override the root one by server name, so the definitions pinned in MCP_TOOL_HOOKS would not hold`);
+    }
+  }
+  return problems;
+}
+
+// The tracked files of the repository at `root`, from git.
+function trackedFiles(root) {
+  const r = spawnSync('git', ['-C', root, 'ls-files', '-z'], { encoding: 'utf8' });
+  if (r.status !== 0) throw new Error(`git ls-files failed: ${(r.stderr || '').trim() || r.error}`);
+  return r.stdout.split('\0').filter(Boolean);
+}
+
 // Returns the list of problems with a parsed settings object. `root` is the
 // repository root that ${CLAUDE_PROJECT_DIR} stands for. The tests pass
-// `mcpToolHooks` in place of MCP_TOOL_HOOKS and `allowAgentHooks` to reach
-// the other rules for those hook types.
-function checkSettings(settings, root, { mcpToolHooks = MCP_TOOL_HOOKS, allowAgentHooks = false } = {}) {
+// `mcpToolHooks` and `httpHookUrls` in place of MCP_TOOL_HOOKS and
+// HTTP_HOOK_URLS, and `allowAgentHooks`, to reach the other rules for those
+// hook types.
+function checkSettings(settings, root, { mcpToolHooks = MCP_TOOL_HOOKS, allowAgentHooks = false, httpHookUrls = HTTP_HOOK_URLS } = {}) {
   const problems = [];
   const fail = (msg) => problems.push(msg);
   if (!isPlainObject(settings)) {
@@ -554,7 +604,7 @@ function checkSettings(settings, root, { mcpToolHooks = MCP_TOOL_HOOKS, allowAge
   }
   checkTopLevel(settings, fail);
   checkPermissions(settings.permissions, fail);
-  checkHooks(settings.hooks, root, fail, { mcpToolHooks, allowAgentHooks });
+  checkHooks(settings.hooks, root, fail, { mcpToolHooks, allowAgentHooks, httpHookUrls });
   checkMcpToolPins(root, mcpToolHooks, fail);
   return problems;
 }
@@ -586,8 +636,15 @@ function main() {
     process.exit(1);
   }
   problems.push(...checkSettings(settings, root));
+  let repoProblems = [];
+  try {
+    repoProblems = checkTrackedFiles(trackedFiles(root));
+  } catch (e) {
+    repoProblems = [`cannot list the repository's tracked files, which this check needs: ${e.message}`];
+  }
 
-  if (problems.length) {
+  if (problems.length || repoProblems.length) {
+    for (const p of repoProblems) console.error(p);
     for (const p of problems) console.error(`.claude/settings.json: ${p}`);
     process.exit(1);
   }
@@ -602,5 +659,5 @@ function main() {
 if (require.main === module) {
   main();
 } else {
-  module.exports = { parseStrict, checkSettings, MAX_DEPTH, HOOKS_DIR, HOOK_EVENTS, PERMISSION_KEYS, EVENT_HOOK_TYPES, INTERPRETERS, MCP_TOOL_HOOKS };
+  module.exports = { parseStrict, checkSettings, MAX_DEPTH, HOOKS_DIR, HOOK_EVENTS, PERMISSION_KEYS, EVENT_HOOK_TYPES, INTERPRETERS, MCP_TOOL_HOOKS, HTTP_HOOK_URLS, checkTrackedFiles, trackedFiles };
 }

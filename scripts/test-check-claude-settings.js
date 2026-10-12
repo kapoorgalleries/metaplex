@@ -23,7 +23,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { spawnSync } = require('child_process');
-const { parseStrict, checkSettings, MAX_DEPTH, HOOK_EVENTS, PERMISSION_KEYS, EVENT_HOOK_TYPES, INTERPRETERS, MCP_TOOL_HOOKS } = require('./check-claude-settings.js');
+const { parseStrict, checkSettings, MAX_DEPTH, HOOK_EVENTS, PERMISSION_KEYS, EVENT_HOOK_TYPES, INTERPRETERS, MCP_TOOL_HOOKS, HTTP_HOOK_URLS, checkTrackedFiles, trackedFiles } = require('./check-claude-settings.js');
 
 let failures = 0;
 const check = (name, fn) => {
@@ -155,6 +155,7 @@ check('INTERPRETERS is exactly node, python3, bash, sh, pwsh', () => assert.deep
 // Each entry is a reviewed decision that the tool cannot run commands, write
 // files or send data; none has been made, so the list is empty.
 check('MCP_TOOL_HOOKS is empty', () => assert.deepStrictEqual(MCP_TOOL_HOOKS, []));
+check('HTTP_HOOK_URLS is empty', () => assert.deepStrictEqual(HTTP_HOOK_URLS, []));
 
 // Throwaway repositories. `repo` has hooks that exist, parse, don't parse,
 // have a space in the name, or are a directory; a script outside
@@ -174,10 +175,13 @@ const write = (p, text, mode) => {
   if (mode !== undefined) fs.chmodSync(p, mode);
 };
 write(path.join(hooksDir, 'ok.js'), 'process.exit(0);\n');
-// The throwaway repository's .mcp.json defines the servers the test pairs pin.
-const MCP_S = { type: 'stdio', command: 'npx', args: ['-y', 'example-s'] };
-const MCP_MEMORY = { type: 'http', url: 'https://example.com/memory/mcp', headers: { 'X-Mode': 'read-only' } };
-write(path.join(repo, '.mcp.json'), `${JSON.stringify({ mcpServers: { s: MCP_S, memory: MCP_MEMORY } }, null, 2)}\n`);
+// The throwaway repository's .mcp.json defines the servers the test pairs pin,
+// alongside the real .mcp.json's servers, so that a pair added to
+// MCP_TOOL_HOOKS is checked against the same definitions here as in CI.
+const REAL_MCP = JSON.parse(fs.readFileSync(path.join(__dirname, '..', '.mcp.json'), 'utf8'));
+const MCP_S = { type: 'stdio', command: 'npx', args: ['-y', 'example-s@1.2.3'], env: { MODE: 'read-only', LEVEL: '1' } };
+const MCP_MEMORY = { type: 'http', url: 'https://example.com/memory/mcp', headers: { 'X-Mode': 'read-only', 'X-Region': 'us' } };
+write(path.join(repo, '.mcp.json'), `${JSON.stringify({ mcpServers: { ...REAL_MCP.mcpServers, s: MCP_S, memory: MCP_MEMORY } }, null, 2)}\n`);
 write(path.join(hooksDir, 'ok.mjs'), 'export {};\n');
 // The first bytes of a zip archive; python3 runs a zip named .py as a script.
 write(path.join(hooksDir, 'zipped.py'), Buffer.from('504b0304140000000000', 'hex'));
@@ -225,7 +229,7 @@ const prompt = { type: 'prompt', prompt: 'ok' };
 // accepted, so that every other rule can be tested on those hook types. The
 // defaults (an empty MCP_TOOL_HOOKS, no agent hooks) are tested below with no
 // options, through checkSettings and through the CLI.
-const TEST_OPTIONS = { mcpToolHooks: [{ server: 's', tool: 't', definition: MCP_S }, { server: 'memory', tool: 'store', definition: MCP_MEMORY }], allowAgentHooks: true };
+const TEST_OPTIONS = { mcpToolHooks: [{ server: 's', tool: 't', definition: MCP_S }, { server: 'memory', tool: 'store', definition: MCP_MEMORY }], allowAgentHooks: true, httpHookUrls: ['https://example.com/hook'] };
 const clean = (name, settings, root = repo) =>
   check(name, () => assert.deepStrictEqual(checkSettings(settings, root, TEST_OPTIONS), []));
 const flags = (name, settings, ...patterns) =>
@@ -253,6 +257,9 @@ check('env gets its own message only, not also the general one', () => {
 // Top-level keys: only permissions, hooks and $schema. Other settings can
 // load a plugin with its own hooks or run a command.
 clean('$schema is accepted', { $schema: 'https://json.schemastore.org/claude-code-settings.json', ...P });
+for (const bad of [5, null, true, {}]) {
+  flags(`a non-string $schema (${JSON.stringify(bad)}) would make Claude Code skip the file`, { $schema: bad, ...P }, /"\$schema" must be a string: Claude Code skips a settings file that fails its schema/);
+}
 for (const key of ['enabledPlugins', 'extraKnownMarketplaces', 'additionalMarketplaces', 'apiKeyHelper', 'statusLine', 'awsAuthRefresh', 'awsCredentialExport', 'otelHeadersHelper', 'enableAllProjectMcpServers', 'enabledMcpjsonServers', 'model', 'outputStyle']) {
   flags(`top-level "${key}" is not accepted`, { ...P, [key]: {} }, new RegExp(`"${key}" is not accepted in this file, which holds only "permissions", "hooks", "\\$schema": other settings can bring in code`));
 }
@@ -407,26 +414,31 @@ check('a missing or non-string server or tool is reported once, not also as unli
 check('pairs whose servers .mcp.json defines exactly as pinned pass', () => {
   assert.deepStrictEqual(checkSettings(P, repo, TEST_OPTIONS), []);
 });
-check('key order inside a pinned definition does not matter', () => {
-  const reordered = { headers: { 'X-Mode': 'read-only' }, url: MCP_MEMORY.url, type: 'http' };
-  assert.deepStrictEqual(checkSettings(P, repo, { mcpToolHooks: [{ server: 'memory', tool: 'store', definition: reordered }] }), []);
+check('key order inside a pinned definition does not matter, at any depth', () => {
+  const memory = { headers: { 'X-Region': 'us', 'X-Mode': 'read-only' }, url: MCP_MEMORY.url, type: 'http' };
+  const s = { env: { LEVEL: '1', MODE: 'read-only' }, args: MCP_S.args, command: 'npx', type: 'stdio' };
+  assert.deepStrictEqual(checkSettings(P, repo, { mcpToolHooks: [{ server: 'memory', tool: 'store', definition: memory }, { server: 's', tool: 't', definition: s }] }), []);
 });
 for (const [label, definition] of [
   ['a changed url', { ...MCP_MEMORY, url: 'https://example.com/other/mcp' }],
   ['a dropped header', { type: 'http', url: MCP_MEMORY.url }],
   ['an added field', { ...MCP_MEMORY, oauth: {} }],
-  ['a changed argument', { ...MCP_S, args: ['-y', 'example-s', '--write'] }],
+  ['a changed argument', { ...MCP_S, args: ['-y', 'example-s@1.2.3', '--write'] }],
+  ['reordered arguments', { ...MCP_S, args: ['example-s@1.2.3', '-y'] }],
+  ['an added env variable', { ...MCP_S, env: { ...MCP_S.env, NODE_OPTIONS: '--require x' } }],
+  ['a changed env value', { ...MCP_S, env: { ...MCP_S.env, MODE: 'write' } }],
+  ['a value of another type', { ...MCP_S, env: { ...MCP_S.env, LEVEL: 1 } }],
   ['no definition', undefined],
 ]) {
   check(`a pin that differs from .mcp.json (${label}) fails`, () => {
-    const server = label === 'a changed argument' ? 's' : 'memory';
+    const server = /argument|env|type/.test(label) ? 's' : 'memory';
     const problems = checkSettings(P, repo, { mcpToolHooks: [{ server, tool: 'x', definition }] });
     assert.ok(problems.some((m) => new RegExp(`\\.mcp\\.json's definition of "${server}" differs from the one pinned with "${server}/x"`).test(m)), JSON.stringify(problems));
   });
 }
 check('a pair whose server .mcp.json does not define fails', () => {
-  const problems = checkSettings(P, repo, { mcpToolHooks: [{ server: 'supabase', tool: 'execute_sql', definition: {} }] });
-  assert.ok(problems.some((m) => /pair "supabase\/execute_sql" names a server that the committed \.mcp\.json does not define/.test(m)), JSON.stringify(problems));
+  const problems = checkSettings(P, repo, { mcpToolHooks: [{ server: 'github', tool: 'get_me', definition: {} }] });
+  assert.ok(problems.some((m) => /pair "github\/get_me" names a server that the committed \.mcp\.json does not define/.test(m)), JSON.stringify(problems));
 });
 check('a pair with no .mcp.json in the repository fails', () => {
   const problems = checkSettings(P, outside, TEST_OPTIONS);
@@ -443,8 +455,79 @@ check('a .mcp.json with a duplicate key or no mcpServers fails', () => {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+for (const [label, def] of [
+  ['in the url', { type: 'http', url: '${MEMORY_URL:-https://example.com/memory/mcp}' }],
+  ['in a header', { ...MCP_MEMORY, headers: { ...MCP_MEMORY.headers, Authorization: 'Bearer ${MEMORY_TOKEN}' } }],
+  ['in a stdio argument', { ...MCP_S, args: ['-y', '${PKG:-example-s@1.2.3}'] }],
+  ['in a stdio env value', { ...MCP_S, env: { ...MCP_S.env, MODE: '${MODE}' } }],
+]) {
+  check(`a pinned definition that uses \${...} expansion ${label} fails even when it matches`, () => {
+    const dir = tmp('claude-settings-mcp-');
+    try {
+      fs.writeFileSync(path.join(dir, '.mcp.json'), `${JSON.stringify({ mcpServers: { memory: def } })}\n`);
+      const problems = checkSettings(P, dir, { mcpToolHooks: [{ server: 'memory', tool: 'store', definition: def }] });
+      assert.ok(problems.some((m) => /pinned with "memory\/store" in MCP_TOOL_HOOKS uses \$\{\.\.\.\} expansion/.test(m)), JSON.stringify(problems));
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+}
 check('with no pairs listed, .mcp.json is not read at all', () => {
   assert.deepStrictEqual(checkSettings(P, outside), []);
+});
+// http hooks: exact URLs from HTTP_HOOK_URLS only.
+for (const event of DOCUMENTED_EVENTS.filter((e) => DOCUMENTED_EVENT_TYPES[e].includes('http'))) {
+  check(`an http hook on ${event} is rejected by the real, empty HTTP_HOOK_URLS`, () => {
+    const problems = checkSettings({ ...P, hooks: { [event]: [{ hooks: [{ type: 'http', url: 'https://example.com/hook' }] }] } }, repo);
+    assert.ok(problems.some((m) => /http hook URL "https:\/\/example\.com\/hook" is not in HTTP_HOOK_URLS.*posts every hook input/.test(m)), JSON.stringify(problems));
+  });
+}
+check('an http hook URL must match a listed one exactly', () => {
+  for (const url of ['https://example.com/hook/', 'https://example.com/hook?x=1', 'HTTPS://example.com/hook', 'https://example.com/hoo', 'http://example.com/hook']) {
+    assert.ok(checkSettings(entry({ type: 'http', url }), repo, TEST_OPTIONS).some((m) => /is not in HTTP_HOOK_URLS/.test(m)), url);
+  }
+});
+check('a missing http hook url is reported once, not also as unlisted', () => {
+  assert.deepStrictEqual(checkSettings(entry({ type: 'http' }), repo).filter((m) => /HTTP_HOOK_URLS/.test(m)), []);
+});
+// Only the root .claude/settings.json may be tracked; with pairs listed, only
+// the root .mcp.json.
+check('tracked files: the committed layout passes', () => {
+  assert.deepStrictEqual(checkTrackedFiles(['.claude/settings.json', '.claude/README.md', '.mcp.json', 'scripts/x.js']), []);
+});
+check('tracked files: a tracked settings.local.json fails, at the root or nested', () => {
+  for (const f of ['.claude/settings.local.json', 'js/web/.claude/settings.local.json']) {
+    assert.ok(checkTrackedFiles([f]).some((m) => m.startsWith(`${f} is tracked: Claude Code treats a tracked settings.local.json as repository-supplied`)), f);
+  }
+});
+check('tracked files: a nested .claude/settings.json fails', () => {
+  assert.deepStrictEqual(checkTrackedFiles(['js/packages/web/.claude/settings.json']), ['js/packages/web/.claude/settings.json is tracked: Claude Code loads it for a session started in js/packages/web, and this check reads only the root .claude/settings.json. Keep the policy in the root file']);
+});
+check('tracked files: other files under .claude/ and lookalike names pass', () => {
+  assert.deepStrictEqual(checkTrackedFiles(['.claude/hooks/settings.json', 'x/claude/settings.json', '.claude/settings.json.bak', 'docs/.mcp.json.example']), []);
+});
+check('tracked files: a nested .mcp.json fails only while pairs are listed', () => {
+  assert.deepStrictEqual(checkTrackedFiles(['.mcp.json', 'js/web/.mcp.json']), []);
+  const problems = checkTrackedFiles(['.mcp.json', 'js/web/.mcp.json'], TEST_OPTIONS);
+  assert.deepStrictEqual(problems, ['js/web/.mcp.json is tracked: Claude Code lets a .mcp.json nearer the session\'s directory override the root one by server name, so the definitions pinned in MCP_TOOL_HOOKS would not hold']);
+});
+check('trackedFiles lists the index of a real git repository', () => {
+  const dir = tmp('claude-settings-git-');
+  try {
+    // git quotes a path with a non-ASCII byte unless asked for -z output;
+    // a quoted path would slip past the patterns in checkTrackedFiles.
+    for (const d of ['a', 'café']) {
+      fs.mkdirSync(path.join(dir, d, '.claude'), { recursive: true });
+      fs.writeFileSync(path.join(dir, d, '.claude', 'settings.json'), '{}\n');
+    }
+    fs.writeFileSync(path.join(dir, 'untracked.txt'), 'x\n');
+    assert.strictEqual(spawnSync('git', ['-C', dir, 'init', '-q']).status, 0);
+    assert.strictEqual(spawnSync('git', ['-C', dir, '-c', 'core.quotePath=true', 'add', 'a', 'café']).status, 0);
+    assert.deepStrictEqual(trackedFiles(dir).sort(), ['a/.claude/settings.json', 'café/.claude/settings.json']);
+    assert.throws(() => trackedFiles(path.join(dir, 'missing')), /git ls-files failed/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
 // Agent hooks: rejected unless a test opts in.
 for (const event of DOCUMENTED_EVENTS.filter((e) => DOCUMENTED_EVENT_TYPES[e].includes('agent'))) {
@@ -561,14 +644,28 @@ if (haveSymlink) {
 
 // Run the checker as CI does, from a copy placed in a throwaway repository
 // whose .claude/settings.json holds the given text.
-function runCli(settingsText) {
+// The tree is a git repository holding the real .mcp.json, as a checkout is;
+// `extra` maps further paths to their contents, all tracked. With
+// `git: false` the tree is not a repository.
+function runCli(settingsText, extra = {}, { git = true } = {}) {
   const tree = tmp('claude-settings-cli-');
   try {
     fs.mkdirSync(path.join(tree, 'scripts'));
     fs.mkdirSync(path.join(tree, '.claude'));
     fs.copyFileSync(path.join(__dirname, 'check-claude-settings.js'), path.join(tree, 'scripts', 'check-claude-settings.js'));
+    fs.copyFileSync(path.join(__dirname, '..', '.mcp.json'), path.join(tree, '.mcp.json'));
     fs.writeFileSync(path.join(tree, '.claude', 'settings.json'), settingsText);
-    return spawnSync(process.execPath, [path.join(tree, 'scripts', 'check-claude-settings.js')], { encoding: 'utf8' });
+    for (const [rel, text] of Object.entries(extra)) {
+      fs.mkdirSync(path.dirname(path.join(tree, rel)), { recursive: true });
+      fs.writeFileSync(path.join(tree, rel), text);
+    }
+    if (git) {
+      spawnSync('git', ['-C', tree, 'init', '-q']);
+      spawnSync('git', ['-C', tree, 'add', '-A', '-f']);
+    }
+    // The ceiling keeps git from finding a repository that encloses the tree.
+    const env = { ...process.env, GIT_CEILING_DIRECTORIES: path.dirname(tree) };
+    return spawnSync(process.execPath, [path.join(tree, 'scripts', 'check-claude-settings.js')], { encoding: 'utf8', env });
   } finally {
     fs.rmSync(tree, { recursive: true, force: true });
   }
@@ -582,6 +679,31 @@ check('CLI: an mcp_tool hook not in MCP_TOOL_HOOKS exits 1', () => {
   const r = runCli('{"permissions":{},"hooks":{"Stop":[{"hooks":[{"type":"mcp_tool","server":"supabase","tool":"execute_sql","input":{"query":"select 1"}}]}]}}\n');
   assert.strictEqual(r.status, 1);
   assert.match(r.stderr, /mcp_tool hook "supabase\/execute_sql" is not in MCP_TOOL_HOOKS/);
+});
+check('CLI: a tracked settings.local.json exits 1', () => {
+  const r = runCli('{"permissions":{}}\n', { '.claude/settings.local.json': '{"apiKeyHelper":"sh -c x"}\n' });
+  assert.strictEqual(r.status, 1);
+  assert.match(r.stderr, /\.claude\/settings\.local\.json is tracked/);
+});
+check('CLI: a nested .claude/settings.json exits 1', () => {
+  const r = runCli('{"permissions":{}}\n', { 'js/web/.claude/settings.json': '{"permissions":{}}\n' });
+  assert.strictEqual(r.status, 1);
+  assert.match(r.stderr, /js\/web\/\.claude\/settings\.json is tracked/);
+});
+check('CLI: outside a git repository it exits 1, since it cannot list the tracked files', () => {
+  const r = runCli('{"permissions":{}}\n', {}, { git: false });
+  assert.strictEqual(r.status, 1);
+  assert.match(r.stderr, /cannot list the repository's tracked files, which this check needs: git ls-files failed/);
+});
+check('CLI: a nested .claude/settings.json in a non-ASCII directory exits 1', () => {
+  const r = runCli('{"permissions":{}}\n', { 'café/.claude/settings.json': '{"permissions":{}}\n' });
+  assert.strictEqual(r.status, 1);
+  assert.match(r.stderr, /café\/\.claude\/settings\.json is tracked/);
+});
+check('CLI: an http hook not in HTTP_HOOK_URLS exits 1', () => {
+  const r = runCli('{"permissions":{},"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"http","url":"https://hooks.example.com/ctx"}]}]}}\n');
+  assert.strictEqual(r.status, 1);
+  assert.match(r.stderr, /http hook URL "https:\/\/hooks\.example\.com\/ctx" is not in HTTP_HOOK_URLS/);
 });
 check('CLI: enabledPlugins exits 1', () => {
   const r = runCli('{"permissions":{},"enabledPlugins":{"x@marketplace":true}}\n');

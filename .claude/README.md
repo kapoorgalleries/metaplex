@@ -96,30 +96,41 @@ byte. Git treats a file with one as binary, so a pull request would show
 `.ps1` written by Windows PowerShell 5.1 (save it as UTF-8). A top-level
 `env` key is rejected: Claude Code passes it to every hook process, where
 `NODE_OPTIONS`, `BASH_ENV` or `PYTHONPATH` would load code from outside
-`.claude/hooks/` first and `PATH` could swap the interpreter. An `mcp_tool`
-hook in `settings.json` must name a `server`/`tool` pair listed in
-`MCP_TOOL_HOOKS` in the checker, and the list starts empty. Such a hook calls
-a tool on an MCP server configured elsewhere, with `input` written in this
-file, so a tool that can run commands, write files or send data would run
-code that no reviewed script holds. Add one only after confirming that the
-tool can do none of those things, whatever its input. A pair binds only a
-server name, so each entry also pins that server's definition in the
-committed `.mcp.json`: the server must be defined there exactly as pinned,
-and an edit to `.mcp.json` fails the check (CI runs on it) until the pin is
-reviewed and updated. A server of the same name in a developer's own local
-or user scope still takes its place on that machine. `agent` hooks are
-rejected for the same reason: the hook agent runs in `dontAsk` mode with
-every allow rule from every settings scope, so its prompt could call any
-allowed tool, MCP tools included. Prompt hooks have no tools and are
-accepted. At the top level the file may hold only `permissions`, `hooks` and
-`$schema`. Other settings can bring in code that no reviewed script holds:
-`enabledPlugins` and `extraKnownMarketplaces` load a plugin with its own
-hooks, and `apiKeyHelper`, `statusLine`, `awsAuthRefresh`,
-`awsCredentialExport` and `otelHeadersHelper` run commands. Personal settings
-belong in `settings.local.json`. Hooks in skill or agent frontmatter, and
-plugins a developer enables for themselves, are outside this check. Its tests are in
+`.claude/hooks/` first and `PATH` could swap the interpreter. Beyond command
+hooks, nothing in the file may run code that no reviewed script holds:
+
+- An `mcp_tool` hook must name a `server`/`tool` pair listed in
+  `MCP_TOOL_HOOKS` in the checker; the list starts empty. Each entry also
+  pins the server's definition in the root `.mcp.json`, since a pair alone
+  binds only a name: the server must be defined there exactly as pinned,
+  with no `${VAR}` expansion, an edit to it fails the check until the pin is
+  reviewed, and no other `.mcp.json` may be tracked (a nested one overrides
+  the root one by name). Add a pair only after confirming the tool cannot
+  run commands, write files or send data, whatever its input. A developer's
+  own local-scope, managed or `--mcp-config` server of the same name still
+  replaces it on their machine.
+- An `http` hook must use a URL listed in `HTTP_HOOK_URLS`, also empty:
+  Claude Code posts every hook input, tool inputs and prompts included, to
+  it, and its reply can approve a tool call.
+- `agent` hooks are rejected: the hook agent runs in `dontAsk` mode with
+  every allow rule from every settings scope, so its prompt could call any
+  allowed tool, MCP tools included. Prompt hooks have no tools and are
+  accepted.
+- At the top level the file may hold only `permissions`, `hooks` and a
+  string `$schema` (Claude Code skips a file whose `$schema` is not a
+  string). `enabledPlugins` and `extraKnownMarketplaces` would load a plugin
+  with its own hooks, and `apiKeyHelper`, `statusLine`, `awsAuthRefresh`,
+  `awsCredentialExport` and `otelHeadersHelper` run commands.
+- Only this `.claude/settings.json` may be tracked. Claude Code loads a
+  nested `.claude/settings.json` for a session started below it, and treats
+  a tracked `settings.local.json` as repository-supplied; personal settings
+  belong in an untracked `settings.local.json`.
+
+Hooks in skill or agent frontmatter, and plugins a developer enables for
+themselves, are outside this check. Its tests are in
 `scripts/test-check-claude-settings.js`. CI runs both from
-`.github/workflows/claude-settings.yml` whenever `.claude/` changes.
+`.github/workflows/claude-settings.yml` whenever a `.claude/` folder or a
+`.mcp.json` changes, at any depth.
 
 The check is a lint that catches mistakes, not a security boundary. CI runs
 the pull request's own copy of the checker, so a pull request can change the
