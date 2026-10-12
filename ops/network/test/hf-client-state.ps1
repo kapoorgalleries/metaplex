@@ -9,7 +9,7 @@ foreach ($a in $ast.FindAll({ param($n) $n -is [Management.Automation.Language.A
   . ([scriptblock]::Create($a.Extent.Text))
 }
 foreach ($f in $ast.FindAll({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] }, $false)) {
-  if ('Read-Utf8', 'Test-StrictJson', 'Skip-JsonWs', 'Get-JsonMember', 'Get-HfClientState' -contains $f.Name) {
+  if ('Read-Utf8', 'Test-UniqueKeys', 'Test-StrictJson', 'Skip-JsonWs', 'Get-JsonMember', 'Get-HfClientState' -contains $f.Name) {
     . ([scriptblock]::Create($f.Extent.Text))
   }
 }
