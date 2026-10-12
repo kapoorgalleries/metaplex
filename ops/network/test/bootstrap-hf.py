@@ -90,6 +90,7 @@ class BootstrapHf(unittest.TestCase):
 log() { printf '%s\\n' "$*"; }
 warn() { printf '%s\\n' "$*"; }
 have() { command -v "$1" >/dev/null 2>&1; }
+OS=Linux
 FAILED=''
 failed() { FAILED="$FAILED $1"; }
 '''
@@ -241,6 +242,66 @@ failed() { FAILED="$FAILED $1"; }
                     self.assertIn('INSTALL INCOMPLETE: hf-mcp-gemini', result.stdout)
                     self.assertEqual(p.read_text(), content)
                     self.assertEqual(list((self.root / '.gemini').iterdir()), [p])
+
+    def test_duplicate_keys_go_to_manual_review_for_both_clients(self):
+        # json.loads keeps the last of repeated keys; Gemini or Claude may keep another. Every case's
+        # last entry is compatible, so only the duplicate check can refuse it. chr(92) + 'u0066' is
+        # the JSON escape for 'f': the same key spelled differently.
+        hf_escaped = '"hugging' + chr(92) + 'u0066ace"'
+        claude = {'type': 'http', 'url': URL + '?login'}
+        for client, rel, good in [('gemini', '.gemini/settings.json', self.ENTRY), ('claude', '.claude.json', claude)]:
+            g, bad = json.dumps(good), json.dumps({'type': 'http', 'url': 'https://other.example/mcp'})
+            contents = ['{"mcpServers": {"x": {}}, "mcpServers": {"huggingface": ' + g + '}}',
+                        '{"mcpServers": {"huggingface": ' + bad + ', "huggingface": ' + g + '}}',
+                        '{"mcpServers": {"huggingface": ' + bad + ', ' + hf_escaped + ': ' + g + '}}',
+                        '{"mcpServers": {"huggingface": {"url": "https://other.example/mcp", ' + g[1:] + '}}',
+                        '{"mcpServers": {"huggingface": ' + g + '}, "theme": {"a": [{"b": 1, "b": 2}]}}',
+                        # "\\/" is the JSON escape for "/": Windows PowerShell's ConvertFrom-Json reads "\\/Date(n)\\/" as a date.
+                        '{"mcpServers": {"huggingface": ' + g + '}, "x": {"\\/Date(1)\\/": 1, "/Date(1)/": 2}}']
+            for content in contents:
+                with self.subTest(client=client, content=content):
+                    p = self.write(rel, content)
+                    (self.root / 'calls.jsonl').unlink(missing_ok=True)
+                    result = self.run_registration(client)
+                    self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                    self.assertIn('INSTALL INCOMPLETE: hf-mcp-' + client, result.stdout)
+                    self.assertIn('manual review' if client == 'gemini' else 'could not be validated', result.stdout)
+                    self.assertEqual(p.read_text(), content)
+                    self.assertFalse((self.root / 'calls.jsonl').exists())  # no `claude mcp add`
+            # Control: the same key in sibling or nested objects is not a duplicate.
+            p = self.write(rel, '{"mcpServers": {"other": {"url": "https://x.example/mcp", "type": "http", '
+                           '"headers": {"type": "x"}}, "huggingface": ' + g + '}}')
+            result = self.run_registration(client)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn('left as is', result.stdout)
+
+    def test_non_linux_is_manual_only_and_nothing_is_written(self):
+        # Creation is verified on Linux only: macOS and every other uname -s (BSD, Git Bash, Cygwin) print the entry.
+        for os_name, existing in [('Darwin', None), ('Darwin', '{"theme": "light"}\n'), ('FreeBSD', None), ('MINGW64_NT-10.0', None)]:
+            with self.subTest(os=os_name, existing=existing):
+                shutil.rmtree(self.root / '.gemini', ignore_errors=True)
+                if existing:
+                    p = self.write('.gemini/settings.json', existing)
+                result = self.run_registration('gemini', 'OS=' + os_name)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn('verified on Linux and Windows PowerShell 5.1 only; nothing was written', result.stdout)
+                self.assertIn('INSTALL INCOMPLETE: hf-mcp-gemini', result.stdout)
+                if existing:
+                    self.assertEqual(p.read_text(), existing)
+                    self.assertEqual(list(p.parent.iterdir()), [p])
+                else:
+                    self.assertFalse((self.root / '.gemini').exists())
+                out = result.stdout.splitlines()
+                i = next(k for k, line in enumerate(out) if line.startswith('"huggingface": {'))
+                j = next(k for k in range(i, len(out)) if out[k] == '}')
+                self.assertEqual(json.loads('{' + '\n'.join(out[i:j + 1]) + '}')['huggingface'], self.ENTRY)
+
+    def test_absurdly_deep_settings_go_to_manual_review_without_a_traceback(self):
+        self.write('.gemini/settings.json', '{"a": ' + '[' * 100000 + ']' * 100000 + '}')
+        result = self.run_registration('gemini')
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn('manual review', result.stdout)
+        self.assertNotIn('Traceback', result.stdout + result.stderr)
 
     def test_settings_file_created_meanwhile_is_not_overwritten(self):
         # Another program creates settings.json between the check and the create.
