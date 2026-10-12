@@ -101,15 +101,23 @@ hook in `settings.json` must name a `server`/`tool` pair listed in
 `MCP_TOOL_HOOKS` in the checker, and the list starts empty. Such a hook calls
 a tool on an MCP server configured elsewhere, with `input` written in this
 file, so a tool that can run commands, write files or send data would run
-code that no reviewed script holds. A pair binds only a server name, which
-Claude Code looks up among the servers configured on the machine running the
-hook. Add one only after confirming that every server that could answer to
-that name can do none of those things, whatever its input. `agent` hooks are
+code that no reviewed script holds. Add one only after confirming that the
+tool can do none of those things, whatever its input. A pair binds only a
+server name, so each entry also pins that server's definition in the
+committed `.mcp.json`: the server must be defined there exactly as pinned,
+and an edit to `.mcp.json` fails the check (CI runs on it) until the pin is
+reviewed and updated. A server of the same name in a developer's own local
+or user scope still takes its place on that machine. `agent` hooks are
 rejected for the same reason: the hook agent runs in `dontAsk` mode with
 every allow rule from every settings scope, so its prompt could call any
 allowed tool, MCP tools included. Prompt hooks have no tools and are
-accepted. The check reads only `settings.json`; hooks in skill or agent
-frontmatter and in plugins are outside it. Its tests are in
+accepted. At the top level the file may hold only `permissions`, `hooks` and
+`$schema`. Other settings can bring in code that no reviewed script holds:
+`enabledPlugins` and `extraKnownMarketplaces` load a plugin with its own
+hooks, and `apiKeyHelper`, `statusLine`, `awsAuthRefresh`,
+`awsCredentialExport` and `otelHeadersHelper` run commands. Personal settings
+belong in `settings.local.json`. Hooks in skill or agent frontmatter, and
+plugins a developer enables for themselves, are outside this check. Its tests are in
 `scripts/test-check-claude-settings.js`. CI runs both from
 `.github/workflows/claude-settings.yml` whenever `.claude/` changes.
 

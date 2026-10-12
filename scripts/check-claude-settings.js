@@ -103,12 +103,23 @@ const HOOK_REQUIRED_STRINGS = { http: ['url'], mcp_tool: ['server', 'tool'], pro
 // what the command-hook rules forbid. So only the server/tool pairs listed
 // here are accepted, matched exactly. A pair binds only a server name, which
 // Claude Code looks up among the servers configured on the machine running
-// the hook, so add one only after confirming that every server that could
-// answer to that name there can do none of those things, whatever its input.
+// the hook. So each entry also pins that server's definition in the
+// committed .mcp.json, { server, tool, definition }: the server must be
+// defined there, exactly as pinned, and an edit to .mcp.json fails the check
+// until the pin is reviewed and updated. Add a pair only after confirming
+// that the tool can do none of those things, whatever its input. A server
+// of the same name in a developer's own local or user scope still takes
+// its place on that machine, which no check in this repository can see.
 const MCP_TOOL_HOOKS = [];
 // What this file holds at the top level. Anything within two edits of one
 // of these names is a misspelling that would silently drop the whole block.
 const TOP_LEVEL_KEYS_HERE = ['permissions', 'hooks'];
+// The only top-level keys accepted. Other settings can bring in code no
+// reviewed script holds: enabledPlugins and extraKnownMarketplaces load a
+// plugin with its own hooks, and apiKeyHelper, statusLine, awsAuthRefresh,
+// awsCredentialExport and otelHeadersHelper run commands. A key added here
+// must be one that runs nothing.
+const TOP_LEVEL_KEYS = [...TOP_LEVEL_KEYS_HERE, '$schema'];
 
 // A small JSON parser that rejects duplicate keys. Objects are returned as
 // prototype-less so a key such as "__proto__" cannot shadow anything.
@@ -244,9 +255,13 @@ function checkUnknownKeys(obj, known, at, what, fail) {
 function checkTopLevel(settings, fail) {
   if (!hasOwn(settings, 'permissions')) fail('"permissions" is missing; this file exists to hold the permission policy');
   for (const key of Object.keys(settings)) {
-    if (TOP_LEVEL_KEYS_HERE.includes(key)) continue;
+    if (TOP_LEVEL_KEYS.includes(key) || key === 'env') continue;
     const near = TOP_LEVEL_KEYS_HERE.find((k) => editDistance(key.toLowerCase(), k) <= 2);
-    if (near) fail(`"${key}" looks like a misspelling of "${near}"; Claude Code does not read it, so nothing in it applies`);
+    if (near) {
+      fail(`"${key}" looks like a misspelling of "${near}"; Claude Code does not read it, so nothing in it applies`);
+    } else {
+      fail(`"${key}" is not accepted in this file, which holds only ${TOP_LEVEL_KEYS.map((k) => `"${k}"`).join(', ')}: other settings can bring in code no reviewed script holds (enabledPlugins and extraKnownMarketplaces load a plugin with its own hooks; apiKeyHelper, statusLine, awsAuthRefresh, awsCredentialExport and otelHeadersHelper run commands). Put personal settings in .claude/settings.local.json, or add a key that runs nothing to TOP_LEVEL_KEYS in scripts/check-claude-settings.js`);
+    }
   }
   // Claude Code passes "env" to every hook process: NODE_OPTIONS, BASH_ENV
   // or PYTHONPATH would make an allowed interpreter load code from outside
@@ -494,6 +509,38 @@ function checkHooks(hooks, root, fail, options) {
   }
 }
 
+// JSON values compared regardless of key order.
+function canonicalJson(v) {
+  if (Array.isArray(v)) return `[${v.map(canonicalJson).join(',')}]`;
+  if (v !== null && typeof v === 'object') {
+    return `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${canonicalJson(v[k])}`).join(',')}}`;
+  }
+  return JSON.stringify(v);
+}
+
+// Every MCP_TOOL_HOOKS pair must name a server defined in the committed
+// .mcp.json exactly as the pair pins it (see MCP_TOOL_HOOKS).
+function checkMcpToolPins(root, mcpToolHooks, fail) {
+  if (mcpToolHooks.length === 0) return;
+  let servers;
+  try {
+    const mcp = parseStrict(fs.readFileSync(path.join(root, '.mcp.json'), 'utf8'));
+    servers = isPlainObject(mcp) && isPlainObject(mcp.mcpServers) ? mcp.mcpServers : null;
+    if (!servers) fail('.mcp.json has no "mcpServers" object, so no MCP_TOOL_HOOKS pair can be pinned to it');
+  } catch (e) {
+    fail(`.mcp.json cannot be read, so no MCP_TOOL_HOOKS pair can be pinned to it: ${e.message}`);
+  }
+  if (!servers) return;
+  for (const p of mcpToolHooks) {
+    const pair = JSON.stringify(`${p.server}/${p.tool}`);
+    if (!hasOwn(servers, p.server)) {
+      fail(`MCP_TOOL_HOOKS pair ${pair} names a server that the committed .mcp.json does not define; a pair must name a server defined there`);
+    } else if (canonicalJson(servers[p.server]) !== canonicalJson(p.definition)) {
+      fail(`.mcp.json's definition of ${JSON.stringify(p.server)} differs from the one pinned with ${pair} in MCP_TOOL_HOOKS; review what the new definition can do, then update the pin`);
+    }
+  }
+}
+
 // Returns the list of problems with a parsed settings object. `root` is the
 // repository root that ${CLAUDE_PROJECT_DIR} stands for. The tests pass
 // `mcpToolHooks` in place of MCP_TOOL_HOOKS and `allowAgentHooks` to reach
@@ -508,6 +555,7 @@ function checkSettings(settings, root, { mcpToolHooks = MCP_TOOL_HOOKS, allowAge
   checkTopLevel(settings, fail);
   checkPermissions(settings.permissions, fail);
   checkHooks(settings.hooks, root, fail, { mcpToolHooks, allowAgentHooks });
+  checkMcpToolPins(root, mcpToolHooks, fail);
   return problems;
 }
 

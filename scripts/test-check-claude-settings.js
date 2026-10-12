@@ -174,6 +174,10 @@ const write = (p, text, mode) => {
   if (mode !== undefined) fs.chmodSync(p, mode);
 };
 write(path.join(hooksDir, 'ok.js'), 'process.exit(0);\n');
+// The throwaway repository's .mcp.json defines the servers the test pairs pin.
+const MCP_S = { type: 'stdio', command: 'npx', args: ['-y', 'example-s'] };
+const MCP_MEMORY = { type: 'http', url: 'https://example.com/memory/mcp', headers: { 'X-Mode': 'read-only' } };
+write(path.join(repo, '.mcp.json'), `${JSON.stringify({ mcpServers: { s: MCP_S, memory: MCP_MEMORY } }, null, 2)}\n`);
 write(path.join(hooksDir, 'ok.mjs'), 'export {};\n');
 // The first bytes of a zip archive; python3 runs a zip named .py as a script.
 write(path.join(hooksDir, 'zipped.py'), Buffer.from('504b0304140000000000', 'hex'));
@@ -221,7 +225,7 @@ const prompt = { type: 'prompt', prompt: 'ok' };
 // accepted, so that every other rule can be tested on those hook types. The
 // defaults (an empty MCP_TOOL_HOOKS, no agent hooks) are tested below with no
 // options, through checkSettings and through the CLI.
-const TEST_OPTIONS = { mcpToolHooks: [{ server: 's', tool: 't' }, { server: 'memory', tool: 'store' }], allowAgentHooks: true };
+const TEST_OPTIONS = { mcpToolHooks: [{ server: 's', tool: 't', definition: MCP_S }, { server: 'memory', tool: 'store', definition: MCP_MEMORY }], allowAgentHooks: true };
 const clean = (name, settings, root = repo) =>
   check(name, () => assert.deepStrictEqual(checkSettings(settings, root, TEST_OPTIONS), []));
 const flags = (name, settings, ...patterns) =>
@@ -243,6 +247,18 @@ flags('a capitalised "Permissions"', { Permissions: { allow: ['A'] } }, /looks l
 flags('a misspelled "hooks"', { ...P, hook: {} }, /"hook" looks like a misspelling of "hooks"/);
 flags('env is passed to every hook process', { ...P, env: { NODE_OPTIONS: '--require /tmp/x.js' } }, /"env" is not accepted in this file: Claude Code passes it to every hook process/);
 flags('an empty env is still flagged', { ...P, env: {} }, /"env" is not accepted in this file/);
+check('env gets its own message only, not also the general one', () => {
+  assert.deepStrictEqual(checkSettings({ ...P, env: {} }, repo).length, 1);
+});
+// Top-level keys: only permissions, hooks and $schema. Other settings can
+// load a plugin with its own hooks or run a command.
+clean('$schema is accepted', { $schema: 'https://json.schemastore.org/claude-code-settings.json', ...P });
+for (const key of ['enabledPlugins', 'extraKnownMarketplaces', 'additionalMarketplaces', 'apiKeyHelper', 'statusLine', 'awsAuthRefresh', 'awsCredentialExport', 'otelHeadersHelper', 'enableAllProjectMcpServers', 'enabledMcpjsonServers', 'model', 'outputStyle']) {
+  flags(`top-level "${key}" is not accepted`, { ...P, [key]: {} }, new RegExp(`"${key}" is not accepted in this file, which holds only "permissions", "hooks", "\\$schema": other settings can bring in code`));
+}
+check('a misspelling of permissions or hooks gets the misspelling message only', () => {
+  assert.deepStrictEqual(checkSettings({ ...P, hook: {} }, repo), ['"hook" looks like a misspelling of "hooks"; Claude Code does not read it, so nothing in it applies']);
+});
 flags('permissions must be an object', { permissions: [] }, /"permissions" must be an object/);
 flags('hooks must be an object', { ...P, hooks: [] }, /"hooks" must be an object/);
 flags('hooks must be an object (null)', { ...P, hooks: null }, /"hooks" must be an object/);
@@ -387,6 +403,49 @@ check('a missing or non-string server or tool is reported once, not also as unli
     assert.deepStrictEqual(problems.filter((m) => /MCP_TOOL_HOOKS/.test(m)), [], JSON.stringify(hook));
   }
 });
+// Each pair pins its server's definition in the committed .mcp.json.
+check('pairs whose servers .mcp.json defines exactly as pinned pass', () => {
+  assert.deepStrictEqual(checkSettings(P, repo, TEST_OPTIONS), []);
+});
+check('key order inside a pinned definition does not matter', () => {
+  const reordered = { headers: { 'X-Mode': 'read-only' }, url: MCP_MEMORY.url, type: 'http' };
+  assert.deepStrictEqual(checkSettings(P, repo, { mcpToolHooks: [{ server: 'memory', tool: 'store', definition: reordered }] }), []);
+});
+for (const [label, definition] of [
+  ['a changed url', { ...MCP_MEMORY, url: 'https://example.com/other/mcp' }],
+  ['a dropped header', { type: 'http', url: MCP_MEMORY.url }],
+  ['an added field', { ...MCP_MEMORY, oauth: {} }],
+  ['a changed argument', { ...MCP_S, args: ['-y', 'example-s', '--write'] }],
+  ['no definition', undefined],
+]) {
+  check(`a pin that differs from .mcp.json (${label}) fails`, () => {
+    const server = label === 'a changed argument' ? 's' : 'memory';
+    const problems = checkSettings(P, repo, { mcpToolHooks: [{ server, tool: 'x', definition }] });
+    assert.ok(problems.some((m) => new RegExp(`\\.mcp\\.json's definition of "${server}" differs from the one pinned with "${server}/x"`).test(m)), JSON.stringify(problems));
+  });
+}
+check('a pair whose server .mcp.json does not define fails', () => {
+  const problems = checkSettings(P, repo, { mcpToolHooks: [{ server: 'supabase', tool: 'execute_sql', definition: {} }] });
+  assert.ok(problems.some((m) => /pair "supabase\/execute_sql" names a server that the committed \.mcp\.json does not define/.test(m)), JSON.stringify(problems));
+});
+check('a pair with no .mcp.json in the repository fails', () => {
+  const problems = checkSettings(P, outside, TEST_OPTIONS);
+  assert.ok(problems.some((m) => /\.mcp\.json cannot be read, so no MCP_TOOL_HOOKS pair can be pinned/.test(m)), JSON.stringify(problems));
+});
+check('a .mcp.json with a duplicate key or no mcpServers fails', () => {
+  const dir = tmp('claude-settings-mcp-');
+  try {
+    fs.writeFileSync(path.join(dir, '.mcp.json'), '{"mcpServers":{"memory":{},"memory":{}}}\n');
+    assert.ok(checkSettings(P, dir, TEST_OPTIONS).some((m) => /\.mcp\.json cannot be read.*duplicate key "memory"/.test(m)));
+    fs.writeFileSync(path.join(dir, '.mcp.json'), '{"servers":{}}\n');
+    assert.ok(checkSettings(P, dir, TEST_OPTIONS).some((m) => /\.mcp\.json has no "mcpServers" object/.test(m)));
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+check('with no pairs listed, .mcp.json is not read at all', () => {
+  assert.deepStrictEqual(checkSettings(P, outside), []);
+});
 // Agent hooks: rejected unless a test opts in.
 for (const event of DOCUMENTED_EVENTS.filter((e) => DOCUMENTED_EVENT_TYPES[e].includes('agent'))) {
   check(`an agent hook on ${event} is rejected by default`, () => {
@@ -523,6 +582,11 @@ check('CLI: an mcp_tool hook not in MCP_TOOL_HOOKS exits 1', () => {
   const r = runCli('{"permissions":{},"hooks":{"Stop":[{"hooks":[{"type":"mcp_tool","server":"supabase","tool":"execute_sql","input":{"query":"select 1"}}]}]}}\n');
   assert.strictEqual(r.status, 1);
   assert.match(r.stderr, /mcp_tool hook "supabase\/execute_sql" is not in MCP_TOOL_HOOKS/);
+});
+check('CLI: enabledPlugins exits 1', () => {
+  const r = runCli('{"permissions":{},"enabledPlugins":{"x@marketplace":true}}\n');
+  assert.strictEqual(r.status, 1);
+  assert.match(r.stderr, /"enabledPlugins" is not accepted in this file/);
 });
 check('CLI: an agent hook exits 1', () => {
   const r = runCli('{"permissions":{},"hooks":{"Stop":[{"hooks":[{"type":"agent","prompt":"Verify the tests pass. $ARGUMENTS"}]}]}}\n');
