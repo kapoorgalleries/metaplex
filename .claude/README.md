@@ -29,8 +29,10 @@ development project or a Supabase branch instead.
 
 ## Permissions and the settings check
 
-`settings.json` is the committed permission policy for every Claude Code
-session in this repo. What to know about it:
+`settings.json` is the committed permission policy for Claude Code sessions
+started at the repository root. Claude Code reads `.claude/settings.json`
+only from the directory a session starts in, so a session started in a
+subdirectory, such as `ops/network/`, runs without it. What to know about it:
 
 **What is allowed without a prompt.** The committed `permissions.allow` holds
 one rule, `Bash(ldd --version)`, as an exact command. (Claude Code's built-in
@@ -103,15 +105,16 @@ hooks, nothing in the file may run code that no reviewed script holds:
   `MCP_TOOL_HOOKS` in the checker; the list starts empty. Each entry also
   pins the server's definition in the root `.mcp.json`, since a pair alone
   binds only a name: the server must be defined there exactly as pinned,
-  with no `${VAR}` expansion, an edit to it fails the check until the pin is
-  reviewed, and no other `.mcp.json` may be tracked (a nested one overrides
-  the root one by name). Add a pair only after confirming the tool cannot
-  run commands, write files or send data, whatever its input. A developer's
-  own local-scope, managed or `--mcp-config` server of the same name still
-  replaces it on their machine.
+  with no `${VAR}` expansion, and an edit to it fails the check until the
+  pin is reviewed. Add a pair only after confirming the tool cannot run
+  commands, write files or send data, whatever its input. A developer's own
+  local-scope, managed or `--mcp-config` server of the same name still
+  replaces it on their machine, and so does a user-scope one until they
+  approve the project server.
 - An `http` hook must use a URL listed in `HTTP_HOOK_URLS`, also empty:
   Claude Code posts every hook input, tool inputs and prompts included, to
-  it, and its reply can approve a tool call.
+  it, and its reply can approve a tool call or change the call's input. Its
+  headers can also carry environment variables named in `allowedEnvVars`.
 - `agent` hooks are rejected: the hook agent runs in `dontAsk` mode with
   every allow rule from every settings scope, so its prompt could call any
   allowed tool, MCP tools included. Prompt hooks have no tools and are
@@ -121,16 +124,18 @@ hooks, nothing in the file may run code that no reviewed script holds:
   string). `enabledPlugins` and `extraKnownMarketplaces` would load a plugin
   with its own hooks, and `apiKeyHelper`, `statusLine`, `awsAuthRefresh`,
   `awsCredentialExport` and `otelHeadersHelper` run commands.
-- Only this `.claude/settings.json` may be tracked. Claude Code loads a
-  nested `.claude/settings.json` for a session started below it, and treats
-  a tracked `settings.local.json` as repository-supplied; personal settings
-  belong in an untracked `settings.local.json`.
+- Only this `.claude/settings.json` may be tracked. A nested one applies to
+  sessions started in its directory, which this check does not read, and
+  Claude Code treats a tracked `settings.local.json` as repository-supplied;
+  personal settings belong in an untracked `settings.local.json`. Paths are
+  compared ignoring case, as macOS and Windows open them, and a tracked
+  `.claude` that is a symlink or submodule is rejected too.
 
 Hooks in skill or agent frontmatter, and plugins a developer enables for
 themselves, are outside this check. Its tests are in
 `scripts/test-check-claude-settings.js`. CI runs both from
-`.github/workflows/claude-settings.yml` whenever a `.claude/` folder or a
-`.mcp.json` changes, at any depth.
+`.github/workflows/claude-settings.yml` whenever a `.claude` folder at any
+depth, or the root `.mcp.json`, changes.
 
 The check is a lint that catches mistakes, not a security boundary. CI runs
 the pull request's own copy of the checker, so a pull request can change the

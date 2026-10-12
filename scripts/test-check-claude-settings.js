@@ -23,6 +23,17 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { spawnSync } = require('child_process');
+
+// Git exports GIT_DIR, GIT_INDEX_FILE and the like to hooks and to
+// `rebase -x`. Inherited by the git calls below, they would point at the
+// repository running these tests, whose index and config the throwaway
+// repositories' `git init` and `git add` would then overwrite. Clear them,
+// and pin core.quotePath, which decides how git spells a non-ASCII path.
+for (const v of spawnSync('git', ['rev-parse', '--local-env-vars'], { encoding: 'utf8' }).stdout.split('\n')) {
+  if (v) delete process.env[v];
+}
+Object.assign(process.env, { GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'core.quotePath', GIT_CONFIG_VALUE_0: 'true' });
+
 const { parseStrict, checkSettings, MAX_DEPTH, HOOK_EVENTS, PERMISSION_KEYS, EVENT_HOOK_TYPES, INTERPRETERS, MCP_TOOL_HOOKS, HTTP_HOOK_URLS, checkTrackedFiles, trackedFiles } = require('./check-claude-settings.js');
 
 let failures = 0;
@@ -178,10 +189,13 @@ write(path.join(hooksDir, 'ok.js'), 'process.exit(0);\n');
 // The throwaway repository's .mcp.json defines the servers the test pairs pin,
 // alongside the real .mcp.json's servers, so that a pair added to
 // MCP_TOOL_HOOKS is checked against the same definitions here as in CI.
-const REAL_MCP = JSON.parse(fs.readFileSync(path.join(__dirname, '..', '.mcp.json'), 'utf8'));
+// The checker reads .mcp.json only while pairs are listed, so the
+// repository may have none.
+const REAL_MCP_PATH = path.join(__dirname, '..', '.mcp.json');
+const REAL_MCP = fs.existsSync(REAL_MCP_PATH) ? JSON.parse(fs.readFileSync(REAL_MCP_PATH, 'utf8')) : {};
 const MCP_S = { type: 'stdio', command: 'npx', args: ['-y', 'example-s@1.2.3'], env: { MODE: 'read-only', LEVEL: '1' } };
 const MCP_MEMORY = { type: 'http', url: 'https://example.com/memory/mcp', headers: { 'X-Mode': 'read-only', 'X-Region': 'us' } };
-write(path.join(repo, '.mcp.json'), `${JSON.stringify({ mcpServers: { ...REAL_MCP.mcpServers, s: MCP_S, memory: MCP_MEMORY } }, null, 2)}\n`);
+write(path.join(repo, '.mcp.json'), `${JSON.stringify({ mcpServers: { ...(REAL_MCP.mcpServers || {}), s: MCP_S, memory: MCP_MEMORY } }, null, 2)}\n`);
 write(path.join(hooksDir, 'ok.mjs'), 'export {};\n');
 // The first bytes of a zip archive; python3 runs a zip named .py as a script.
 write(path.join(hooksDir, 'zipped.py'), Buffer.from('504b0304140000000000', 'hex'));
@@ -437,8 +451,8 @@ for (const [label, definition] of [
   });
 }
 check('a pair whose server .mcp.json does not define fails', () => {
-  const problems = checkSettings(P, repo, { mcpToolHooks: [{ server: 'github', tool: 'get_me', definition: {} }] });
-  assert.ok(problems.some((m) => /pair "github\/get_me" names a server that the committed \.mcp\.json does not define/.test(m)), JSON.stringify(problems));
+  const problems = checkSettings(P, repo, { mcpToolHooks: [{ server: 'not-in-mcp-json', tool: 'get_me', definition: {} }] });
+  assert.ok(problems.some((m) => /pair "not-in-mcp-json\/get_me" names a server that the committed \.mcp\.json does not define/.test(m)), JSON.stringify(problems));
 });
 check('a pair with no .mcp.json in the repository fails', () => {
   const problems = checkSettings(P, outside, TEST_OPTIONS);
@@ -479,7 +493,7 @@ check('with no pairs listed, .mcp.json is not read at all', () => {
 for (const event of DOCUMENTED_EVENTS.filter((e) => DOCUMENTED_EVENT_TYPES[e].includes('http'))) {
   check(`an http hook on ${event} is rejected by the real, empty HTTP_HOOK_URLS`, () => {
     const problems = checkSettings({ ...P, hooks: { [event]: [{ hooks: [{ type: 'http', url: 'https://example.com/hook' }] }] } }, repo);
-    assert.ok(problems.some((m) => /http hook URL "https:\/\/example\.com\/hook" is not in HTTP_HOOK_URLS.*posts every hook input/.test(m)), JSON.stringify(problems));
+    assert.ok(problems.some((m) => /http hook URL "https:\/\/example\.com\/hook" is not in HTTP_HOOK_URLS.*posts every hook input.*its reply can approve a tool call, change the call's input or add to Claude's context/.test(m)), JSON.stringify(problems));
   });
 }
 check('an http hook URL must match a listed one exactly', () => {
@@ -490,26 +504,33 @@ check('an http hook URL must match a listed one exactly', () => {
 check('a missing http hook url is reported once, not also as unlisted', () => {
   assert.deepStrictEqual(checkSettings(entry({ type: 'http' }), repo).filter((m) => /HTTP_HOOK_URLS/.test(m)), []);
 });
-// Only the root .claude/settings.json may be tracked; with pairs listed, only
-// the root .mcp.json.
+// Only the root .claude/settings.json may be tracked, compared ignoring case.
 check('tracked files: the committed layout passes', () => {
-  assert.deepStrictEqual(checkTrackedFiles(['.claude/settings.json', '.claude/README.md', '.mcp.json', 'scripts/x.js']), []);
+  assert.deepStrictEqual(checkTrackedFiles(['.claude/settings.json', '.claude/README.md', '.claude/skills/x', '.mcp.json', 'js/web/.mcp.json', 'scripts/x.js']), []);
 });
-check('tracked files: a tracked settings.local.json fails, at the root or nested', () => {
-  for (const f of ['.claude/settings.local.json', 'js/web/.claude/settings.local.json']) {
+check('tracked files: a tracked settings.local.json fails, at the root or nested, in any case', () => {
+  for (const f of ['.claude/settings.local.json', 'js/web/.claude/settings.local.json', '.claude/Settings.local.json', '.CLAUDE/settings.local.json', 'js/.Claude/SETTINGS.LOCAL.JSON']) {
     assert.ok(checkTrackedFiles([f]).some((m) => m.startsWith(`${f} is tracked: Claude Code treats a tracked settings.local.json as repository-supplied`)), f);
   }
 });
 check('tracked files: a nested .claude/settings.json fails', () => {
   assert.deepStrictEqual(checkTrackedFiles(['js/packages/web/.claude/settings.json']), ['js/packages/web/.claude/settings.json is tracked: Claude Code loads it for a session started in js/packages/web, and this check reads only the root .claude/settings.json. Keep the policy in the root file']);
+  for (const f of ['js/web/.Claude/settings.json', 'js/api/.claude/SETTINGS.JSON']) {
+    assert.ok(checkTrackedFiles([f]).some((m) => m.startsWith(`${f} is tracked: Claude Code loads it for a session started in ${f.split('/.')[0]},`)), f);
+  }
+});
+check('tracked files: a case variant of the root settings file fails', () => {
+  for (const f of ['.claude/Settings.json', '.CLAUDE/settings.json', '.Claude/SETTINGS.JSON']) {
+    assert.deepStrictEqual(checkTrackedFiles(['.claude/settings.json', f]), [`${f} is tracked: it differs from .claude/settings.json only in case, so on macOS and Windows Claude Code can open it in place of the file this check reads. Keep the policy in .claude/settings.json only`]);
+  }
+});
+check('tracked files: a path named .claude (a symlink or submodule) fails', () => {
+  for (const f of ['.claude', 'js/web/.claude', 'js/web/.Claude']) {
+    assert.deepStrictEqual(checkTrackedFiles([f]), [`${f} is tracked as a symlink or submodule: Claude Code reads .claude/settings.json and settings.local.json through it, and this check does not. Make it a real directory, or remove it`]);
+  }
 });
 check('tracked files: other files under .claude/ and lookalike names pass', () => {
-  assert.deepStrictEqual(checkTrackedFiles(['.claude/hooks/settings.json', 'x/claude/settings.json', '.claude/settings.json.bak', 'docs/.mcp.json.example']), []);
-});
-check('tracked files: a nested .mcp.json fails only while pairs are listed', () => {
-  assert.deepStrictEqual(checkTrackedFiles(['.mcp.json', 'js/web/.mcp.json']), []);
-  const problems = checkTrackedFiles(['.mcp.json', 'js/web/.mcp.json'], TEST_OPTIONS);
-  assert.deepStrictEqual(problems, ['js/web/.mcp.json is tracked: Claude Code lets a .mcp.json nearer the session\'s directory override the root one by server name, so the definitions pinned in MCP_TOOL_HOOKS would not hold']);
+  assert.deepStrictEqual(checkTrackedFiles(['.claude/hooks/settings.json', 'x/claude/settings.json', '.claude/settings.json.bak', 'x.claude/settings.json', 'docs/.claude.md', 'a/b.claude']), []);
 });
 check('trackedFiles lists the index of a real git repository', () => {
   const dir = tmp('claude-settings-git-');
@@ -522,7 +543,7 @@ check('trackedFiles lists the index of a real git repository', () => {
     }
     fs.writeFileSync(path.join(dir, 'untracked.txt'), 'x\n');
     assert.strictEqual(spawnSync('git', ['-C', dir, 'init', '-q']).status, 0);
-    assert.strictEqual(spawnSync('git', ['-C', dir, '-c', 'core.quotePath=true', 'add', 'a', 'café']).status, 0);
+    assert.strictEqual(spawnSync('git', ['-C', dir, 'add', 'a', 'café']).status, 0);
     assert.deepStrictEqual(trackedFiles(dir).sort(), ['a/.claude/settings.json', 'café/.claude/settings.json']);
     assert.throws(() => trackedFiles(path.join(dir, 'missing')), /git ls-files failed/);
   } finally {
@@ -645,23 +666,26 @@ if (haveSymlink) {
 // Run the checker as CI does, from a copy placed in a throwaway repository
 // whose .claude/settings.json holds the given text.
 // The tree is a git repository holding the real .mcp.json, as a checkout is;
-// `extra` maps further paths to their contents, all tracked. With
-// `git: false` the tree is not a repository.
+// `extra` maps further paths to their contents, or to { symlink: target },
+// all tracked. With `git: false` the tree is not a repository.
 function runCli(settingsText, extra = {}, { git = true } = {}) {
   const tree = tmp('claude-settings-cli-');
   try {
     fs.mkdirSync(path.join(tree, 'scripts'));
     fs.mkdirSync(path.join(tree, '.claude'));
     fs.copyFileSync(path.join(__dirname, 'check-claude-settings.js'), path.join(tree, 'scripts', 'check-claude-settings.js'));
-    fs.copyFileSync(path.join(__dirname, '..', '.mcp.json'), path.join(tree, '.mcp.json'));
+    if (fs.existsSync(REAL_MCP_PATH)) fs.copyFileSync(REAL_MCP_PATH, path.join(tree, '.mcp.json'));
     fs.writeFileSync(path.join(tree, '.claude', 'settings.json'), settingsText);
-    for (const [rel, text] of Object.entries(extra)) {
+    for (const [rel, content] of Object.entries(extra)) {
       fs.mkdirSync(path.dirname(path.join(tree, rel)), { recursive: true });
-      fs.writeFileSync(path.join(tree, rel), text);
+      if (content.symlink) fs.symlinkSync(content.symlink, path.join(tree, rel));
+      else fs.writeFileSync(path.join(tree, rel), content);
     }
     if (git) {
-      spawnSync('git', ['-C', tree, 'init', '-q']);
-      spawnSync('git', ['-C', tree, 'add', '-A', '-f']);
+      for (const args of [['init', '-q'], ['add', '-A', '-f']]) {
+        const g = spawnSync('git', ['-C', tree, ...args], { encoding: 'utf8' });
+        assert.strictEqual(g.status, 0, `git ${args.join(' ')}: ${g.stderr}`);
+      }
     }
     // The ceiling keeps git from finding a repository that encloses the tree.
     const env = { ...process.env, GIT_CEILING_DIRECTORIES: path.dirname(tree) };
@@ -695,6 +719,13 @@ check('CLI: outside a git repository it exits 1, since it cannot list the tracke
   assert.strictEqual(r.status, 1);
   assert.match(r.stderr, /cannot list the repository's tracked files, which this check needs: git ls-files failed/);
 });
+if (haveSymlink) {
+  check('CLI: a .claude symlinked to another settings file exits 1', () => {
+    const r = runCli('{"permissions":{}}\n', { 'ops/cfg/settings.json': '{"permissions":{},"apiKeyHelper":"sh -c id"}\n', 'js/web/.claude': { symlink: '../../ops/cfg' } });
+    assert.strictEqual(r.status, 1);
+    assert.match(r.stderr, /js\/web\/\.claude is tracked as a symlink or submodule/);
+  });
+}
 check('CLI: a nested .claude/settings.json in a non-ASCII directory exits 1', () => {
   const r = runCli('{"permissions":{}}\n', { 'café/.claude/settings.json': '{"permissions":{}}\n' });
   assert.strictEqual(r.status, 1);

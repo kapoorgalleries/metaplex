@@ -9,28 +9,31 @@ name: Claude settings
 # against the Claude Code reference, and confirms that every command hook is
 # in exec form with its scripts under .claude/hooks/, present and parsing.
 # Hook scripts must live there so that the .claude/** path filter below
-# covers an edit to one. The filters match .claude/ and .mcp.json at any
-# depth: Claude Code loads a nested .claude/settings.json or .mcp.json for a
-# session started below it. The checker rejects a tracked nested settings
-# file, and a nested .mcp.json while any mcp_tool pair is listed; each such
-# pair pins its server's definition in the root .mcp.json, so an edit there
-# must fail until the pin is reviewed. The workflow file itself is included
-# so that an edit to it is exercised by it. This is a lint for mistakes, not
-# a security boundary: it runs the pull request's own copy of the checker,
-# so reviewing the diff is what guards the policy.
+# covers an edit to one. The .claude filters match at any depth: Claude
+# Code reads .claude/settings.json from whichever directory a session starts
+# in, and the checker rejects any tracked settings file but the root one, and
+# a tracked .claude that is a symlink or submodule. The root .mcp.json is
+# included because each mcp_tool pair the checker allows pins its server's
+# definition there, so an edit to it must fail until the pin is reviewed.
+# The workflow file itself is included so that an edit to it is exercised by
+# it. This is a lint for mistakes, not a security boundary: it runs the pull
+# request's own copy of the checker, so reviewing the diff is what guards the
+# policy.
 on:
   pull_request:
     paths:
+      - "**/.claude"
       - "**/.claude/**"
-      - "**/.mcp.json"
+      - ".mcp.json"
       - "scripts/check-claude-settings.js"
       - "scripts/test-check-claude-settings.js"
       - ".github/workflows/claude-settings.yml"
   push:
     branches: [master]
     paths:
+      - "**/.claude"
       - "**/.claude/**"
-      - "**/.mcp.json"
+      - ".mcp.json"
       - "scripts/check-claude-settings.js"
       - "scripts/test-check-claude-settings.js"
       - ".github/workflows/claude-settings.yml"

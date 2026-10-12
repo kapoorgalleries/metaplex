@@ -111,18 +111,20 @@ const HOOK_REQUIRED_STRINGS = { http: ['url'], mcp_tool: ['server', 'tool'], pro
 // pinned, and an edit to .mcp.json fails the check until the pin is reviewed
 // and updated. A pinned definition may not use ${VAR} expansion, which
 // differs per machine; a stdio server should name an exact package version,
-// since `npx -y pkg` runs whatever is published. No other .mcp.json may be
-// tracked while any pair is listed: Claude Code reads every .mcp.json from
-// the directory a session starts in up to the filesystem root, and the
-// nearest definition of a name wins. What no check here can see: a
-// local-scope, managed or --mcp-config server of the same name replaces the
-// project one on that machine (a user-scope one only while the project
-// server is not approved), and so does a .mcp.json above the repository.
+// since `npx -y pkg` runs whatever is published. Claude Code reads this
+// file's hooks only in a session started at the repository root, where the
+// root .mcp.json is the nearest one and so wins over any above it. What no
+// check here can see: a local-scope, managed or --mcp-config server of the
+// same name replaces the project one on that machine, and so does a
+// user-scope one while the project server is not yet approved.
 const MCP_TOOL_HOOKS = [];
 // An http hook posts every hook input (tool inputs, prompts) to its URL,
-// and the reply can approve a tool call or add to Claude's context. So only
-// URLs listed here are accepted, matched exactly. Add one only after
-// confirming who runs that endpoint and what it does with what it receives.
+// and the reply is handled like a command hook's output: it can approve or
+// block a tool call, change the call's input, or add to Claude's context.
+// Its headers can also carry the environment variables it names in
+// allowedEnvVars. So only URLs listed here are accepted, matched exactly.
+// Add one only after confirming who runs that endpoint and what it does
+// with what it receives.
 const HTTP_HOOK_URLS = [];
 // What this file holds at the top level. Anything within two edits of one
 // of these names is a misspelling that would silently drop the whole block.
@@ -495,7 +497,7 @@ function checkHook(hook, event, root, at, fail, { mcpToolHooks, allowAgentHooks,
     fail(`${at}: agent hooks are not accepted in this file: the hook agent runs in dontAsk mode with every allow rule from every settings scope, so its inline prompt can call any allowed tool, MCP tools included, and get around MCP_TOOL_HOOKS. Use a command hook with a reviewed script, or a prompt hook, which has no tools`);
   }
   if (hook.type === 'http' && isNonEmptyString(hook.url) && !httpHookUrls.includes(hook.url)) {
-    fail(`${at}: http hook URL ${JSON.stringify(hook.url)} is not in HTTP_HOOK_URLS in scripts/check-claude-settings.js. Claude Code posts every hook input, tool inputs and prompts included, to it, and its reply can approve a tool call or add to Claude's context, so add the URL there only after confirming who runs that endpoint and what it does with what it receives`);
+    fail(`${at}: http hook URL ${JSON.stringify(hook.url)} is not in HTTP_HOOK_URLS in scripts/check-claude-settings.js. Claude Code posts every hook input, tool inputs and prompts included, to it, and its reply can approve a tool call, change the call's input or add to Claude's context, so add the URL there only after confirming who runs that endpoint and what it does with what it receives`);
   }
   if (hook.type === 'mcp_tool' && isNonEmptyString(hook.server) && isNonEmptyString(hook.tool)
     && !mcpToolHooks.some((p) => p.server === hook.server && p.tool === hook.tool)) {
@@ -562,22 +564,28 @@ function checkMcpToolPins(root, mcpToolHooks, fail) {
   }
 }
 
-// Claude Code also loads .claude/settings.json and .claude/settings.local.json
-// from the directory a session starts in, and treats a tracked
-// settings.local.json as repository-supplied. Neither would be checked here,
-// so only the root .claude/settings.json may be tracked. While any
-// MCP_TOOL_HOOKS pair is listed, no .mcp.json other than the root one may be
-// tracked either (see MCP_TOOL_HOOKS). `tracked` lists the tracked paths,
-// relative to the repository root with forward slashes.
-function checkTrackedFiles(tracked, { mcpToolHooks = MCP_TOOL_HOOKS } = {}) {
+// Claude Code reads .claude/settings.json from the directory a session
+// starts in, and .claude/settings.local.json from the repository root, which
+// it treats as repository-supplied when tracked. This check reads only the
+// root settings.json, so that is the only settings file that may be tracked.
+// Paths are compared ignoring case, as on macOS and Windows, where a tracked
+// .Claude/Settings.json is the file Claude Code opens as
+// .claude/settings.json. A tracked path named .claude itself is a symlink or
+// submodule, through which Claude Code would read settings this check never
+// sees. `tracked` lists the tracked paths, relative to the repository root
+// with forward slashes.
+function checkTrackedFiles(tracked) {
   const problems = [];
   for (const file of tracked) {
-    if (/(^|\/)\.claude\/settings\.local\.json$/.test(file)) {
-      problems.push(`${file} is tracked: Claude Code treats a tracked settings.local.json as repository-supplied, and this check does not read it. Keep it untracked (git rm --cached ${file})`);
-    } else if (/(^|\/)\.claude\/settings\.json$/.test(file) && file !== '.claude/settings.json') {
+    const lower = file.toLowerCase();
+    if (/(^|\/)\.claude$/.test(lower)) {
+      problems.push(`${file} is tracked as a symlink or submodule: Claude Code reads .claude/settings.json and settings.local.json through it, and this check does not. Make it a real directory, or remove it`);
+    } else if (/(^|\/)\.claude\/settings\.local\.json$/.test(lower)) {
+      problems.push(`${file} is tracked: Claude Code treats a tracked settings.local.json as repository-supplied, and this check does not read it. Keep it untracked: git rm --cached removes it from the index and leaves your copy`);
+    } else if (lower === '.claude/settings.json' && file !== '.claude/settings.json') {
+      problems.push(`${file} is tracked: it differs from .claude/settings.json only in case, so on macOS and Windows Claude Code can open it in place of the file this check reads. Keep the policy in .claude/settings.json only`);
+    } else if (/\/\.claude\/settings\.json$/.test(lower)) {
       problems.push(`${file} is tracked: Claude Code loads it for a session started in ${file.slice(0, -'/.claude/settings.json'.length)}, and this check reads only the root .claude/settings.json. Keep the policy in the root file`);
-    } else if (mcpToolHooks.length && /(^|\/)\.mcp\.json$/.test(file) && file !== '.mcp.json') {
-      problems.push(`${file} is tracked: Claude Code lets a .mcp.json nearer the session's directory override the root one by server name, so the definitions pinned in MCP_TOOL_HOOKS would not hold`);
     }
   }
   return problems;
