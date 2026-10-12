@@ -204,8 +204,17 @@ $TaskName = 'trimurti-windows-update'
 
 if (-not $NoOS) {
   if ($Winget) {
-    Log 'winget upgrade --all'
-    $rc = Invoke-Native $Winget @('upgrade', '--all', '--silent', '--include-unknown', '--disable-interactivity', '--accept-source-agreements', '--accept-package-agreements')
+    # Not elevated: a machine-wide installer (Node.js, Git, most MSIs) asks for UAC and, with nobody at the
+    # screen (Desktop Commander, a scheduled task), waits forever. Upgrade the user-scope apps only and say so.
+    $wgArgs = @('upgrade', '--all', '--silent', '--include-unknown', '--disable-interactivity', '--accept-source-agreements', '--accept-package-agreements')
+    $elevated = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    if ($elevated) { Log 'winget upgrade --all' }
+    else {
+      $wgArgs += @('--scope', 'user')
+      Log 'winget upgrade --all --scope user (not elevated: machine-wide apps are left for an elevated run)'
+      Add-Failure 'winget-machine' "machine-wide apps were not upgraded on ${env:COMPUTERNAME}: rerun update-all.ps1 from an elevated PowerShell"
+    }
+    $rc = Invoke-Native $Winget $wgArgs
     # 0x8A15002B: nothing to upgrade
     if ($rc -eq -1978335188) { Add-Failure 'winget' 'winget: some packages failed to upgrade (0x8A15002C); see the lines above and rerun after closing those apps' }
     elseif ($rc -ne 0 -and $rc -ne -1978335189) { Add-Failure 'winget' "winget upgrade --all failed ($rc)" }

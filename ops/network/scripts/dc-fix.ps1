@@ -131,6 +131,13 @@ function Exec([string]$label, [string]$cmd, [int]$sec = 600, [int]$tail = 25) {
   return $r
 }
 $sum = New-Object System.Collections.Generic.List[string]
+# The kit's own update and bootstrap scripts: the copy dc-bootstrap.ps1 unpacked beside this one (fresh from
+# the branch) when there is one, else the kit clone's, which may be behind (it is never pulled here).
+function KitScript([string]$n) {
+  $f = Join-Path $PSScriptRoot $n
+  if ($PSScriptRoot -and (Test-Path -LiteralPath $f)) { return $f }
+  Join-Path $script:kitDir ('scripts\' + $n)
+}
 function Note([string]$s) { $script:sum.Add($s) }
 
 W ("# DC-FIX BEGIN {0} {1} ({2})" -f $me, $stamp, (Get-Date -Format o))
@@ -285,7 +292,7 @@ elseif ($kitDir) {
   $bf = ''
   if (-not $elev) { $bf = ' -SkipNode'; W '- not elevated: -SkipNode (only the Node.js MSI needs elevation), no -WithGit; the elevated run is Sanjay''s: powershell -ExecutionPolicy Bypass -File scripts\bootstrap-ai-clis.ps1' }
   W '- idempotent; also registers the Hugging Face MCP server with Codex and Gemini; no -WithClaudeHfMcp'
-  $b = Exec 'bootstrap-ai-clis.ps1' ('powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}"{1}' -f (Join-Path $kitDir 'scripts\bootstrap-ai-clis.ps1'), $bf) 2400 6
+  $b = Exec 'bootstrap-ai-clis.ps1' ('powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}"{1}' -f (KitScript 'bootstrap-ai-clis.ps1'), $bf) 2400 6
   Markers $b '^(==> |WARNING:|INSTALL (OK|INCOMPLETE)|\s{2}(node|claude|codex|gemini|hf)\s)' '(no INSTALL OK/INCOMPLETE line: the run did not finish)'
   if ($b.Started) { $mk = Marks $b.Out '^INSTALL (OK|INCOMPLETE)'; if ($mk.Count) { Note "bootstrap: $($mk[-1])" } else { Note 'bootstrap-ai-clis.ps1 did not finish' } }
 } else {
@@ -304,7 +311,7 @@ if ($kitDir) {
   if ($SkipWinget) { $why += '-SkipWinget' }; if ($SkipWindowsUpdate) { $why += '-SkipWindowsUpdate' }
   if ($why.Count) { $flags = ' -NoOS'; $secs = 1800; W ("- {0}: update-all.ps1 -NoOS (it cannot skip one of the two alone)" -f ($why -join ' and ')) }
   elseif (-not $elev) { W '- not elevated: expect windows-update in UPDATE_FAILED (its SYSTEM task needs elevation); winget and the CLIs still update' }
-  $upd = Exec 'update-all.ps1' ('powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}"{1}' -f (Join-Path $kitDir 'scripts\update-all.ps1'), $flags) $secs 20
+  $upd = Exec 'update-all.ps1' ('powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}"{1}' -f (KitScript 'update-all.ps1'), $flags) $secs 20
   Markers $upd '^(==> |WARNING:|UPDATE_FAILED=|REBOOT_REQUIRED=|\s{2}(claude|codex|gemini|hf|node)\s|\s+(not installed on purpose|->|\(files are queued))' '(no REBOOT_REQUIRED= line: the run did not finish)'
   if ($upd.Started) { $mk = Marks $upd.Out '^(UPDATE_FAILED=|REBOOT_REQUIRED=)'; if ($mk.Count) { foreach ($m in $mk) { Note "update-all: $m" } } else { Note 'update-all.ps1 did not finish (no REBOOT_REQUIRED= line)' } }
   if ($flags) {
