@@ -214,6 +214,11 @@ function Skip-JsonWs([string]$T, [int]$i) {
   while ($i -lt $T.Length -and " `t`r`n".IndexOf($T[$i]) -ge 0) { $i++ }
   return $i
 }
+# A member by its exact name. PowerShell's own property lookup ignores case ("MCPServers" would
+# find mcpServers) where bash's dict does not, so every member is matched with -ceq. $null if absent.
+function Get-JsonMember($Obj, [string]$Name) {
+  return $Obj.PSObject.Properties | Where-Object { $_.Name -ceq $Name } | Select-Object -First 1
+}
 # 0 compatible, 3 absent, 1 unsupported/incompatible. Use properties, not a textual key match.
 function Get-HfClientState([string]$Client) {
   $geminiDir = if ($env:GEMINI_CLI_HOME) { $env:GEMINI_CLI_HOME } else { $env:USERPROFILE }
@@ -229,20 +234,34 @@ function Get-HfClientState([string]$Client) {
     if (-not (Test-StrictJson $raw) -or $raw[(Skip-JsonWs $raw 0)] -cne [char]'{') { return 1 }
     $settings = $raw | ConvertFrom-Json -ErrorAction Stop
     if ($null -eq $settings -or $settings -isnot [pscustomobject]) { return 1 }
-    $servers = $settings.mcpServers
+    # Members are read by exact name, and each value must have the type bash expects: an object
+    # entry, string url/type/httpUrl, an array excludeTools. Otherwise manual review, never "compatible".
+    $sp = Get-JsonMember $settings 'mcpServers'
+    if ($null -eq $sp) { return 3 }
     # A present-but-null mcpServers needs manual review, as in the bash validator; absent means absent.
-    if ($null -eq $servers) { if ($settings.PSObject.Properties['mcpServers']) { return 1 }; return 3 }
+    $servers = $sp.Value
     if ($servers -isnot [pscustomobject]) { return 1 }
-    $property = $servers.PSObject.Properties | Where-Object { $_.Name -ceq 'huggingface' } | Select-Object -First 1
+    $property = Get-JsonMember $servers 'huggingface'
     if ($null -eq $property) { return 3 }
     $entry = $property.Value
+    if ($entry -isnot [pscustomobject]) { return 1 }
+    $p = @{}
+    foreach ($name in 'url', 'type', 'httpUrl', 'excludeTools') {
+      $m = Get-JsonMember $entry $name
+      if ($null -ne $m) { $p[$name] = $m.Value }
+    }
+    foreach ($name in 'url', 'type', 'httpUrl') { if ($p.ContainsKey($name) -and $p[$name] -isnot [string]) { return 1 } }
+    $urls = @($hfUrl, "$($hfUrl)?login")
     if ($Client -eq 'claude') {
-      if ($entry.type -cne 'http' -or @($hfUrl, "$($hfUrl)?login") -cnotcontains $entry.url) { return 1 }
+      if ($p['type'] -cne 'http' -or -not $p.ContainsKey('url') -or $urls -cnotcontains $p['url']) { return 1 }
     } else {
       # Gemini CLI 0.61 writes url + type "http"; older settings carry the deprecated httpUrl. Both count.
-      $gurl = if ($entry.PSObject.Properties['httpUrl']) { $entry.httpUrl } elseif ($entry.type -ceq 'http') { $entry.url } else { $null }
-      if (@($hfUrl, "$($hfUrl)?login") -cnotcontains $gurl) { return 1 }
-      foreach ($tool in $hfDeny) { if (@($entry.excludeTools) -cnotcontains $tool) { return 1 } }
+      $gurl = if ($p.ContainsKey('httpUrl')) { $p['httpUrl'] } elseif ($p['type'] -ceq 'http') { $p['url'] } else { $null }
+      if ($null -eq $gurl -or $urls -cnotcontains $gurl) { return 1 }
+      # A string or object here is not a list of tools, even if PowerShell would iterate it.
+      $tools = $p['excludeTools']
+      if (-not ($tools -is [array])) { return 1 }
+      foreach ($tool in $hfDeny) { if (@($tools | Where-Object { $_ -is [string] }) -cnotcontains $tool) { return 1 } }
     }
     return 0
   } catch { return 1 }
