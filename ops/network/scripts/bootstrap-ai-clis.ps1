@@ -197,6 +197,7 @@ function Read-Utf8([byte[]]$Bytes) {
 $jsonString = '"(?:[^"\\\x00-\x1f]|\\(?:["\\/bfnrt]|u[0-9A-Fa-f]{4}))*"'
 $jsonScalar = '-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?|true|false|null'
 $jsonToken = [regex]($jsonString + '|' + $jsonScalar + '|[{}\[\],:]')
+$jsonMember = [regex]('(' + $jsonString + ')([ \t\r\n]*:)?|[{}]')
 $jsonString = [regex]$jsonString
 $jsonScalar = [regex]$jsonScalar
 $jsonWs = [regex]'[ \t\r\n]+'
@@ -209,6 +210,22 @@ function Test-StrictJson([string]$T) {
   $s = $jsonWs.Replace($jsonScalar.Replace($jsonString.Replace($T, '"'), '0'), '')
   do { $prev = $s; $s = $jsonFold.Replace($s, '0') } while ($s -cne $prev)
   return $s -ceq '0' -or $s -ceq '"'
+}
+# A repeated key at any depth needs manual review, as in the bash validator: ConvertFrom-Json keeps
+# one of them, the client may keep another. Keys compare as decoded text; only escaped ones need decoding.
+function Test-UniqueKeys([string]$T) {
+  $open = New-Object 'Collections.Generic.Stack[object]'
+  foreach ($m in $jsonMember.Matches($T)) {
+    $v = $m.Value
+    if ($v -ceq '{') { $open.Push((New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal))) }
+    elseif ($v -ceq '}') { [void]$open.Pop() }
+    elseif ($m.Groups[2].Success) {
+      $k = $m.Groups[1].Value
+      $k = if ($k.IndexOf([char]92) -ge 0) { ConvertFrom-Json $k } else { $k.Substring(1, $k.Length - 2) }
+      if (-not $open.Peek().Add($k)) { return $false }
+    }
+  }
+  return $true
 }
 function Skip-JsonWs([string]$T, [int]$i) {
   while ($i -lt $T.Length -and " `t`r`n".IndexOf($T[$i]) -ge 0) { $i++ }
@@ -226,7 +243,7 @@ function Get-HfClientState([string]$Client) {
   try {
     $raw = Read-Utf8 ([IO.File]::ReadAllBytes($cfg))
     # The root must be an object: [pscustomobject] is [psobject], which a parsed array also passes.
-    if (-not (Test-StrictJson $raw) -or $raw[(Skip-JsonWs $raw 0)] -cne [char]'{') { return 1 }
+    if (-not (Test-StrictJson $raw) -or $raw[(Skip-JsonWs $raw 0)] -cne [char]'{' -or -not (Test-UniqueKeys $raw)) { return 1 }
     $settings = $raw | ConvertFrom-Json -ErrorAction Stop
     if ($null -eq $settings -or $settings -isnot [pscustomobject]) { return 1 }
     $servers = $settings.mcpServers
@@ -252,7 +269,7 @@ function Get-HfClientState([string]$Client) {
 # Never `gemini mcp add` (or `remove`): Gemini 0.61 writes back the whole mcpServers map as loaded,
 # with every ${VAR} already expanded, so another server's secret would be saved in the clear.
 # Parity with add_gemini_hf in bootstrap-ai-clis.sh: same bytes, same return codes.
-# 0 created; 4 settings.json exists: left untouched, snippet printed; 1 could not create.
+# 0 created; 4 nothing written, snippet printed (settings.json exists, or PowerShell 7); 1 could not create.
 function Add-GeminiHf {
   $geminiDir = if ($env:GEMINI_CLI_HOME) { $env:GEMINI_CLI_HOME } else { $env:USERPROFILE }
   $dir = Join-Path $geminiDir '.gemini'
@@ -263,6 +280,15 @@ function Add-GeminiHf {
   $entry = @('{', ('  "url": "' + $hfUrl + '",'), '  "type": "http",', '  "headers": {',
     '    "Authorization": "Bearer ${HF_TOKEN}"', '  },', '  "excludeTools": [') + $tools + @('  ]', '}')
   $doc = (@('{', '  "mcpServers": {', ('    "huggingface": ' + $entry[0])) + @($entry[1..($entry.Count - 1)] | ForEach-Object { '    ' + $_ }) + @('  }', '}')) -join "`n"
+  # Creation is verified on Windows PowerShell 5.1 (and Linux in the .sh). On PowerShell 7 the entry
+  # is printed for a manual setup until a native smoke test verifies this path.
+  if ($PSVersionTable.PSEdition -ceq 'Core') {
+    Write-Host ('gemini: automatic setup is verified on Linux and Windows PowerShell 5.1 only; nothing was written. ' +
+      'To finish, add this entry inside the top-level "mcpServers" object of ' + $cfg + ' (create the file, ' +
+      'readable only by you, if it does not exist), then rerun:')
+    Write-Host ('"huggingface": ' + ($entry -join "`n"))
+    return 4
+  }
   # GetAttributes sees the name itself, a dangling link included, so nothing is created through one.
   $taken = { try { [void][IO.File]::GetAttributes($cfg); $true } catch { $false } }
   if (-not (& $taken)) {
@@ -275,9 +301,7 @@ function Add-GeminiHf {
       $acl.SetAccessRuleProtection($true, $false)
       $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule([Security.Principal.WindowsIdentity]::GetCurrent().User, 'FullControl', 'Allow')))
       $w = [Security.AccessControl.FileSystemRights]::Write
-      $fs = if ($PSVersionTable.PSEdition -ceq 'Core') {
-        [IO.FileSystemAclExtensions]::Create([IO.FileInfo]$cfg, [IO.FileMode]::CreateNew, $w, [IO.FileShare]::None, 4096, [IO.FileOptions]::None, $acl)
-      } else { New-Object IO.FileStream($cfg, [IO.FileMode]::CreateNew, $w, [IO.FileShare]::None, 4096, [IO.FileOptions]::None, $acl) }
+      $fs = New-Object IO.FileStream($cfg, [IO.FileMode]::CreateNew, $w, [IO.FileShare]::None, 4096, [IO.FileOptions]::None, $acl)
       $made = $true
       try { $bytes = [Text.Encoding]::UTF8.GetBytes($doc + "`n"); $fs.Write($bytes, 0, $bytes.Length); $fs.Flush($true) } finally { $fs.Dispose() }
       return 0
@@ -402,7 +426,7 @@ if (-not $SkipHf) {
     elseif ($state -eq 3) {
       $rc = Add-GeminiHf
       if ($rc -eq 0 -and (Get-HfClientState 'gemini') -eq 0) { Log 'gemini: created user settings with the huggingface MCP server' }
-      elseif ($rc -eq 4) { Add-Failure 'hf-mcp-gemini' 'gemini: user settings exist; huggingface entry not added (manual step above)' }
+      elseif ($rc -eq 4) { Add-Failure 'hf-mcp-gemini' 'gemini: huggingface entry not added (manual step above)' }
       else { Add-Failure 'hf-mcp-gemini' 'gemini: could not create user settings' }
     } else { Add-Failure 'hf-mcp-gemini' 'gemini: user settings need manual review (commented/unsupported JSON, incompatible URL or missing blocked tools); left unchanged' }
   }
