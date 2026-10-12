@@ -25,6 +25,7 @@ Last line: REBOOT_REQUIRED=yes|no|unknown. Exit: 0 every step worked, 1 a step f
 names it), 2 bad arguments.
 #>
 $ErrorActionPreference = 'Continue'
+if (-not $env:COMPUTERNAME) { $env:COMPUTERNAME = [Environment]::MachineName }   # empty in some agent shells (Desktop Commander)
 
 function Show-Usage([int]$Code, [string]$Why) {
   $text = (((Get-Content -LiteralPath $PSCommandPath -Raw) -split '#>')[0] -replace '^\s*<#\r?\n', '').TrimEnd()

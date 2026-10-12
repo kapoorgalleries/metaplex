@@ -24,6 +24,7 @@ Usage: powershell -ExecutionPolicy Bypass -File scripts\bootstrap-ai-clis.ps1 [-
 Exit: 0 every requested CLI is installed, 1 something failed (the last line says what), 2 bad arguments.
 #>
 $ErrorActionPreference = 'Stop'
+if (-not $env:COMPUTERNAME) { $env:COMPUTERNAME = [Environment]::MachineName }   # empty in some agent shells (Desktop Commander)
 
 function Show-Usage([int]$Code, [string]$Why) {
   $text = (((Get-Content -LiteralPath $PSCommandPath -Raw) -split '#>')[0] -replace '^\s*<#\r?\n', '').TrimEnd()

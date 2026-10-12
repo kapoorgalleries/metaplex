@@ -292,7 +292,7 @@ elseif ($kitDir) {
   $bf = ''
   if (-not $elev) { $bf = ' -SkipNode'; W '- not elevated: -SkipNode (only the Node.js MSI needs elevation), no -WithGit; the elevated run is Sanjay''s: powershell -ExecutionPolicy Bypass -File scripts\bootstrap-ai-clis.ps1' }
   W '- idempotent; also registers the Hugging Face MCP server with Codex and Gemini; no -WithClaudeHfMcp'
-  $b = Exec 'bootstrap-ai-clis.ps1' ('powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}"{1}' -f (KitScript 'bootstrap-ai-clis.ps1'), $bf) 2400 6
+  $b = Exec 'bootstrap-ai-clis.ps1' ('powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}"{1}' -f (KitScript 'bootstrap-ai-clis.ps1'), $bf) $(if ($elev) { 2400 } else { 900 }) 6
   Markers $b '^(==> |WARNING:|INSTALL (OK|INCOMPLETE)|\s{2}(node|claude|codex|gemini|hf)\s)' '(no INSTALL OK/INCOMPLETE line: the run did not finish)'
   if ($b.Started) { $mk = Marks $b.Out '^INSTALL (OK|INCOMPLETE)'; if ($mk.Count) { Note "bootstrap: $($mk[-1])" } else { Note 'bootstrap-ai-clis.ps1 did not finish' } }
 } else {
@@ -309,12 +309,20 @@ function WingetAll { if ((Where1 'winget') -eq '-') { W '- winget not on PATH: a
 if ($kitDir) {
   $flags = ''; $secs = 3600; $why = @()
   if ($SkipWinget) { $why += '-SkipWinget' }; if ($SkipWindowsUpdate) { $why += '-SkipWindowsUpdate' }
+  # Unattended and not elevated, app upgrades cannot finish: machine-wide installers wait on UAC, and an app
+  # that is open (Antigravity on the gallery desktop, 2026-10-12) makes its own installer wait to be closed.
+  # So: CLIs only, then the list of pending upgrades for an elevated run with the apps closed.
+  $listOnly = $false
   if ($why.Count) { $flags = ' -NoOS'; $secs = 1800; W ("- {0}: update-all.ps1 -NoOS (it cannot skip one of the two alone)" -f ($why -join ' and ')) }
-  elseif (-not $elev) { W '- not elevated: expect windows-update in UPDATE_FAILED (its SYSTEM task needs elevation); winget and the CLIs still update' }
+  elseif (-not $elev) { $flags = ' -NoOS'; $secs = 1800; $listOnly = $true; W '- not elevated: update-all.ps1 -NoOS (the CLIs only); app upgrades and Windows Update are listed for an elevated run, not attempted' }
   $upd = Exec 'update-all.ps1' ('powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}"{1}' -f (KitScript 'update-all.ps1'), $flags) $secs 20
   Markers $upd '^(==> |WARNING:|UPDATE_FAILED=|REBOOT_REQUIRED=|\s{2}(claude|codex|gemini|hf|node)\s|\s+(not installed on purpose|->|\(files are queued))' '(no REBOOT_REQUIRED= line: the run did not finish)'
   if ($upd.Started) { $mk = Marks $upd.Out '^(UPDATE_FAILED=|REBOOT_REQUIRED=)'; if ($mk.Count) { foreach ($m in $mk) { Note "update-all: $m" } } else { Note 'update-all.ps1 did not finish (no REBOOT_REQUIRED= line)' } }
-  if ($flags) {
+  if ($listOnly) {
+    if ((Where1 'winget') -ne '-') { [void](Exec 'winget upgrades pending' 'winget upgrade --include-unknown --disable-interactivity --source winget' 120 30) }
+    W '- app upgrades and Windows Update: not attempted (not elevated); run update-all.ps1 from an elevated PowerShell with the apps closed'
+    Note 'app upgrades and Windows Update need an elevated update-all.ps1 run with the apps closed (list in step 3)'
+  } elseif ($flags) {
     if (-not $SkipWinget) { WingetAll } else { W '- winget: skipped (-SkipWinget)' }
     W '- Windows Update: skipped (-NoOS)'
   }
