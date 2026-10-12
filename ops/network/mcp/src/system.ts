@@ -1,4 +1,5 @@
 import { execFileSync } from 'node:child_process';
+import dns from 'node:dns/promises';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -90,6 +91,28 @@ export function sshTool(name: 'ssh' | 'ssh-keygen' | 'ssh-add'): string {
 }
 
 const IPV4 = /^(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(?:\.(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}$/;
+
+/**
+ * The IPv4 address ssh would connect to for a row with no ip: the HostName ~/.ssh/config gives the
+ * name (ssh -G), looked up in DNS when it is not already an address. '' when it cannot be worked out.
+ */
+export async function resolveSshDestination(name: string): Promise<string> {
+  let host = name;
+  try {
+    const out = execFileSync(sshTool('ssh'), ['-G', '--', name], { encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'] });
+    host = /^hostname\s+(\S+)/m.exec(out)?.[1] ?? name;
+  } catch {
+    host = name;
+  }
+  if (IPV4.test(host)) return host;
+  try {
+    const timeout = new Promise<never>((_, reject) => setTimeout(() => reject(new Error('timeout')), 3000).unref());
+    const r = await Promise.race([dns.lookup(host, { family: 4 }), timeout]);
+    return r.address;
+  } catch {
+    return '';
+  }
+}
 
 /** Linux /proc/net/route: default routes (destination 0) with a gateway, little-endian hex. */
 export function gatewaysFromProcRoute(text: string): string[] {

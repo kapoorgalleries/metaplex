@@ -205,6 +205,12 @@ assert.equal(
   '/Users/Sanjay Kapoor/kit/out/verify-20260924-120001-4242.md',
 );
 assert.equal(verifySavedFile('no table\n'), undefined);
+// Git Bash on Windows prints an MSYS path; Node there needs the drive letter
+assert.equal(
+  verifySavedFile('saved: /c/Users/sanja/trimurti-network/ops/network/out/verify-20260926-120001-1.md\n', true),
+  'C:/Users/sanja/trimurti-network/ops/network/out/verify-20260926-120001-1.md',
+);
+assert.equal(verifySavedFile('saved: /c/x/verify-1.md\n', false), '/c/x/verify-1.md');
 console.log('verify saved: ok');
 
 // shell=powershell: the command goes base64 over stdin behind a fixed -EncodedCommand bootstrap

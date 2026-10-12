@@ -111,18 +111,33 @@ if (-not $NoPull -and $repo) {
     if ($sw.Count) { & git -C $repo update-index --no-skip-worktree @sw 2>$null | Out-Null }
     $ErrorActionPreference = $eap
   }
-  Native 'git' @('-C', $repo, 'pull', '--ff-only', '--autostash', '-q')
-  if ($LASTEXITCODE -ne 0) { Warn 'could not update the kit (network, sign-in or local commits); starting with the version already here' }
+  $eap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+  $preConflicts = if ($DryRun) { $null } else { & git -C $repo diff --name-only --diff-filter=U 2>$null }
+  # The top stash before the pull: only a stash the autostash itself left behind is ever dropped.
+  $stashBefore = if ($DryRun) { '' } else { "$(& git -C $repo rev-parse -q --verify refs/stash 2>$null)" }
+  $ErrorActionPreference = $eap
+  if ($preConflicts) {
+    Warn 'this clone has unresolved merge conflicts (git status), so the kit was not updated; starting with the version already here'
+  } else {
+    Native 'git' @('-C', $repo, 'pull', '--ff-only', '--autostash', '-q')
+    if ($LASTEXITCODE -ne 0) { Warn 'could not update the kit (network, sign-in or local commits); starting with the version already here' }
+  }
   if (-not $DryRun) {
     $eap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
-    $conflicts = & git -C $repo diff --name-only --diff-filter=U 2>$null
-    if ($conflicts) {
+    $conflicts = if ($preConflicts) { @() } else { @(& git -C $repo diff --name-only --diff-filter=U 2>$null) }
+    if ($conflicts.Count) {
       foreach ($f in 'inventory.csv', 'status.md') {
         & git -C $repo checkout HEAD -- "ops/network/$f" 2>$null | Out-Null
         $b = Join-Path $bak $f
         if (Test-Path -LiteralPath $b) { Copy-Item -LiteralPath $b -Destination (Join-Path $Ops $f) -Force }
       }
-      & git -C $repo stash drop -q 2>$null | Out-Null
+      $others = @($conflicts | Where-Object { $_ -ne 'ops/network/inventory.csv' -and $_ -ne 'ops/network/status.md' })
+      $stashAfter = "$(& git -C $repo rev-parse -q --verify refs/stash 2>$null)"
+      if ($others.Count) {
+        Warn "your local edits to these files conflict with the update; resolve them (git status), your originals are in 'git stash list': $($others -join ' ')"
+      } elseif ($stashAfter -and $stashAfter -ne $stashBefore) {
+        & git -C $repo stash drop -q 2>$null | Out-Null
+      }
       Warn 'the inventory/status templates changed upstream; your copies were kept as they were (compare: git diff)'
     }
     if ($sw.Count) { & git -C $repo update-index --skip-worktree @sw 2>$null | Out-Null }

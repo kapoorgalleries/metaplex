@@ -1,6 +1,6 @@
 import fsp from 'node:fs/promises';
 import { INVENTORY } from './constants.js';
-import { defaultGateways } from './system.js';
+import { defaultGateways, resolveSshDestination } from './system.js';
 
 export interface Host {
   name: string;
@@ -149,7 +149,13 @@ export async function selectHosts(f: HostFilter, opts: { devices?: boolean } = {
   for (const h of hosts) {
     if (!matches(h, f)) continue;
     out.matched++;
-    const why = routerReason(h, info);
+    let why = routerReason(h, info);
+    if (!why && !h.ip) {
+      // No ip: ssh connects to whatever the name resolves to, which may be the router.
+      const dest = await resolveSshDestination(h.name);
+      const r = dest ? routerReason({ role: h.role, ip: dest }, info) : '';
+      if (r) why = `${h.name} resolves to ${r}`;
+    }
     if (why) {
       if (f.name || f.role) out.skipped.push({ name: h.name, reason: `it is the router (${why}); nothing here logs into it` });
       continue;

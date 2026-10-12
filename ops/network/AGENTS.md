@@ -10,7 +10,7 @@ Done means all of this is true:
 
 - One router, one subnet, one DHCP server, no double NAT, a DHCP reservation for every machine (`checklists/network-triage.md`, "What sorted means").
 - `ssh <name>` works with the admin key from this machine to every computer in `inventory.csv` (role `admin`, `workstation` or `new`; this machine itself only if its row has an `ssh_port`), and to the NAS once its SSH is on.
-- `claude`, `codex`, `gemini` and `hf` are installed and signed in on every computer, and each agent reaches Hugging Face's MCP server (Codex and Gemini through the bootstrap's registration; Claude through the claude.ai connector, or `--with-claude-hf-mcp` on a machine without a claude.ai login). `verify.sh` proves the install; prove each sign-in on the machine (`claude auth status`, `codex login status`, `gemini -p "hi"`, `hf auth whoami`) and record it in `status.md`'s Signed in table.
+- `claude`, `codex`, `gemini` and `hf` are installed and signed in on every computer, and each agent reaches Hugging Face's MCP server (Codex and Gemini through the bootstrap's registration; Claude through the claude.ai connector, or `--with-claude-hf-mcp` on a machine without a claude.ai login). If Gemini's Google sign-in is refused as "no longer supported for Gemini Code Assist for individuals", stop and ask Sanjay which way in he wants (README, "Gemini CLI"); do not create keys or projects yourself. `verify.sh` proves the install; prove each sign-in on the machine (`claude auth status`, `codex login status`, `gemini -p "hi"`, `hf auth whoami`) and record it in `status.md`'s Signed in table.
 - The NAS is reachable, its shares mount from every PC, its volume is healthy, and it is hardened.
 - Every Hulk drive has a verdict, its data is safe, and it has a job.
 - Both new computers are onboarded and `trimurti=yes` in the inventory.
@@ -31,9 +31,9 @@ Ask Sanjay and wait for a yes before you:
 - reboot or shut down any machine, rename one, or join it to a workgroup or domain (those reboot);
 - run `enable-ssh-server.sh --harden` (turns password logins off). The MCP tools refuse it: after his yes, give him `scripts/run-remote.sh --host <name> --tty enable-ssh-server --harden` for his terminal;
 - run `update-all` with `--cleanup` (removes packages and caches) or `--major-upgrade` (a new macOS version), or `update-all.ps1` with `-Drivers` or `-FeatureUpgrades` (a new Windows version). The MCP tools refuse these flags: after his yes, give him `scripts/run-remote.sh --host <name> --tty update-all <the flag>`;
-- change a PC's PowerShell execution policy;
+- change a PC's PowerShell execution policy (`Set-ExecutionPolicy -Scope Process Bypass` in one window, as the README's Windows steps use, changes nothing that lasts and needs no yes);
 - delete anything that is not in `out/`;
-- install software on a machine that is not in `inventory.csv`;
+- install software on a machine that is not in `inventory.csv` (this admin machine counts from the start: the launcher Sanjay ran here installs Claude or Codex and Node in his terminal before you exist);
 - commit, push, or post anything anywhere.
 
 Every step in the checklists that needs this yes is marked **ASK**, except in `router-tuning.md`, where every row needs it.

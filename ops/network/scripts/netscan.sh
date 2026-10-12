@@ -57,6 +57,13 @@ SUBNET="${1:-$(printf '%s' "$MYIP" | cut -d. -f1-3)}"
 log "interface=$IFACE  ip=$MYIP$MASK  gateway=$GW  link=${LINK:-?}"
 log "dns servers: ${DNS:-none found}"
 case "$LINK" in *100Mb*|100baseT*|*"100baseTX"*) warn "link is 100 Mb/s on $IFACE: bad cable or a 100 Mb switch port. Gigabit expected." ;; esac
+# Every address this machine has on the swept subnet: a second NIC or Wi-Fi on the same LAN is this machine too.
+LOCALS=" $(local_ips | awk -v s="$SUBNET." 'index($1, s) == 1' | tr '\n' ' ')"
+case "$LOCALS" in *" $MYIP "*) ;; *) LOCALS="$LOCALS$MYIP " ;; esac
+set -- $LOCALS
+if [ $# -gt 1 ]; then
+  warn "this machine has $# addresses on $SUBNET.x ($*). Two links into one subnet make replies leave by a different card than requests came in on, so connections to it stall or drop and the router sees one machine as several. Keep one ($MYIP on $IFACE carries the default route) and unplug or disable the others: ASK first. It gets one inventory row, with that address."
+fi
 case "$MASK" in /24|255.255.255.0) ;; "") ;; *) warn "subnet mask is $MASK, not /24. Passing the right SUBNET matters and the network may be split." ;; esac
 
 # ---------------------------------------------------------------- 2. double NAT
@@ -184,7 +191,7 @@ printf '%s\n' "$PAIRS" | sort -t. -k4,4n | while read -r ip mac; do
       s22="$(probe "$ip" 22)"; s445="$(probe "$ip" 445)"; s80="$(probe "$ip" 80)"
       s443="$(probe "$ip" 443)"; s5000="$(probe "$ip" 5000)"; s8080="$(probe "$ip" 8080)"
       hint=""
-      [ "$ip" = "$MYIP" ] && hint="this machine"
+      case "$LOCALS" in *" $ip "*) hint="this machine" ;; esac
       [ -n "$s5000" ] && hint="${hint:+$hint; }Synology DSM?"
       [ -n "$s8080" ] && [ -n "$s445" ] && hint="${hint:+$hint; }QNAP?"
       [ -n "$s445" ] && [ -z "$hint" ] && hint="SMB host (PC or NAS)"

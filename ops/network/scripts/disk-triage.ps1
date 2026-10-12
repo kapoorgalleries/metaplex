@@ -65,6 +65,7 @@ try {
 } catch { "  not available (USB bridges often hide SMART; test the drive in a SATA bay or the NAS)" }
 if (Get-Command smartctl -ErrorAction SilentlyContinue) {
   "`n== smartctl =="
+  $unknown = @()
   smartctl --scan 2>$null | ForEach-Object {
     $dev = ($_ -split ' ')[0]; "--- $dev"
     $out = smartctl -H -A $dev 2>$null
@@ -73,9 +74,17 @@ if (Get-Command smartctl -ErrorAction SilentlyContinue) {
       if ($out -match 'overall-health|Health Status|SMART/Health Information') { break }
       $out = smartctl -H -A -d $t $dev 2>$null
     }
-    $out | Select-String 'overall-health|Health Status|Reallocated|Reported_Uncorrect|Command_Timeout|Pending|Uncorrectable|Power_On|Temperature|Percentage Used|Available Spare|Media and Data|Critical Warning'
-    smartctl -l selftest $dev 2>$null | Select-String '^# *\d' | Select-Object -First 2
+    if ($out -match 'overall-health|Health Status|SMART/Health Information') {
+      $out | Select-String 'overall-health|Health Status|Reallocated|Reported_Uncorrect|Command_Timeout|Pending|Uncorrectable|Power_On|Temperature|Percentage Used|Available Spare|Media and Data|Critical Warning'
+      smartctl -l selftest $dev 2>$null | Select-String '^# *\d' | Select-Object -First 2
+    } else {
+      # No health section with any device type: that is no reading, not a healthy drive.
+      "  UNKNOWN: smartctl could not read SMART from $dev (a USB bridge that hides it?). smartctl said:"
+      @($out | Where-Object { "$_".Trim() } | Select-Object -Last 3) | ForEach-Object { "    $_" }
+      $unknown += $dev
+    }
   }
+  if ($unknown.Count) { "`nDISK_TRIAGE_UNKNOWN=$($unknown -join ',')   (no SMART verdict for these: table UNKNOWN in hulk-drives.md)" }
 } else { "`nsmartctl missing:  winget install smartmontools.smartmontools   (then reopen the terminal and rerun)"; $failed += 'smartctl-missing' }
 "`nverdict rule: HealthStatus=Healthy, PredictFailure=False, Pending (197) and Uncorrectable (198) both 0 -> HEALTHY, then run a long self-test before trusting it."
 "              Reallocated (5), Reported Uncorrectable (187) or Command Timeout (188) > 0 -> WATCH (offline copies only)."

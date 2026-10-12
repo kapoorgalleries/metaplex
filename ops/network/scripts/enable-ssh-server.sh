@@ -141,11 +141,25 @@ else
   else
     echo "no systemd or OpenRC here: start sshd with this system's init system, then rerun"; exit 1
   fi
-  if have ufw && $SUDO ufw status 2>/dev/null | grep -q 'Status: active'; then
-    $SUDO ufw allow OpenSSH >/dev/null 2>&1 || $SUDO ufw allow 22/tcp >/dev/null
-  fi
-  if have firewall-cmd && $SUDO firewall-cmd --state >/dev/null 2>&1; then
-    $SUDO firewall-cmd --permanent --add-service=ssh >/dev/null && $SUDO firewall-cmd --reload >/dev/null
+  # An active firewall gets an SSH rule for the LAN only (the subnet on the default-route
+  # interface), never from anywhere: a public IPv6 or a second interface must not expose sshd.
+  fw_ufw=0; fw_fwd=0
+  if have ufw && $SUDO ufw status 2>/dev/null | grep -q 'Status: active'; then fw_ufw=1; fi
+  if have firewall-cmd && $SUDO firewall-cmd --state >/dev/null 2>&1; then fw_fwd=1; fi
+  if [ "$fw_ufw" = 1 ] || [ "$fw_fwd" = 1 ]; then
+    dev="$(ip -o -4 route show default 2>/dev/null | awk '{ for (i = 1; i < NF; i++) if ($i == "dev") { print $(i + 1); exit } }')"
+    lan=""; [ -z "$dev" ] || lan="$(ip -o -4 route show dev "$dev" scope link 2>/dev/null | awk '$1 ~ /\// && $1 !~ /^169\.254\./ { print $1; exit }')"
+    if [ -z "$lan" ]; then
+      echo "WARN: the firewall is on, but the LAN subnet could not be worked out, so no SSH rule was added."
+      echo "      Allow SSH from the LAN only, e.g.: sudo ufw allow from 192.168.1.0/24 to any port 22 proto tcp"
+    else
+      if [ "$fw_ufw" = 1 ]; then $SUDO ufw allow from "$lan" to any port 22 proto tcp >/dev/null; fi
+      if [ "$fw_fwd" = 1 ]; then
+        $SUDO firewall-cmd --permanent --add-rich-rule="rule family=\"ipv4\" source address=\"$lan\" service name=\"ssh\" accept" >/dev/null &&
+          $SUDO firewall-cmd --reload >/dev/null
+      fi
+      echo "firewall: SSH allowed from $lan only"
+    fi
   fi
 fi
 
@@ -164,12 +178,18 @@ if [ "$HARDEN" = 1 ]; then
     exit 1
   fi
   $SUDO mkdir -p "$SSHD_DIR"
+  # A drop-in from an earlier run is kept aside (a name sshd's *.conf Include skips) and put back
+  # if this run fails, so a failed rerun never loses hardening that was already in place.
+  SAVED="$SSHD_DIR/00-trimurti.conf.prev"
+  $SUDO rm -f "$SAVED"
+  if $SUDO test -e "$DROPIN"; then $SUDO cp -p "$DROPIN" "$SAVED"; fi
+  undo_dropin() { if $SUDO test -e "$SAVED"; then $SUDO mv -f "$SAVED" "$DROPIN"; else $SUDO rm -f "$DROPIN"; fi; }
   printf 'PubkeyAuthentication yes\nPasswordAuthentication no\nKbdInteractiveAuthentication no\nPermitRootLogin no\n' \
     | $SUDO tee "$DROPIN" >/dev/null
   if ! err="$($SUDO sshd -t 2>&1)"; then
-    $SUDO rm -f "$DROPIN"
+    undo_dropin
     printf '%s\n' "$err"
-    echo "sshd -t rejected the hardened config; removed $DROPIN again. sshd was not restarted: nothing changed."
+    echo "sshd -t rejected the hardened config; $DROPIN is back as it was. sshd was not restarted: nothing changed."
     exit 1
   fi
   # What sshd would really use, as the admin machine connecting as this user sees it.
@@ -184,15 +204,15 @@ if [ "$HARDEN" = 1 ]; then
     bad="$bad kbdinteractiveauthentication"
   fi
   if [ -n "$bad" ]; then
-    $SUDO rm -f "$DROPIN"
+    undo_dropin
     echo "Hardening NOT applied: even with $DROPIN, sshd -T still shows:"
     printf '%s\n' "$eff" | grep -E '^(passwordauthentication|kbdinteractiveauthentication|challengeresponseauthentication|permitrootlogin|pubkeyauthentication) ' || echo "  (sshd -T printed nothing)"
     echo "These lines set them (sshd keeps the first value it reads; a Match block overrides it per connection):"
     $SUDO sh -c 'grep -H -n -i -E "^[[:space:]]*(passwordauthentication|kbdinteractiveauthentication|challengeresponseauthentication|permitrootlogin|pubkeyauthentication|match)[[:space:]]" /etc/ssh/sshd_config /etc/ssh/sshd_config.d/* 2>/dev/null' || true
-    echo "Removed $DROPIN again and did not restart sshd, so nothing changed. Fix those lines (with Sanjay's yes), then rerun --harden."
+    echo "Put $DROPIN back as it was and did not restart sshd, so nothing changed. Fix those lines (with Sanjay's yes), then rerun --harden."
     exit 1
   fi
-  $SUDO rm -f "$SSHD_DIR/50-trimurti.conf"   # this script's earlier name for the same file
+  $SUDO rm -f "$SAVED" "$SSHD_DIR/50-trimurti.conf"   # the kept-aside copy; this script's earlier name for the same file
   if ! restart_sshd; then
     echo "The hardened config is valid, but sshd did not restart. Keep this session open and check the sshd service."
     exit 1

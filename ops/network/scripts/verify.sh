@@ -67,8 +67,8 @@ while IFS=, read -r name ip mac os user role port trimurti notes <&3; do
   claude=; codex=; gemini=; hf=; node=; osname=; sshok="NO"; out=""; rc=255; loginerr=""
   why="$(ssh_skip_reason "$user" "$port")"
   win=0; [ "$(lower "$os")" = "windows" ] && win=1
-  if [ -n "$why" ] && [ -n "$ip" ] && case "$LOCAL_IPS" in *" $ip "*) true ;; *) false ;; esac; then
-    sshok="n/a"   # this machine: no SSH needed, probe it here
+  if [ -z "$port" ] && [ -n "$ip" ] && case "$LOCAL_IPS" in *" $ip "*) true ;; *) false ;; esac; then
+    sshok="n/a"   # this machine with a deliberately blank ssh_port: no SSH needed, probe it here
     if [ "$win" = 1 ]; then out="$(printf '%s\n\n' "$WIN_PROBE" | $WIN_PS 2>/dev/null)"; else out="$(printf '%s\n' "$UNIX_PROBE" | bash -s 2>/dev/null)"; fi
   elif [ -n "$why" ]; then
     sshok="$why"
