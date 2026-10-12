@@ -21,7 +21,7 @@ $extra = @((Join-Path $H '.local\bin'), (Join-Path $env:APPDATA 'npm'), (Join-Pa
 $env:Path = (@([Environment]::GetEnvironmentVariable('Path', 'Machine'), [Environment]::GetEnvironmentVariable('Path', 'User'), $env:Path) + $extra) -join ';'
 $dir = Join-Path $H 'trimurti-dc'
 New-Item -ItemType Directory -Force -Path $dir | Out-Null
-$me = $env:COMPUTERNAME
+$me = [Environment]::MachineName   # $env:COMPUTERNAME is empty in Desktop Commander's process
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $out = Join-Path $dir "$me-diag-$stamp.md"
 $latest = Join-Path $dir "$me-diag-latest.md"
@@ -52,7 +52,8 @@ function Lines($text, [int]$max = 14) {
 function Run([string]$label, [string]$cmd, [int]$sec = 45) {
   $tf = Join-Path $script:dir ('run-' + [IO.Path]::GetRandomFileName() + '.tmp')
   $psi = New-Object Diagnostics.ProcessStartInfo
-  $psi.FileName = $env:ComSpec; $psi.Arguments = ('/d /s /c "{0} > "{1}" 2>&1 <nul"' -f $cmd, $tf)
+  # $env:ComSpec is empty in Desktop Commander's process; System32 from .NET is always right.
+  $psi.FileName = Join-Path ([Environment]::SystemDirectory) 'cmd.exe'; $psi.Arguments = ('/d /s /c "{0} > "{1}" 2>&1 <nul"' -f $cmd, $tf)
   $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true; $psi.RedirectStandardInput = $true
   $sw = [Diagnostics.Stopwatch]::StartNew()
   $to = $false; $code = 'n/a'; $o = ''; $ok = $true
@@ -74,12 +75,15 @@ function Run([string]$label, [string]$cmd, [int]$sec = 45) {
 }
 function Has([string]$p) { if (Test-Path -LiteralPath $p) { 'yes' } else { 'no' } }
 function Where1([string]$n) { $c = Get-Command $n -ErrorAction SilentlyContinue | Select-Object -First 1; if ($c) { $c.Source } else { '-' } }
+# ConvertFrom-Json in 5.1 refuses files over 2 MB (~\.claude.json is one); the serializer underneath has no such limit.
+Add-Type -AssemblyName System.Web.Extensions -ErrorAction SilentlyContinue
 function JsonKeys([string]$path, [string]$prop) {
   try {
-    $j = Get-Content -LiteralPath $path -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
-    if ($prop) { $j = $j.$prop }
+    $ser = New-Object Web.Script.Serialization.JavaScriptSerializer; $ser.MaxJsonLength = [int]::MaxValue
+    $j = $ser.DeserializeObject((Get-Content -LiteralPath $path -Raw -ErrorAction Stop))
+    if ($prop) { $j = $j[$prop] }
     if ($null -eq $j) { return '(none)' }
-    $k = @($j.PSObject.Properties | ForEach-Object { $_.Name }); if ($k.Count -eq 0) { '(none)' } else { $k -join ', ' }
+    $k = @($j.Keys); if ($k.Count -eq 0) { '(none)' } else { $k -join ', ' }
   } catch { 'unreadable (JSON parse error)' }
 }
 function DirNames([string]$p) { if (Test-Path -LiteralPath $p) { $n = @(Get-ChildItem -LiteralPath $p -Directory -ErrorAction SilentlyContinue | ForEach-Object { $_.Name }); if ($n.Count) { $n -join ', ' } else { '(empty)' } } else { '(absent)' } }
@@ -214,6 +218,7 @@ if (Test-Path $ct) { W ("- ~\.codex\config.toml: " + ((Select-String -LiteralPat
 $gs = Join-Path $H '.gemini\settings.json'
 W ("- ~\.gemini: {0}; settings.json keys: {1}; mcpServers: {2}; google_accounts.json: {3}; oauth_creds.json: {4}; skills: {5}" -f (Has (Join-Path $H '.gemini')), $(if (Test-Path $gs) { JsonKeys $gs $null } else { '(absent)' }), $(if (Test-Path $gs) { JsonKeys $gs 'mcpServers' } else { '-' }), (Has (Join-Path $H '.gemini\google_accounts.json')), (Has (Join-Path $H '.gemini\oauth_creds.json')), (DirNames (Join-Path $H '.gemini\skills')))
 if (Test-Path $gs) { try { $g = Get-Content -LiteralPath $gs -Raw | ConvertFrom-Json; W ("- gemini auth selectedType: {0}" -f $g.security.auth.selectedType) } catch { } }
+W ("- Desktop Commander process env: ComSpec '{0}', COMPUTERNAME '{1}', SystemRoot '{2}'" -f $env:ComSpec, $env:COMPUTERNAME, $env:SystemRoot)
 $ge = Join-Path $H '.gemini\.env'
 if (Test-Path $ge) {
   # Only names shaped like env vars are shown; anything else (a stray pasted value) is counted, not printed.

@@ -12,7 +12,14 @@
 #   -SkipWinget, -SkipWindowsUpdate   update-all.ps1 then gets -NoOS (it cannot skip one of the two alone);
 #                                     winget still runs here unless -SkipWinget
 #   -NoRemote                 admin machine: verify.sh only, no run-remote.sh to the other PCs
-param([string]$Kit = '', [switch]$SkipWinget, [switch]$SkipWindowsUpdate, [switch]$NoRemote)
+#   -SyncPermissionGates      copy the highest-version kg-permission-gates folder over the stale copies (each
+#                             backed up first under trimurti-dc\backup-<stamp>); without it the copies are only compared
+#   -NoScan                   skip the kit's read-only netscan.ps1 LAN sweep
+#   -NoGemini                 skip the PR #26 review (dc-gemini-review.ps1 fetched from -ScriptBranch into a full
+#                             metaplex clone and run there; it writes trimurti-dc\pr26-verdict.json)
+# Order: PATH, kit fetch, kg-permission-gates, netscan, the review, then the long steps (bootstrap, update-all,
+# verify, run-remote) and the final checks, so the report has the quick results early.
+param([string]$Kit = '', [switch]$SkipWinget, [switch]$SkipWindowsUpdate, [switch]$NoRemote, [switch]$SyncPermissionGates, [switch]$NoScan, [switch]$NoGemini, [string]$ScriptBranch = 'claude/eloquent-wright-woxv2e')
 $ErrorActionPreference = 'Continue'
 $ProgressPreference = 'SilentlyContinue'
 $t0 = Get-Date
@@ -28,7 +35,8 @@ $extra = @((Join-Path $H '.local\bin'), (Join-Path $env:APPDATA 'npm'), (Join-Pa
 $env:Path = (@([Environment]::GetEnvironmentVariable('Path', 'Machine'), [Environment]::GetEnvironmentVariable('Path', 'User'), $env:Path) + $extra) -join ';'
 $dir = Join-Path $H 'trimurti-dc'
 New-Item -ItemType Directory -Force -Path $dir | Out-Null
-$me = $env:COMPUTERNAME
+$me = [Environment]::MachineName   # $env:COMPUTERNAME and $env:ComSpec are empty in Desktop Commander's process
+$cmdExe = Join-Path ([Environment]::SystemDirectory) 'cmd.exe'
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $out = Join-Path $dir "$me-fix-$stamp.md"
 $latest = Join-Path $dir "$me-fix-latest.md"
@@ -60,7 +68,7 @@ function Lines($text, [int]$max = 14) {
 function Run([string]$label, [string]$cmd, [int]$sec = 45) {
   $tf = Join-Path $script:dir ('run-' + [IO.Path]::GetRandomFileName() + '.tmp')
   $psi = New-Object Diagnostics.ProcessStartInfo
-  $psi.FileName = $env:ComSpec; $psi.Arguments = ('/d /s /c "{0} > "{1}" 2>&1 <nul"' -f $cmd, $tf)
+  $psi.FileName = $script:cmdExe; $psi.Arguments = ('/d /s /c "{0} > "{1}" 2>&1 <nul"' -f $cmd, $tf)
   $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true; $psi.RedirectStandardInput = $true
   $sw = [Diagnostics.Stopwatch]::StartNew()
   $to = $false; $code = 'n/a'; $o = ''; $ok = $true
@@ -100,7 +108,7 @@ function Exec([string]$label, [string]$cmd, [int]$sec = 600, [int]$tail = 25) {
   Flush
   $tf = Join-Path $script:dir ('run-' + [IO.Path]::GetRandomFileName() + '.tmp')
   $psi = New-Object Diagnostics.ProcessStartInfo
-  $psi.FileName = $env:ComSpec; $psi.Arguments = ('/d /s /c "{0} > "{1}" 2>&1 <nul"' -f $cmd, $tf)
+  $psi.FileName = $script:cmdExe; $psi.Arguments = ('/d /s /c "{0} > "{1}" 2>&1 <nul"' -f $cmd, $tf)
   $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true; $psi.RedirectStandardInput = $true
   $sw = [Diagnostics.Stopwatch]::StartNew()
   $r = @{ Out = ''; Code = 'n/a'; Timeout = $false; Started = $true }
@@ -169,30 +177,106 @@ else {
   } else { W '- detached HEAD: no branch to compare with origin' }
 }
 
-Sec '3. Updates: update-all.ps1 (no ASK flags; never a reboot)'
-$wgArgs = 'upgrade --all --silent --include-unknown --accept-source-agreements --accept-package-agreements --disable-interactivity'
-function WingetAll { if ((Where1 'winget') -eq '-') { W '- winget not on PATH: app upgrades skipped' } else { $w = Exec 'winget upgrade --all' "winget $wgArgs" 2700 25; if ($w.Started -and $w.Code -eq -1978335189) { W '    (0x8A15002B: nothing to upgrade)' } } }
-if ($kitDir) {
-  $flags = ''; $secs = 10800; $why = @()
-  if ($SkipWinget) { $why += '-SkipWinget' }; if ($SkipWindowsUpdate) { $why += '-SkipWindowsUpdate' }
-  if ($why.Count) { $flags = ' -NoOS'; $secs = 1800; W ("- {0}: update-all.ps1 -NoOS (it cannot skip one of the two alone)" -f ($why -join ' and ')) }
-  elseif (-not $elev) { W '- not elevated: expect windows-update in UPDATE_FAILED (its SYSTEM task needs elevation); winget and the CLIs still update' }
-  $upd = Exec 'update-all.ps1' ('powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}"{1}' -f (Join-Path $kitDir 'scripts\update-all.ps1'), $flags) $secs 20
-  Markers $upd '^(==> |WARNING:|UPDATE_FAILED=|REBOOT_REQUIRED=|\s{2}(claude|codex|gemini|hf|node)\s|\s+(not installed on purpose|->|\(files are queued))' '(no REBOOT_REQUIRED= line: the run did not finish)'
-  if ($upd.Started) { $mk = Marks $upd.Out '^(UPDATE_FAILED=|REBOOT_REQUIRED=)'; if ($mk.Count) { foreach ($m in $mk) { Note "update-all: $m" } } else { Note 'update-all.ps1 did not finish (no REBOOT_REQUIRED= line)' } }
-  if ($flags) {
-    if (-not $SkipWinget) { WingetAll } else { W '- winget: skipped (-SkipWinget)' }
-    W '- Windows Update: skipped (-NoOS)'
+Sec '5. kg-permission-gates copies (compared, never changed)'
+$pg = @()
+foreach ($b in (Join-Path $H '.claude\skills'), (Join-Path $H '.agents\skills'), (Join-Path $H '.codex\skills'), (Join-Path $H '.gemini\skills'), (Join-Path $H '.claude\plugins')) {
+  if (-not (Test-Path -LiteralPath $b)) { continue }
+  foreach ($d in @(Get-ChildItem -LiteralPath $b -Directory -Recurse -Depth 2 -ErrorAction SilentlyContinue | Where-Object { $_.Name -like '*permission-gates*' })) {
+    $sk = Join-Path $d.FullName 'SKILL.md'; $hash = '(no SKILL.md)'; $ver = '?'; $lw = $d.LastWriteTime
+    if (Test-Path -LiteralPath $sk) {
+      $hash = (Get-FileHash -LiteralPath $sk -Algorithm SHA256).Hash.Substring(0, 16).ToLower(); $lw = (Get-Item -LiteralPath $sk).LastWriteTime
+      $m = Select-String -LiteralPath $sk -Pattern '^\s*"?version"?\s*[:=]\s*"?([0-9][0-9A-Za-z.\-]*)' | Select-Object -First 1; if ($m) { $ver = $m.Matches[0].Groups[1].Value }
+    }
+    $files = @(Get-ChildItem -LiteralPath $d.FullName -Recurse -File -ErrorAction SilentlyContinue).Count
+    $pg += New-Object PSObject -Property @{ Path = $d.FullName; Skill = $sk; Hash = $hash; Ver = $ver; Time = $lw; Files = $files }
+    W ("- {0}: SKILL.md sha256 {1}, version {2}, {3} files, link {4}, modified {5}" -f $d.FullName, $hash, $ver, $files, $(if ($d.LinkType) { $d.LinkType } else { 'copy' }), $lw)
   }
-} else {
-  W '- no kit: minimal safe updates'
-  if ((Where1 'claude') -ne '-') { [void](Exec 'claude update' 'claude update' 300 8) }
-  $cx = Where1 'codex'
-  if ($cx -ne '-') { if ($cx -match '\\npm\\') { [void](Exec 'codex (npm)' 'npm install -g --no-fund --no-audit @openai/codex@latest' 600 8) } else { [void](Exec 'codex update' 'codex update' 300 8) } }
-  if ((Where1 'gemini.cmd') -ne '-' -and (Where1 'npm') -ne '-') { [void](Exec 'gemini (npm)' 'npm install -g --no-fund --no-audit @google/gemini-cli@latest' 600 8) }
-  if ((Where1 'hf') -ne '-') { [void](Exec 'hf update' 'hf update' 600 8) }
-  if ($SkipWinget) { W '- winget: skipped (-SkipWinget)' } else { WingetAll }
-  W '- Windows Update: needs the kit''s update-all.ps1 (SYSTEM task); not run'
+}
+if ($pg.Count -eq 0) { W '- none found under ~\.claude\skills, ~\.agents\skills, ~\.codex\skills, ~\.gemini\skills, ~\.claude\plugins' }
+elseif (@($pg | ForEach-Object { $_.Hash } | Select-Object -Unique).Count -le 1) { W ("- all {0} copies identical (same SKILL.md hash)" -f $pg.Count) }
+else {
+  # The copy with the highest version wins (LastWriteTime breaks a tie); Sanjay said v1.1.0 was synced everywhere.
+  function VerNum([string]$v) { try { [Version]($v -replace '[^0-9.].*$', '') } catch { [Version]'0.0' } }
+  $new = $pg | Sort-Object @{ Expression = { VerNum $_.Ver }; Descending = $true }, @{ Expression = 'Time'; Descending = $true } | Select-Object -First 1
+  $stale = @($pg | Where-Object { $_.Path -ne $new.Path -and $_.Hash -ne $new.Hash })
+  if ($SyncPermissionGates) {
+    $bk = Join-Path $script:dir "backup-$stamp"
+    W ("- COPIES DIFFER; syncing from {0} (version {1}, {2}) to {3} stale cop(y/ies); originals backed up under {4}" -f $new.Path, $new.Ver, $new.Time, $stale.Count, $bk)
+    $n = 0
+    foreach ($o in $stale) {
+      $n++
+      try {
+        $dst = Join-Path $bk ("permission-gates-$n")
+        New-Item -ItemType Directory -Force -Path $dst | Out-Null
+        Copy-Item -LiteralPath $o.Path -Destination $dst -Recurse -Force
+        Copy-Item -Path (Join-Path $new.Path '*') -Destination $o.Path -Recurse -Force
+        $h2 = (Get-FileHash -LiteralPath $o.Skill -Algorithm SHA256).Hash.Substring(0, 16).ToLower()
+        W ("    {0}: was {1}, now SKILL.md sha256 {2} ({3})" -f $o.Path, $o.Hash, $h2, $(if ($h2 -eq $new.Hash) { 'matches' } else { 'STILL DIFFERS' }))
+        if ($h2 -ne $new.Hash) { Note "kg-permission-gates: $($o.Path) still differs after the copy" }
+      } catch { W ("    {0}: sync failed: {1}" -f $o.Path, (Clip $_.Exception.Message)); Note "kg-permission-gates: sync to $($o.Path) failed" }
+    }
+    Note ("kg-permission-gates: {0} cop(y/ies) synced to version {1} from {2}; backups in {3}" -f $stale.Count, $new.Ver, $new.Path, $bk)
+  } else {
+    W ("- COPIES DIFFER, nothing overwritten (no -SyncPermissionGates); highest version: {0} (version {1}, {2})" -f $new.Path, $new.Ver, $new.Time)
+    Note ("kg-permission-gates: {0} copies differ, highest version at {1}; rerun with -SyncPermissionGates to sync" -f $pg.Count, $new.Path)
+  }
+  foreach ($o in $stale) {
+    if (-not ((Test-Path -LiteralPath $o.Skill) -and (Test-Path -LiteralPath $new.Skill))) { W ("    vs {0}: no SKILL.md to compare" -f $o.Path); continue }
+    try {
+      $cmp = @(Compare-Object @(Get-Content -LiteralPath $new.Skill) @(Get-Content -LiteralPath $o.Skill))
+      $a = @($cmp | Where-Object { $_.SideIndicator -eq '<=' }); $z = @($cmp | Where-Object { $_.SideIndicator -eq '=>' })
+      W ("    vs {0} (version {1}, {2}): {3} line(s) only in the newest, {4} only here" -f $o.Path, $o.Ver, $o.Time, $a.Count, $z.Count)
+      foreach ($l in ($a | Select-Object -First 4)) { W ('      + ' + (Clip $l.InputObject 120)) }
+      foreach ($l in ($z | Select-Object -First 4)) { W ('      - ' + (Clip $l.InputObject 120)) }
+    } catch { W ("    vs {0}: compare failed: {1}" -f $o.Path, (Clip $_.Exception.Message)) }
+  }
+}
+
+Sec '6a. LAN sweep: netscan.ps1 (read-only; writes out\scan-<stamp>.csv in the kit)'
+if (-not $kitDir) { W '- no kit: no netscan' }
+elseif ($NoScan) { W '- skipped (-NoScan)' }
+else {
+  $ns = Exec 'netscan.ps1' ('powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}"' -f (Join-Path $kitDir 'scripts\netscan.ps1')) 600 12
+  Markers $ns '^(adapter=|dns servers|.*DOUBLE NAT|single NAT|.*CGNAT|\d+ hosts answered|saved: )' '(no saved: line: the sweep did not finish)'
+  $csv = Get-ChildItem -LiteralPath (Join-Path $kitDir 'out') -Filter 'scan-*.csv' -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+  if ($csv -and $csv.LastWriteTime -gt $t0) { W "- $($csv.Name):"; Lines (Get-Content -LiteralPath $csv.FullName -Raw -Encoding UTF8) 60; Note "netscan: $($csv.Name) has the live hosts; inventory.csv is still the template" }
+}
+
+Sec ('6b. PR #26 review: dc-gemini-review.ps1 from origin/' + $ScriptBranch + ' in a full metaplex clone')
+if ($NoGemini) { W '- skipped (-NoGemini)' }
+elseif ((Where1 'git') -eq '-') { W '- git not on PATH: no review' }
+else {
+  # A full (non-sparse) clone of kapoorgalleries/metaplex; the review script is taken from this branch so the run
+  # needs no second delivery. Nothing is checked out: fetch and `git show` only.
+  $mp = $null
+  foreach ($c in @(Get-ChildItem -LiteralPath $H -Directory -Force -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })) {
+    if (-not (Test-Path -LiteralPath (Join-Path $c '.git'))) { continue }
+    $u = "$(& git -C $c remote get-url origin 2>$null)"; if ($u -notmatch '(?i)kapoorgalleries/metaplex') { continue }
+    if ("$(& git -C $c config --bool core.sparseCheckout 2>$null)".Trim() -eq 'true') { continue }
+    $mp = $c; break
+  }
+  if (-not $mp) { W '- no full metaplex clone under the profile: no review'; Note 'PR #26 review not run: no full metaplex clone' }
+  else {
+    W "- clone: $mp"
+    # dc-bootstrap.ps1 unpacks the whole scripts folder, so the review script is usually a sibling of this one.
+    $gf = Join-Path $PSScriptRoot 'dc-gemini-review.ps1'
+    if (-not (Test-Path -LiteralPath $gf)) {
+      $gf = Join-Path $script:dir 'dc-gemini-review.ps1'
+      [void](Exec 'fetch script branch' ('git -C "{0}" fetch --no-tags origin +refs/heads/{1}:refs/remotes/origin/{1}' -f $mp, $ScriptBranch) 180 4)
+      $prev = $null; try { $prev = [Console]::OutputEncoding; [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch { }
+      $src = @(& git -C $mp show ("refs/remotes/origin/{0}:ops/network/scripts/dc-gemini-review.ps1" -f $ScriptBranch) 2>$null)
+      if ($prev) { try { [Console]::OutputEncoding = $prev } catch { } }
+      if ($src.Count -ge 50) { [IO.File]::WriteAllText($gf, (($src -join "`r`n") + "`r`n"), (New-Object Text.UTF8Encoding $true)) }
+    }
+    if (-not (Test-Path -LiteralPath $gf)) { W '- dc-gemini-review.ps1 neither beside this script nor readable from the branch: no review'; Note 'PR #26 review not run: script not available' }
+    else {
+      W "- review script: $gf"
+      $gr = Exec 'dc-gemini-review.ps1' ('powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}" -Clone "{1}" -Via auto' -f $gf, $mp) 1200 12
+      $vj = Join-Path $script:dir 'pr26-verdict.json'
+      if ((Test-Path -LiteralPath $vj) -and (Get-Item -LiteralPath $vj).LastWriteTime -gt $t0) { W '- pr26-verdict.json:'; Lines (Get-Content -LiteralPath $vj -Raw -Encoding UTF8) 80; Note ('PR #26 review: exit ' + $gr.Code + '; verdict in trimurti-dc\pr26-verdict.json') }
+      else { W '- no new pr26-verdict.json'; Note ('PR #26 review did not produce a verdict (exit ' + $gr.Code + ')') }
+    }
+  }
 }
 
 Sec '4. Missing CLIs: bootstrap-ai-clis.ps1'
@@ -212,37 +296,30 @@ elseif ($kitDir) {
   Note ('CLIs missing and no kit: ' + ($missing -join ', '))
 }
 
-Sec '5. kg-permission-gates copies (compared, never changed)'
-$pg = @()
-foreach ($b in (Join-Path $H '.claude\skills'), (Join-Path $H '.agents\skills'), (Join-Path $H '.codex\skills'), (Join-Path $H '.gemini\skills'), (Join-Path $H '.claude\plugins')) {
-  if (-not (Test-Path -LiteralPath $b)) { continue }
-  foreach ($d in @(Get-ChildItem -LiteralPath $b -Directory -Recurse -Depth 2 -ErrorAction SilentlyContinue | Where-Object { $_.Name -like '*permission-gates*' })) {
-    $sk = Join-Path $d.FullName 'SKILL.md'; $hash = '(no SKILL.md)'; $ver = '?'; $lw = $d.LastWriteTime
-    if (Test-Path -LiteralPath $sk) {
-      $hash = (Get-FileHash -LiteralPath $sk -Algorithm SHA256).Hash.Substring(0, 16).ToLower(); $lw = (Get-Item -LiteralPath $sk).LastWriteTime
-      $m = Select-String -LiteralPath $sk -Pattern '^\s*"?version"?\s*[:=]\s*"?([0-9][0-9A-Za-z.\-]*)' | Select-Object -First 1; if ($m) { $ver = $m.Matches[0].Groups[1].Value }
-    }
-    $files = @(Get-ChildItem -LiteralPath $d.FullName -Recurse -File -ErrorAction SilentlyContinue).Count
-    $pg += New-Object PSObject -Property @{ Path = $d.FullName; Skill = $sk; Hash = $hash; Ver = $ver; Time = $lw; Files = $files }
-    W ("- {0}: SKILL.md sha256 {1}, version {2}, {3} files, link {4}, modified {5}" -f $d.FullName, $hash, $ver, $files, $(if ($d.LinkType) { $d.LinkType } else { 'copy' }), $lw)
+Sec '3. Updates: update-all.ps1 (no ASK flags; never a reboot)'
+$wgArgs = 'upgrade --all --silent --include-unknown --accept-source-agreements --accept-package-agreements --disable-interactivity'
+function WingetAll { if ((Where1 'winget') -eq '-') { W '- winget not on PATH: app upgrades skipped' } else { $w = Exec 'winget upgrade --all' "winget $wgArgs" 2700 25; if ($w.Started -and $w.Code -eq -1978335189) { W '    (0x8A15002B: nothing to upgrade)' } } }
+if ($kitDir) {
+  $flags = ''; $secs = 3600; $why = @()
+  if ($SkipWinget) { $why += '-SkipWinget' }; if ($SkipWindowsUpdate) { $why += '-SkipWindowsUpdate' }
+  if ($why.Count) { $flags = ' -NoOS'; $secs = 1800; W ("- {0}: update-all.ps1 -NoOS (it cannot skip one of the two alone)" -f ($why -join ' and ')) }
+  elseif (-not $elev) { W '- not elevated: expect windows-update in UPDATE_FAILED (its SYSTEM task needs elevation); winget and the CLIs still update' }
+  $upd = Exec 'update-all.ps1' ('powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}"{1}' -f (Join-Path $kitDir 'scripts\update-all.ps1'), $flags) $secs 20
+  Markers $upd '^(==> |WARNING:|UPDATE_FAILED=|REBOOT_REQUIRED=|\s{2}(claude|codex|gemini|hf|node)\s|\s+(not installed on purpose|->|\(files are queued))' '(no REBOOT_REQUIRED= line: the run did not finish)'
+  if ($upd.Started) { $mk = Marks $upd.Out '^(UPDATE_FAILED=|REBOOT_REQUIRED=)'; if ($mk.Count) { foreach ($m in $mk) { Note "update-all: $m" } } else { Note 'update-all.ps1 did not finish (no REBOOT_REQUIRED= line)' } }
+  if ($flags) {
+    if (-not $SkipWinget) { WingetAll } else { W '- winget: skipped (-SkipWinget)' }
+    W '- Windows Update: skipped (-NoOS)'
   }
-}
-if ($pg.Count -eq 0) { W '- none found under ~\.claude\skills, ~\.agents\skills, ~\.codex\skills, ~\.gemini\skills, ~\.claude\plugins' }
-elseif (@($pg | ForEach-Object { $_.Hash } | Select-Object -Unique).Count -le 1) { W ("- all {0} copies identical (same SKILL.md hash)" -f $pg.Count) }
-else {
-  $new = $pg | Sort-Object Time -Descending | Select-Object -First 1
-  W ("- COPIES DIFFER, nothing overwritten; newest by LastWriteTime: {0} (version {1}, {2}); which one wins is Sanjay's call" -f $new.Path, $new.Ver, $new.Time)
-  Note ("kg-permission-gates: {0} copies differ, newest {1}; decision needed" -f $pg.Count, $new.Path)
-  foreach ($o in @($pg | Where-Object { $_.Path -ne $new.Path -and $_.Hash -ne $new.Hash })) {
-    if (-not ((Test-Path -LiteralPath $o.Skill) -and (Test-Path -LiteralPath $new.Skill))) { W ("    vs {0}: no SKILL.md to compare" -f $o.Path); continue }
-    try {
-      $cmp = @(Compare-Object @(Get-Content -LiteralPath $new.Skill) @(Get-Content -LiteralPath $o.Skill))
-      $a = @($cmp | Where-Object { $_.SideIndicator -eq '<=' }); $z = @($cmp | Where-Object { $_.SideIndicator -eq '=>' })
-      W ("    vs {0} (version {1}, {2}): {3} line(s) only in the newest, {4} only here" -f $o.Path, $o.Ver, $o.Time, $a.Count, $z.Count)
-      foreach ($l in ($a | Select-Object -First 4)) { W ('      + ' + (Clip $l.InputObject 120)) }
-      foreach ($l in ($z | Select-Object -First 4)) { W ('      - ' + (Clip $l.InputObject 120)) }
-    } catch { W ("    vs {0}: compare failed: {1}" -f $o.Path, (Clip $_.Exception.Message)) }
-  }
+} else {
+  W '- no kit: minimal safe updates'
+  if ((Where1 'claude') -ne '-') { [void](Exec 'claude update' 'claude update' 300 8) }
+  $cx = Where1 'codex'
+  if ($cx -ne '-') { if ($cx -match '\\npm\\') { [void](Exec 'codex (npm)' 'npm install -g --no-fund --no-audit @openai/codex@latest' 600 8) } else { [void](Exec 'codex update' 'codex update' 300 8) } }
+  if ((Where1 'gemini.cmd') -ne '-' -and (Where1 'npm') -ne '-') { [void](Exec 'gemini (npm)' 'npm install -g --no-fund --no-audit @google/gemini-cli@latest' 600 8) }
+  if ((Where1 'hf') -ne '-') { [void](Exec 'hf update' 'hf update' 600 8) }
+  if ($SkipWinget) { W '- winget: skipped (-SkipWinget)' } else { WingetAll }
+  W '- Windows Update: needs the kit''s update-all.ps1 (SYSTEM task); not run'
 }
 
 Sec '6. Admin machine only: verify.sh, then run-remote.sh --os windows update-all (Git Bash, never WSL)'
