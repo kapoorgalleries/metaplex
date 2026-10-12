@@ -292,7 +292,9 @@ install_hf() {
 # User-scope registration must not mistake this checkout's project entry for the user's.
 # Codex parses a private candidate config outside the checkout before any append. Existing
 # entries are preserved, but an incompatible URL/tool filter is an installation failure.
-# Gemini stores a literal environment reference, never the value of HF_TOKEN, in its settings.
+# Gemini gets a literal ${HF_TOKEN} reference, never the value, inserted into its settings as text.
+# Never `gemini mcp add` (or `remove`): Gemini 0.61 writes back the whole mcpServers map as loaded,
+# with every ${VAR} already expanded, so another server's secret would be saved in the clear.
 # Claude is opt-in because a local entry can mask a claude.ai connector.
 HF_MCP_URL="https://huggingface.co/mcp"
 HF_DENY="hf_jobs create_repo dynamic_space hf_sandbox hf_sandbox_exec hf_sandbox_fs"
@@ -365,8 +367,10 @@ import json, pathlib, sys
 p = pathlib.Path(sys.argv[1])
 if not p.exists():
     sys.exit(3)
+def reject(constant):  # json.loads alone takes NaN and Infinity; JSON does not
+    raise ValueError(constant)
 try:
-    settings = json.loads(p.read_text(encoding="utf-8-sig"))
+    settings = json.loads(p.read_text(encoding="utf-8-sig"), parse_constant=reject)
     servers = settings.get("mcpServers", {})
     if not isinstance(servers, dict):
         sys.exit(1)
@@ -383,6 +387,53 @@ except (ValueError, OSError, TypeError, AttributeError):
     sys.exit(1)
 PYJSON
 }
+add_gemini_hf() {  # 0 created; 4 settings.json exists: left untouched, snippet printed; 1 could not create
+  # Gemini's settings.json is only ever created, never edited: an existing file (which may hold other
+  # servers' settings) is left byte-for-byte as it is and the entry is printed for a manual paste.
+  # Never `gemini mcp add`/`remove`: they write every ${VAR} in mcpServers back expanded.
+  local py cfg="${GEMINI_CLI_HOME:-$HOME}/.gemini/settings.json"
+  py="$(json_python)" || return 1
+  # shellcheck disable=SC2086
+  "$py" - "$cfg" "$HF_MCP_URL" $HF_DENY <<'PYJSON'
+import json, os, sys
+cfg, url, deny = sys.argv[1], sys.argv[2], sys.argv[3:]
+entry = {"url": url, "type": "http", "headers": {"Authorization": "Bearer ${HF_TOKEN}"}, "excludeTools": deny}
+doc = (json.dumps({"mcpServers": {"huggingface": entry}}, indent=2) + "\n").encode()
+try:
+    os.makedirs(os.path.dirname(cfg), exist_ok=True)
+except OSError:  # e.g. a file or dangling link named .gemini: there is no settings.json to report
+    sys.exit(1)
+try:
+    # O_EXCL: refuses any existing name, a symlink included, so nothing is ever overwritten.
+    fd = os.open(cfg, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+except FileExistsError:
+    snippet = '"huggingface": ' + json.dumps(entry, indent=2)
+    print(f"gemini: {cfg} already exists and was left unchanged. To finish, add this entry inside its "
+          f'top-level "mcpServers" object (create "mcpServers": {{ }} if it has none), then rerun:\n{snippet}')
+    sys.exit(4)
+except OSError:
+    sys.exit(1)
+try:
+    try:
+        done = 0
+        while done < len(doc):  # os.write may take only part, as on a disk that is filling up
+            n = os.write(fd, doc[done:])
+            if n <= 0:
+                raise OSError("settings.json: write made no progress")
+            done += n
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+except OSError:
+    # The file is this run's own, half written: remove it, so neither Gemini nor the next run reads a
+    # broken settings.json as the user's own.
+    try:
+        os.unlink(cfg)
+    except OSError:
+        print(f"gemini: could not remove the partly written {cfg}; delete it, then rerun", file=sys.stderr)
+    sys.exit(1)
+PYJSON
+}
 register_hf_mcp() {
   local state
   if { [ "$SKIP_CODEX" = 0 ] && have codex; } || { [ "$SKIP_GEMINI" = 0 ] && have gemini; } || { [ "$CLAUDE_HF_MCP" = 1 ] && [ "$SKIP_CLAUDE" = 0 ] && have claude; }; then
@@ -394,13 +445,13 @@ register_hf_mcp() {
     if [ "$state" = 0 ]; then
       log "gemini: compatible user huggingface MCP server already configured; left as is"
     elif [ "$state" = 3 ]; then
-      # Options follow positionals; --exclude-tools consumes multiple values. Never echo CLI errors:
-      # they may contain interpolated configuration credentials.
-      # shellcheck disable=SC2016,SC2086
-      if gemini mcp add -s user -t http huggingface "$HF_MCP_URL" -H 'Authorization: Bearer ${HF_TOKEN}' --exclude-tools $HF_DENY >/dev/null 2>&1 && check_client_hf gemini; then
-        log "gemini: added the user huggingface MCP server"
+      add_gemini_hf; state=$?
+      if [ "$state" = 0 ] && check_client_hf gemini; then
+        log "gemini: created user settings with the huggingface MCP server"
+      elif [ "$state" = 4 ]; then
+        warn "gemini: user settings exist; huggingface entry not added (manual step above)"; failed hf-mcp-gemini
       else
-        warn "gemini: Hugging Face MCP registration failed; check user settings"; failed hf-mcp-gemini
+        warn "gemini: could not create user settings"; failed hf-mcp-gemini
       fi
     else
       warn "gemini: user settings need manual review (commented/unsupported JSON, incompatible URL or missing blocked tools); left unchanged"; failed hf-mcp-gemini
@@ -486,9 +537,10 @@ the terminal's echo off, and it lasts for that shell only.
            check:  hf auth whoami     (HF_TOKEN in the environment overrides the stored login)
   HF MCP   codex   codex mcp login huggingface   (over SSH: ssh -t, add --no-browser, open the URL on
                    any machine, paste the redirect URL back)
-           gemini  sends $HF_TOKEN as its bearer token. Set it before starting Gemini.
-                   Set the token at a hidden prompt in your terminal, then start Gemini:
-                   printf 'HF token: '; read -rs HF_TOKEN; echo; export HF_TOKEN; gemini
+           gemini  sends $HF_TOKEN as its bearer token. Give it to one Gemini run, from a hidden prompt:
+                   printf 'HF token: '; read -rs t; echo; HF_TOKEN="$t" gemini; unset t
+                   Never run `gemini mcp add` or `gemini mcp remove` with HF_TOKEN set: they save
+                   every ${VAR} in its settings file as the value, this token included.
                    Gemini loads MCP servers only in folders it trusts (it asks on the first run there).
            claude  the account's Hugging Face connector comes with the claude.ai login (/mcp lists it).
                    Signed in with setup-token or an API key? Rerun this script with --with-claude-hf-mcp,

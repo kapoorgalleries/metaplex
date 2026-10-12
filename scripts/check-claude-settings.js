@@ -357,6 +357,45 @@ function checkMatcher(matcher, event, at, fail) {
   }
 }
 
+// Where `real`, a resolved script path, sits relative to `hooksDir`, the
+// resolved project root joined with .claude/hooks: 'self', 'inside' or
+// 'outside'. checkPathToken first compares the two as text, which can fail
+// for a script that really is in the hooks directory. On macOS and Windows,
+// whose default file systems ignore case (and on macOS, Unicode
+// normalization), a symlink's target may spell part of the path, or the
+// root, differently from the root the checker was given: fs.realpathSync
+// (the JavaScript one) keeps the text it is given and copies symlink
+// targets verbatim. So before rejecting, this asks the operating system for
+// both paths' canonical spelling with fs.realpathSync.native (realpath(3)
+// on macOS returns each component's on-disk name; GetFinalPathNameByHandleW
+// does the same on Windows) and compares those as text. Linux's realpath
+// keeps the spelling it is given, so there this gives the text comparison's
+// answer. Neither .claude nor hooks may be a symlink, so a hooks directory
+// that points somewhere else is still rejected, as the text comparison
+// rejects it. Device and inode numbers are not used: some FUSE and overlay
+// mounts give two different directories the same pair.
+const fsIo = {
+  lstat: (p) => fs.lstatSync(p),
+  realpath: (p) => fs.realpathSync.native(p),
+};
+function locateInHooksDir(real, hooksDir, io = fsIo) {
+  let canonReal;
+  let canonHooks;
+  try {
+    // lstat does not follow a symlink, so a symlinked .claude or hooks is
+    // not a directory here.
+    for (const dir of [path.dirname(hooksDir), hooksDir]) {
+      if (!io.lstat(dir).isDirectory()) return 'outside';
+    }
+    canonHooks = io.realpath(hooksDir);
+    canonReal = io.realpath(real);
+  } catch (e) {
+    return 'outside';
+  }
+  if (canonReal === canonHooks) return 'self';
+  return canonReal.startsWith(canonHooks + path.sep) ? 'inside' : 'outside';
+}
+
 // One exec-form token: the command, or an element of args. Returns true when
 // the token referenced a path placeholder, whether or not it was valid. The
 // project placeholder is the braced form the hooks reference defines; the
@@ -400,11 +439,13 @@ function checkPathToken(token, root, at, fail) {
     fail(`${at}: ${rel} does not exist`);
     return true;
   }
-  if (real === hooksRoot.slice(0, -1)) {
+  let where = real === hooksRoot.slice(0, -1) ? 'self' : real.startsWith(hooksRoot) ? 'inside' : 'outside';
+  if (where === 'outside') where = locateInHooksDir(real, hooksRoot.slice(0, -1));
+  if (where === 'self') {
     fail(`${at} names the hooks directory, not a script: ${JSON.stringify(token)}`);
     return true;
   }
-  if (!real.startsWith(hooksRoot)) {
+  if (where === 'outside') {
     fail(`${at}: ${rel} resolves outside ${HOOKS_DIR}`);
     return true;
   }
@@ -667,5 +708,5 @@ function main() {
 if (require.main === module) {
   main();
 } else {
-  module.exports = { parseStrict, checkSettings, MAX_DEPTH, HOOKS_DIR, HOOK_EVENTS, PERMISSION_KEYS, EVENT_HOOK_TYPES, INTERPRETERS, MCP_TOOL_HOOKS, HTTP_HOOK_URLS, checkTrackedFiles, trackedFiles };
+  module.exports = { parseStrict, checkSettings, locateInHooksDir, MAX_DEPTH, HOOKS_DIR, HOOK_EVENTS, PERMISSION_KEYS, EVENT_HOOK_TYPES, INTERPRETERS, MCP_TOOL_HOOKS, HTTP_HOOK_URLS, checkTrackedFiles, trackedFiles };
 }
