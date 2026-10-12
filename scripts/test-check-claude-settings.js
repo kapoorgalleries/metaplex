@@ -453,9 +453,10 @@ if (haveSymlink) {
 }
 
 // locateInHooksDir, against fake file systems. The canonical kind models
-// macOS and Windows: lookups ignore case and Unicode normalization, and
-// realpath returns the spelling stored on disk. The literal kind models
-// Linux: lookups are exact and realpath returns the path it is given.
+// macOS: lookups ignore case and Unicode normalization, and realpath returns
+// the spelling stored on disk (Windows does the same but ignores case only).
+// The literal kind models Linux: lookups are exact and realpath returns the
+// path it is given.
 // Entries are [path, kind] with kind 'dir', 'file' or 'symlink'.
 function fakeIo(entries, canonical = true) {
   const key = canonical ? (p) => p.normalize('NFC').toLowerCase() : (p) => p;
@@ -493,8 +494,8 @@ locate('.claude/hooks as a symlink is outside', at('.claude', 'hooks', 'x.js'), 
 locate('.claude/hooks as a file is outside', at('.claude', 'hooks', 'x.js'), 'outside', replace(at('.Claude', 'Hooks'), 'file'));
 locate('no .claude/hooks directory is outside', at('.claude', 'hooks', 'x.js'), 'outside', onDisk.filter((e) => e[0] !== at('.Claude', 'Hooks')));
 check('locateInHooksDir: a root spelled in another Unicode normalization is inside', () => {
-  const nfc = path.resolve(path.sep, 'café');
-  const nfd = path.resolve(path.sep, 'café');
+  const nfc = path.resolve(path.sep, 'caf\u00e9');
+  const nfd = path.resolve(path.sep, 'cafe\u0301');
   const hooks = path.join(nfc, '.claude', 'hooks');
   const io = fakeIo([[path.parse(nfd).root, 'dir'], [nfd, 'dir'], [path.join(nfd, '.claude'), 'dir'],
     [path.join(nfd, '.claude', 'hooks'), 'dir'], [path.join(nfd, '.claude', 'hooks', 'x.js'), 'file']]);
@@ -524,36 +525,40 @@ const onDiskNames = caseInsensitive && path.basename(fs.realpathSync.native(path
 const b = path.join(caseBase, 'b');
 const c = path.join(caseBase, 'c');
 const d = path.join(caseBase, 'd');
+const D = path.join(caseBase, 'D');
 let caseLinks = false;
 if (caseInsensitive) {
-  try {
-    // b: the hooks directory is .Claude/Hooks on disk, and x.js is an
-    // absolute symlink that spells it that way.
-    fs.mkdirSync(path.join(b, '.Claude', 'Hooks'), { recursive: true });
-    write(path.join(b, '.Claude', 'Hooks', 'real.js'), 'process.exit(0);\n');
-    write(path.join(b, '.Claude', 'Hooks', 'plain.js'), 'process.exit(0);\n');
-    fs.symlinkSync(path.join(b, '.Claude', 'Hooks', 'real.js'), path.join(b, '.Claude', 'Hooks', 'x.js'));
-    fs.symlinkSync(path.join(outside, 'evil.js'), path.join(b, '.Claude', 'Hooks', 'escape.js'));
-    // c: .Claude is a symlink to a directory inside the repository.
-    fs.mkdirSync(path.join(c, 'claude-real', 'hooks'), { recursive: true });
-    write(path.join(c, 'claude-real', 'hooks', 'ok.js'), 'process.exit(0);\n');
-    fs.symlinkSync('claude-real', path.join(c, '.Claude'), 'dir');
-    // d: lowercase on disk, with absolute symlinks to a script and to the
-    // hooks directory; the root is passed as D, as when the checker runs
-    // from a directory typed that way.
-    fs.mkdirSync(path.join(d, '.claude', 'hooks'), { recursive: true });
-    write(path.join(d, '.claude', 'hooks', 'real.js'), 'process.exit(0);\n');
-    fs.symlinkSync(path.join(d, '.claude', 'hooks', 'real.js'), path.join(d, '.claude', 'hooks', 'x.js'));
-    fs.symlinkSync(path.join(d, '.CLAUDE', 'HOOKS'), path.join(d, '.claude', 'hooks', 'up'), 'dir');
-    caseLinks = true;
-  } catch (e) {
-    caseLinks = false;
-  }
-}
-if (caseLinks) {
-  const D = path.join(caseBase, 'D');
+  // b: the hooks directory is .Claude/Hooks on disk. c: .Claude is a
+  // symlink to a directory inside the repository. d: lowercase on disk; the
+  // root is passed as D, as when the checker runs from a directory typed
+  // that way.
+  fs.mkdirSync(path.join(b, '.Claude', 'Hooks'), { recursive: true });
+  write(path.join(b, '.Claude', 'Hooks', 'real.js'), 'process.exit(0);\n');
+  write(path.join(b, '.Claude', 'Hooks', 'plain.js'), 'process.exit(0);\n');
+  fs.mkdirSync(path.join(c, 'claude-real', 'hooks'), { recursive: true });
+  write(path.join(c, 'claude-real', 'hooks', 'ok.js'), 'process.exit(0);\n');
+  fs.mkdirSync(path.join(d, '.claude', 'hooks'), { recursive: true });
+  write(path.join(d, '.claude', 'hooks', 'real.js'), 'process.exit(0);\n');
   clean('case-insensitive: a plain script in .Claude/Hooks on disk', cmd(['${CLAUDE_PROJECT_DIR}/.claude/hooks/plain.js']), b);
   clean('case-insensitive: the root in another case, a plain script', cmd(['${CLAUDE_PROJECT_DIR}/.claude/hooks/real.js']), D);
+  try {
+    // Absolute symlinks that spell the path the other way, one pointing
+    // outside, and directory links (junctions on Windows, which need no
+    // privilege and take absolute targets).
+    const dirType = process.platform === 'win32' ? 'junction' : 'dir';
+    fs.symlinkSync(path.join(b, '.Claude', 'Hooks', 'real.js'), path.join(b, '.Claude', 'Hooks', 'x.js'));
+    fs.symlinkSync(path.join(outside, 'evil.js'), path.join(b, '.Claude', 'Hooks', 'escape.js'));
+    fs.symlinkSync(path.join(c, 'claude-real'), path.join(c, '.Claude'), dirType);
+    fs.symlinkSync(path.join(d, '.claude', 'hooks', 'real.js'), path.join(d, '.claude', 'hooks', 'x.js'));
+    fs.symlinkSync(path.join(d, '.CLAUDE', 'HOOKS'), path.join(d, '.claude', 'hooks', 'up'), dirType);
+    caseLinks = true;
+  } catch (e) {
+    console.log(`skip case-insensitive symlink tests (cannot create symlinks in ${caseBase}: ${e.code || e.message})`);
+  }
+} else {
+  console.log(`skip case-insensitive tests (${caseBase} is case-sensitive)`);
+}
+if (caseLinks) {
   flags('case-insensitive: a symlink that points outside is still flagged', cmd(['${CLAUDE_PROJECT_DIR}/.claude/hooks/escape.js']), b, /escape\.js resolves outside \.claude\/hooks\//);
   flags('case-insensitive: a symlinked .Claude is still flagged', cmd([OK]), c, /ok\.js resolves outside \.claude\/hooks\//);
   if (onDiskNames) {
@@ -564,8 +569,6 @@ if (caseLinks) {
     flags('case-insensitive, spellings kept: a symlink spelling .Claude/Hooks keeps the old answer', cmd(['${CLAUDE_PROJECT_DIR}/.claude/hooks/x.js']), b, /x\.js resolves outside \.claude\/hooks\//);
     console.log(`skip on-disk-name tests (fs.realpathSync.native keeps spellings in ${caseBase})`);
   }
-} else {
-  console.log(`skip case-insensitive tests (${caseInsensitive ? `cannot create symlinks in ${caseBase}` : `${caseBase} is case-sensitive`})`);
 }
 
 // ---------------------------------------------------------- the CLI itself

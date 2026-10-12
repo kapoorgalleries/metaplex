@@ -311,19 +311,19 @@ function checkMatcher(matcher, event, at, fail) {
 // resolved project root joined with .claude/hooks: 'self', 'inside' or
 // 'outside'. checkPathToken first compares the two as text, which can fail
 // for a script that really is in the hooks directory. On macOS and Windows,
-// whose default file systems ignore case, a symlink's target may spell part
-// of the path, or the root, in another case or Unicode normalization than
-// the root the checker was given: fs.realpathSync (the JavaScript one) keeps
-// the text it is given and copies symlink targets verbatim. So before
-// rejecting, this asks the operating system for both paths' canonical
-// spelling with fs.realpathSync.native (realpath(3) on macOS returns each
-// component's on-disk name; GetFinalPathNameByHandleW does the same on
-// Windows) and compares those as text. Linux's realpath keeps the spelling
-// it is given, so there this gives the text comparison's answer. Neither
-// .claude nor hooks may be a symlink, so a hooks directory that points
-// somewhere else is still rejected, as the text comparison rejects it.
-// Device and inode numbers are not used: some FUSE and overlay mounts give
-// two different directories the same pair.
+// whose default file systems ignore case (and on macOS, Unicode
+// normalization), a symlink's target may spell part of the path, or the
+// root, differently from the root the checker was given: fs.realpathSync
+// (the JavaScript one) keeps the text it is given and copies symlink
+// targets verbatim. So before rejecting, this asks the operating system for
+// both paths' canonical spelling with fs.realpathSync.native (realpath(3)
+// on macOS returns each component's on-disk name; GetFinalPathNameByHandleW
+// does the same on Windows) and compares those as text. Linux's realpath
+// keeps the spelling it is given, so there this gives the text comparison's
+// answer. Neither .claude nor hooks may be a symlink, so a hooks directory
+// that points somewhere else is still rejected, as the text comparison
+// rejects it. Device and inode numbers are not used: some FUSE and overlay
+// mounts give two different directories the same pair.
 const fsIo = {
   lstat: (p) => fs.lstatSync(p),
   realpath: (p) => fs.realpathSync.native(p),
