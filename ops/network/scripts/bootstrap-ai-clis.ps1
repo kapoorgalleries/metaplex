@@ -198,6 +198,8 @@ $jsonString = '"(?:[^"\\\x00-\x1f]|\\(?:["\\/bfnrt]|u[0-9A-Fa-f]{4}))*"'
 $jsonScalar = '-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?|true|false|null'
 $jsonToken = [regex]($jsonString + '|' + $jsonScalar + '|[{}\[\],:]')
 $jsonMember = [regex]('(' + $jsonString + ')([ \t\r\n]*:)?|[{}]')
+$jsonEscape = [regex]'\\(?:u([0-9A-Fa-f]{4})|(["\\/bfnrt]))'
+$jsonUnescape = [Text.RegularExpressions.MatchEvaluator]{ param($e) if ($e.Groups[1].Success) { [string][char][Convert]::ToInt32($e.Groups[1].Value, 16) } else { switch -CaseSensitive ($e.Groups[2].Value) { 'b' { "`b" } 'f' { "`f" } 'n' { "`n" } 'r' { "`r" } 't' { "`t" } default { $e.Groups[2].Value } } } }
 $jsonString = [regex]$jsonString
 $jsonScalar = [regex]$jsonScalar
 $jsonWs = [regex]'[ \t\r\n]+'
@@ -221,7 +223,9 @@ function Test-UniqueKeys([string]$T) {
     elseif ($v -ceq '}') { [void]$open.Pop() }
     elseif ($m.Groups[2].Success) {
       $k = $m.Groups[1].Value
-      $k = if ($k.IndexOf([char]92) -ge 0) { ConvertFrom-Json $k } else { $k.Substring(1, $k.Length - 2) }
+      $k = $k.Substring(1, $k.Length - 2)
+      # Escapes are decoded by hand: Windows PowerShell's ConvertFrom-Json turns "\/Date(n)\/" into a DateTime.
+      if ($k.IndexOf([char]92) -ge 0) { $k = $jsonEscape.Replace($k, $jsonUnescape) }
       if (-not $open.Peek().Add($k)) { return $false }
     }
   }
@@ -269,7 +273,7 @@ function Get-HfClientState([string]$Client) {
 # Never `gemini mcp add` (or `remove`): Gemini 0.61 writes back the whole mcpServers map as loaded,
 # with every ${VAR} already expanded, so another server's secret would be saved in the clear.
 # Parity with add_gemini_hf in bootstrap-ai-clis.sh: same bytes, same return codes.
-# 0 created; 4 nothing written, snippet printed (settings.json exists, or PowerShell 7); 1 could not create.
+# 0 created; 4 nothing written, snippet printed (settings.json exists, or not Windows PowerShell 5.1); 1 could not create.
 function Add-GeminiHf {
   $geminiDir = if ($env:GEMINI_CLI_HOME) { $env:GEMINI_CLI_HOME } else { $env:USERPROFILE }
   $dir = Join-Path $geminiDir '.gemini'
@@ -280,12 +284,13 @@ function Add-GeminiHf {
   $entry = @('{', ('  "url": "' + $hfUrl + '",'), '  "type": "http",', '  "headers": {',
     '    "Authorization": "Bearer ${HF_TOKEN}"', '  },', '  "excludeTools": [') + $tools + @('  ]', '}')
   $doc = (@('{', '  "mcpServers": {', ('    "huggingface": ' + $entry[0])) + @($entry[1..($entry.Count - 1)] | ForEach-Object { '    ' + $_ }) + @('  }', '}')) -join "`n"
-  # Creation is verified on Windows PowerShell 5.1 (and Linux in the .sh). On PowerShell 7 the entry
-  # is printed for a manual setup until a native smoke test verifies this path.
-  if ($PSVersionTable.PSEdition -ceq 'Core') {
+  # Creation is verified on Windows PowerShell 5.1 (and Linux in the .sh) only. Anywhere else (PowerShell 7,
+  # or an older PowerShell without PSEdition) the entry is printed for a manual setup.
+  if ($PSVersionTable.PSEdition -cne 'Desktop') {
     Write-Host ('gemini: automatic setup is verified on Linux and Windows PowerShell 5.1 only; nothing was written. ' +
-      'To finish, add this entry inside the top-level "mcpServers" object of ' + $cfg + ' (create the file, ' +
-      'readable only by you, if it does not exist), then rerun:')
+      'To finish, add this entry inside the top-level "mcpServers" object of ' + $cfg + ' (create "mcpServers": { } ' +
+      'if it has none; if the file does not exist, create it, readable only by you, as {"mcpServers": { }} ' +
+      'with the entry inside), then rerun:')
     Write-Host ('"huggingface": ' + ($entry -join "`n"))
     return 4
   }
@@ -428,7 +433,7 @@ if (-not $SkipHf) {
       if ($rc -eq 0 -and (Get-HfClientState 'gemini') -eq 0) { Log 'gemini: created user settings with the huggingface MCP server' }
       elseif ($rc -eq 4) { Add-Failure 'hf-mcp-gemini' 'gemini: huggingface entry not added (manual step above)' }
       else { Add-Failure 'hf-mcp-gemini' 'gemini: could not create user settings' }
-    } else { Add-Failure 'hf-mcp-gemini' 'gemini: user settings need manual review (commented/unsupported JSON, incompatible URL or missing blocked tools); left unchanged' }
+    } else { Add-Failure 'hf-mcp-gemini' 'gemini: user settings need manual review (commented/unsupported JSON, a repeated key, an incompatible URL or missing blocked tools); left unchanged' }
   }
   if ($WithClaudeHfMcp -and -not $SkipClaude -and (Have 'claude')) {
     $state = Get-HfClientState 'claude'

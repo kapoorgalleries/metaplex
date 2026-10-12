@@ -255,7 +255,9 @@ failed() { FAILED="$FAILED $1"; }
                         '{"mcpServers": {"huggingface": ' + bad + ', "huggingface": ' + g + '}}',
                         '{"mcpServers": {"huggingface": ' + bad + ', ' + hf_escaped + ': ' + g + '}}',
                         '{"mcpServers": {"huggingface": {"url": "https://other.example/mcp", ' + g[1:] + '}}',
-                        '{"mcpServers": {"huggingface": ' + g + '}, "theme": {"a": [{"b": 1, "b": 2}]}}']
+                        '{"mcpServers": {"huggingface": ' + g + '}, "theme": {"a": [{"b": 1, "b": 2}]}}',
+                        # "\\/" is the JSON escape for "/": Windows PowerShell's ConvertFrom-Json reads "\\/Date(n)\\/" as a date.
+                        '{"mcpServers": {"huggingface": ' + g + '}, "x": {"\\/Date(1)\\/": 1, "/Date(1)/": 2}}']
             for content in contents:
                 with self.subTest(client=client, content=content):
                     p = self.write(rel, content)
@@ -273,13 +275,14 @@ failed() { FAILED="$FAILED $1"; }
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertIn('left as is', result.stdout)
 
-    def test_macos_is_manual_only_and_nothing_is_written(self):
-        for existing in [None, '{"theme": "light"}\n']:
-            with self.subTest(existing=existing):
+    def test_non_linux_is_manual_only_and_nothing_is_written(self):
+        # Creation is verified on Linux only: macOS and every other uname -s (BSD, Git Bash, Cygwin) print the entry.
+        for os_name, existing in [('Darwin', None), ('Darwin', '{"theme": "light"}\n'), ('FreeBSD', None), ('MINGW64_NT-10.0', None)]:
+            with self.subTest(os=os_name, existing=existing):
                 shutil.rmtree(self.root / '.gemini', ignore_errors=True)
                 if existing:
                     p = self.write('.gemini/settings.json', existing)
-                result = self.run_registration('gemini', 'OS=Darwin')
+                result = self.run_registration('gemini', 'OS=' + os_name)
                 self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
                 self.assertIn('verified on Linux and Windows PowerShell 5.1 only; nothing was written', result.stdout)
                 self.assertIn('INSTALL INCOMPLETE: hf-mcp-gemini', result.stdout)
@@ -292,6 +295,13 @@ failed() { FAILED="$FAILED $1"; }
                 i = next(k for k, line in enumerate(out) if line.startswith('"huggingface": {'))
                 j = next(k for k in range(i, len(out)) if out[k] == '}')
                 self.assertEqual(json.loads('{' + '\n'.join(out[i:j + 1]) + '}')['huggingface'], self.ENTRY)
+
+    def test_absurdly_deep_settings_go_to_manual_review_without_a_traceback(self):
+        self.write('.gemini/settings.json', '{"a": ' + '[' * 100000 + ']' * 100000 + '}')
+        result = self.run_registration('gemini')
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn('manual review', result.stdout)
+        self.assertNotIn('Traceback', result.stdout + result.stderr)
 
     def test_settings_file_created_meanwhile_is_not_overwritten(self):
         # Another program creates settings.json between the check and the create.

@@ -387,18 +387,18 @@ try:
     gemini_url = s.get("httpUrl") if "httpUrl" in s else (s.get("url") if s.get("type") == "http" else None)
     valid = (s.get("url") in urls and s.get("type") == "http") if sys.argv[2] == "claude" else (gemini_url in urls and required.issubset(s.get("excludeTools") or []))
     sys.exit(0 if valid else 1)
-except (ValueError, OSError, TypeError, AttributeError):
+except (ValueError, OSError, TypeError, AttributeError, RecursionError):  # RecursionError: absurdly deep nesting
     sys.exit(1)
 PYJSON
 }
-add_gemini_hf() {  # 0 created; 4 nothing written, snippet printed (settings.json exists, or macOS); 1 could not create
+add_gemini_hf() {  # 0 created; 4 nothing written, snippet printed (settings.json exists, or not Linux); 1 could not create
   # Gemini's settings.json is only ever created, never edited: an existing file (which may hold other
   # servers' settings) is left byte-for-byte as it is and the entry is printed for a manual paste.
   # Never `gemini mcp add`/`remove`: they write every ${VAR} in mcpServers back expanded.
   local py manual=0 cfg="${GEMINI_CLI_HOME:-$HOME}/.gemini/settings.json"
-  # Creation is verified on Linux (and Windows PowerShell 5.1 in the .ps1). On macOS the entry is
-  # printed for a manual setup until a native smoke test verifies this path.
-  [ "$OS" != Darwin ] || manual=1
+  # Creation is verified on Linux (and Windows PowerShell 5.1 in the .ps1) only. Anywhere else (macOS,
+  # BSD, Git Bash, Cygwin) the entry is printed for a manual setup until a native smoke test verifies it.
+  [ "$OS" = Linux ] || manual=1
   py="$(json_python)" || return 1
   # shellcheck disable=SC2086
   "$py" - "$cfg" "$HF_MCP_URL" "$manual" $HF_DENY <<'PYJSON'
@@ -409,8 +409,9 @@ doc = (json.dumps({"mcpServers": {"huggingface": entry}}, indent=2) + "\n").enco
 snippet = '"huggingface": ' + json.dumps(entry, indent=2)
 if manual:
     print("gemini: automatic setup is verified on Linux and Windows PowerShell 5.1 only; nothing was written. "
-          f'To finish, add this entry inside the top-level "mcpServers" object of {cfg} (create the file, '
-          f"readable only by you, if it does not exist), then rerun:\n{snippet}")
+          f'To finish, add this entry inside the top-level "mcpServers" object of {cfg} (create "mcpServers": {{ }} '
+          f'if it has none; if the file does not exist, create it, readable only by you, as {{"mcpServers": {{ }}}} '
+          f"with the entry inside), then rerun:\n{snippet}")
     sys.exit(4)
 try:
     os.makedirs(os.path.dirname(cfg), exist_ok=True)
@@ -466,7 +467,7 @@ register_hf_mcp() {
         warn "gemini: could not create user settings"; failed hf-mcp-gemini
       fi
     else
-      warn "gemini: user settings need manual review (commented/unsupported JSON, incompatible URL or missing blocked tools); left unchanged"; failed hf-mcp-gemini
+      warn "gemini: user settings need manual review (commented/unsupported JSON, a repeated key, an incompatible URL or missing blocked tools); left unchanged"; failed hf-mcp-gemini
     fi
   fi
   if [ "$CLAUDE_HF_MCP" = 1 ] && [ "$SKIP_CLAUDE" = 0 ] && have claude; then
