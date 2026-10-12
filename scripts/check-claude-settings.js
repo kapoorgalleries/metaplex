@@ -96,6 +96,14 @@ const HOOK_TYPE_FIELDS = {
   agent: ['prompt', 'model'],
 };
 const HOOK_REQUIRED_STRINGS = { http: ['url'], mcp_tool: ['server', 'tool'], prompt: ['prompt'], agent: ['prompt'] };
+// An mcp_tool hook calls a tool on an MCP server configured somewhere else
+// (another settings file, .mcp.json, a plugin) with "input" written in this
+// file. A tool that can run commands, write files or send data would let a
+// hook do that from inline input that no reviewed script holds, which is
+// what the command-hook rules forbid. So only the server/tool pairs listed
+// here are accepted, matched exactly. Add a pair only after confirming the
+// tool can do none of those things, whatever its input.
+const MCP_TOOL_HOOKS = [];
 // What this file holds at the top level. Anything within two edits of one
 // of these names is a misspelling that would silently drop the whole block.
 const TOP_LEVEL_KEYS_HERE = ['permissions', 'hooks'];
@@ -423,7 +431,7 @@ function checkCommandHook(hook, root, at, fail) {
   if (hasOwn(hook, 'shell')) fail(`${at}.shell has no effect in exec form`);
 }
 
-function checkHook(hook, event, root, at, fail) {
+function checkHook(hook, event, root, at, fail, mcpToolHooks) {
   if (!isPlainObject(hook)) return fail(`${at} must be an object`);
   if (!HOOK_TYPES.includes(hook.type)) return fail(`${at}.type must be one of ${HOOK_TYPES.map((t) => `"${t}"`).join(', ')}`);
   checkUnknownKeys(hook, [...HOOK_COMMON_FIELDS, ...HOOK_TYPE_FIELDS[hook.type]], at, `a ${hook.type} hook field`, fail);
@@ -447,9 +455,13 @@ function checkHook(hook, event, root, at, fail) {
   for (const k of HOOK_REQUIRED_STRINGS[hook.type]) {
     if (!isNonEmptyString(hook[k])) fail(`${at}.${k} must be a non-empty string for a ${hook.type} hook`);
   }
+  if (hook.type === 'mcp_tool' && isNonEmptyString(hook.server) && isNonEmptyString(hook.tool)
+    && !mcpToolHooks.some((p) => p.server === hook.server && p.tool === hook.tool)) {
+    fail(`${at}: mcp_tool hook ${JSON.stringify(`${hook.server}/${hook.tool}`)} is not in MCP_TOOL_HOOKS in scripts/check-claude-settings.js. Its input is written in this file and the tool runs outside any reviewed script, so add the pair there only after confirming the tool cannot run commands, write files or send data, whatever its input`);
+  }
 }
 
-function checkHooks(hooks, root, fail) {
+function checkHooks(hooks, root, fail, mcpToolHooks) {
   if (hooks === undefined) return;
   if (!isPlainObject(hooks)) return fail('"hooks" must be an object');
   for (const event of Object.keys(hooks)) {
@@ -469,14 +481,15 @@ function checkHooks(hooks, root, fail) {
       if (hasOwn(entry, 'matcher')) checkMatcher(entry.matcher, event, at, fail);
       if (!Array.isArray(entry.hooks)) return fail(`${at}.hooks must be an array`);
       if (entry.hooks.length === 0) fail(`${at}.hooks is empty`);
-      entry.hooks.forEach((hook, m) => checkHook(hook, event, root, `${at}.hooks[${m}]`, fail));
+      entry.hooks.forEach((hook, m) => checkHook(hook, event, root, `${at}.hooks[${m}]`, fail, mcpToolHooks));
     });
   }
 }
 
 // Returns the list of problems with a parsed settings object. `root` is the
-// repository root that ${CLAUDE_PROJECT_DIR} stands for.
-function checkSettings(settings, root) {
+// repository root that ${CLAUDE_PROJECT_DIR} stands for; `mcpToolHooks`
+// replaces MCP_TOOL_HOOKS (the tests use it).
+function checkSettings(settings, root, { mcpToolHooks = MCP_TOOL_HOOKS } = {}) {
   const problems = [];
   const fail = (msg) => problems.push(msg);
   if (!isPlainObject(settings)) {
@@ -485,7 +498,7 @@ function checkSettings(settings, root) {
   }
   checkTopLevel(settings, fail);
   checkPermissions(settings.permissions, fail);
-  checkHooks(settings.hooks, root, fail);
+  checkHooks(settings.hooks, root, fail, mcpToolHooks);
   return problems;
 }
 
@@ -532,5 +545,5 @@ function main() {
 if (require.main === module) {
   main();
 } else {
-  module.exports = { parseStrict, checkSettings, MAX_DEPTH, HOOKS_DIR, HOOK_EVENTS, PERMISSION_KEYS, EVENT_HOOK_TYPES, INTERPRETERS };
+  module.exports = { parseStrict, checkSettings, MAX_DEPTH, HOOKS_DIR, HOOK_EVENTS, PERMISSION_KEYS, EVENT_HOOK_TYPES, INTERPRETERS, MCP_TOOL_HOOKS };
 }

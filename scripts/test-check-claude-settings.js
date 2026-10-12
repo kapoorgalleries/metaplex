@@ -23,7 +23,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { spawnSync } = require('child_process');
-const { parseStrict, checkSettings, MAX_DEPTH, HOOK_EVENTS, PERMISSION_KEYS, EVENT_HOOK_TYPES, INTERPRETERS } = require('./check-claude-settings.js');
+const { parseStrict, checkSettings, MAX_DEPTH, HOOK_EVENTS, PERMISSION_KEYS, EVENT_HOOK_TYPES, INTERPRETERS, MCP_TOOL_HOOKS } = require('./check-claude-settings.js');
 
 let failures = 0;
 const check = (name, fn) => {
@@ -152,6 +152,9 @@ check('EVENT_HOOK_TYPES equals the documented map', () => {
 check('PERMISSION_KEYS equals the documented list', () => assert.deepStrictEqual([...PERMISSION_KEYS].sort(), [...DOCUMENTED_PERMISSION_KEYS].sort()));
 const ALLOWED_INTERPRETERS = ['node', 'python3', 'bash', 'sh', 'pwsh'];
 check('INTERPRETERS is exactly node, python3, bash, sh, pwsh', () => assert.deepStrictEqual([...INTERPRETERS].sort(), [...ALLOWED_INTERPRETERS].sort()));
+// Each entry is a reviewed decision that the tool cannot run commands, write
+// files or send data; none has been made, so the list is empty.
+check('MCP_TOOL_HOOKS is empty', () => assert.deepStrictEqual(MCP_TOOL_HOOKS, []));
 
 // Throwaway repositories. `repo` has hooks that exist, parse, don't parse,
 // have a space in the name, or are a directory; a script outside
@@ -214,12 +217,16 @@ const cmd = (args, fields = {}) => ({
 // A settings object with one group on `event` holding `hookObj`.
 const entry = (hookObj, groupFields = {}, event = 'PreToolUse') => ({ ...P, hooks: { [event]: [{ matcher: 'Bash', hooks: [hookObj], ...groupFields }] } });
 const prompt = { type: 'prompt', prompt: 'ok' };
+// The shared cases run with these two mcp_tool pairs allowed, so that every
+// other rule can be tested on mcp_tool hooks; the allowlist itself is tested
+// separately against the real, empty MCP_TOOL_HOOKS.
+const TEST_OPTIONS = { mcpToolHooks: [{ server: 's', tool: 't' }, { server: 'memory', tool: 'store' }] };
 const clean = (name, settings, root = repo) =>
-  check(name, () => assert.deepStrictEqual(checkSettings(settings, root), []));
+  check(name, () => assert.deepStrictEqual(checkSettings(settings, root, TEST_OPTIONS), []));
 const flags = (name, settings, ...patterns) =>
   check(name, () => {
     const root = typeof patterns[0] === 'string' ? patterns.shift() : repo;
-    const problems = checkSettings(settings, root);
+    const problems = checkSettings(settings, root, TEST_OPTIONS);
     for (const p of patterns) {
       assert.ok(problems.some((m) => p.test(m)), `expected a problem matching ${p}; got ${JSON.stringify(problems)}`);
     }
@@ -342,6 +349,27 @@ flags('continueOnBlock must be boolean', entry({ ...prompt, continueOnBlock: 'ye
 flags('agent hooks have no continueOnBlock', entry({ type: 'agent', prompt: 'ok', continueOnBlock: true }), /\.continueOnBlock is not a agent hook field/);
 flags('mcp_tool on Setup is skipped, with the reason', entry({ type: 'mcp_tool', server: 's', tool: 't' }, {}, 'Setup'), /Setup does not run mcp_tool hooks \(Setup fires before MCP servers are available\)/);
 clean('mcp_tool on SessionStart can run (after /clear or compaction)', { ...P, hooks: { SessionStart: [{ hooks: [{ type: 'mcp_tool', server: 's', tool: 't' }] }] } });
+// The mcp_tool allowlist: exact server/tool pairs only.
+const notListed = (server, tool) => new RegExp(`mcp_tool hook ${JSON.stringify(`${server}/${tool}`).replace(/[/]/g, '\\/')} is not in MCP_TOOL_HOOKS`);
+check('an mcp_tool hook is rejected by the real, empty MCP_TOOL_HOOKS', () => {
+  const problems = checkSettings(entry({ type: 'mcp_tool', server: 'memory', tool: 'store' }), repo);
+  assert.ok(problems.some((m) => notListed('memory', 'store').test(m) && /cannot run commands, write files or send data/.test(m)), JSON.stringify(problems));
+});
+check('the same tool name on another server is not allowed', () => {
+  assert.ok(checkSettings(entry({ type: 'mcp_tool', server: 'desktop-commander', tool: 'store' }), repo, TEST_OPTIONS).some((m) => notListed('desktop-commander', 'store').test(m)));
+});
+check('another tool on an allowed server is not allowed', () => {
+  assert.ok(checkSettings(entry({ type: 'mcp_tool', server: 'memory', tool: 'start_process' }), repo, TEST_OPTIONS).some((m) => notListed('memory', 'start_process').test(m)));
+});
+check('the match is exact (case and spacing)', () => {
+  for (const [server, tool] of [['Memory', 'store'], ['memory', 'Store'], ['memory ', 'store'], ['memory', 'store ']]) {
+    assert.ok(checkSettings(entry({ type: 'mcp_tool', server, tool }), repo, TEST_OPTIONS).some((m) => /is not in MCP_TOOL_HOOKS/.test(m)), `${server}/${tool}`);
+  }
+});
+check('a missing server or tool is reported once, not also as unlisted', () => {
+  const problems = checkSettings(entry({ type: 'mcp_tool', server: 'memory' }), repo);
+  assert.deepStrictEqual(problems.filter((m) => /MCP_TOOL_HOOKS/.test(m)), []);
+});
 clean('fractional timeout in seconds', cmd([OK], { timeout: 2.5 }));
 clean('if, statusMessage, async, asyncRewake on a tool event', cmd([OK], { if: 'Bash(git *)', statusMessage: 'checking', async: true, asyncRewake: false }));
 for (const event of TOOL_EVENTS) {
