@@ -9,17 +9,26 @@ PowerShell stub that writes it to %USERPROFILE%\trimurti-dc\<name> (UTF-8 with B
 PowerShell 5.1 needs for non-ASCII) and runs it with -File. The stub itself goes through
 -EncodedCommand, so nothing in the script is exposed to the outer shell's quoting or to the
 blocked-command list, which only looks at the command line. The result must stay under Windows'
-32767-character command-line limit; the packer refuses otherwise.
+32767-character command-line limit; the packer refuses otherwise. Each payload character costs
+about 2.7 command characters (UTF-16LE then base64), so the practical ceiling is ~8.5 KB of gzip,
+about 23 KB of .ps1 at the usual ratio. The stub prints Get-ExecutionPolicy -List first, so a
+Group Policy that ignores -ExecutionPolicy Bypass shows up in the same process output.
 """
-import argparse, base64, gzip, pathlib, sys
+import argparse, base64, gzip, pathlib, re, sys
 
 ap = argparse.ArgumentParser()
 ap.add_argument('script')
 ap.add_argument('--name', help='file name on the target (default: the script\'s own name)')
-ap.add_argument('--args', default='', help='arguments appended to the -File invocation')
+ap.add_argument('--args', default='', help='arguments appended to the -File invocation (letters, digits and . _ : = / \\ - only)')
 a = ap.parse_args()
+if not re.fullmatch(r'[A-Za-z0-9 ._:=/\\-]*', a.args):
+    sys.exit('--args may contain only letters, digits, space and . _ : = / \\ -')
 
-src = pathlib.Path(a.script).read_bytes()
+text = pathlib.Path(a.script).read_text(encoding='utf-8')
+# Comment-only lines and indentation are dropped from the travelling copy (the repo copy keeps them);
+# PowerShell needs neither, and the script has no here-strings that would care.
+lines = [l.strip() for l in text.splitlines() if l.strip() and not l.lstrip().startswith('#')]
+src = ('\n'.join(lines) + '\n').encode('utf-8')
 name = a.name or pathlib.Path(a.script).name
 payload = base64.b64encode(gzip.compress(src, 9)).decode()
 stub = (
@@ -31,6 +40,7 @@ stub = (
     "$gz=New-Object IO.Compression.GZipStream($ms,[IO.Compression.CompressionMode]::Decompress)\n"
     "$sr=New-Object IO.StreamReader($gz,[Text.Encoding]::UTF8)\n"
     "[IO.File]::WriteAllText($f,$sr.ReadToEnd(),(New-Object Text.UTF8Encoding $true)); $sr.Close()\n"
+    "Write-Output ('policy: ' + ((Get-ExecutionPolicy -List | ForEach-Object { $_.Scope.ToString() + '=' + $_.ExecutionPolicy }) -join ' '))\n"
     f"& powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $f {a.args}\n"
 )
 enc = base64.b64encode(stub.encode('utf-16-le')).decode()
