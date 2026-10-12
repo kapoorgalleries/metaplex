@@ -57,11 +57,11 @@ function Scrub([string]$s) {
   $s = $s -replace '(://[^/@\s:]+:)[^@\s]+@', '$1***@'
   $s -replace '(?i)\b(sk-[A-Za-z0-9_-]{10,}|ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|gho_[A-Za-z0-9]{20,}|hf_[A-Za-z0-9]{20,}|sbp_[A-Za-z0-9]{20,}|AIza[0-9A-Za-z_-]{30,}|xox[abprs]-[A-Za-z0-9-]+|AKIA[0-9A-Z]{16}|glpat-[\w-]{20,}|npm_[A-Za-z0-9]{30,}|ya29\.[\w.-]+|eyJ[\w-]{10,}\.[\w-]{10,}\.[\w-]{10,})\b', '***'
 }
-function Clip([string]$s, [int]$n = 220) { $s = Scrub $s; if ($s.Length -gt $n) { $s.Substring(0, $n) + ' …' } else { $s } }
+function Clip([string]$s, [int]$n = 220) { $s = Scrub $s; if ($s.Length -gt $n) { $s.Substring(0, $n) + ' ...' } else { $s } }
 function Lines($text, [int]$max = 14) {
   $ls = @(([string]$text) -split "`r?`n" | Where-Object { $_.Trim() -ne '' })
   foreach ($l in ($ls | Select-Object -First $max)) { W ('    ' + (Clip $l)) }
-  if ($ls.Count -gt $max) { W ("    … {0} more lines" -f ($ls.Count - $max)) }
+  if ($ls.Count -gt $max) { W ("    ... {0} more lines" -f ($ls.Count - $max)) }
 }
 # Run a command line through cmd.exe (so .cmd and .exe shims resolve as in a user's shell), stdin closed,
 # output to a file under the report folder, the whole tree killed when it outlives the timeout.
@@ -93,7 +93,7 @@ function Where1([string]$n) { $c = Get-Command $n -ErrorAction SilentlyContinue 
 function Plain($text) { ([string]$text) -replace '\x1b\[[0-9;?]*[A-Za-z]', '' }   # Git Bash colour codes
 function Tail($text, [int]$max = 25) {
   $ls = @((Plain $text) -split "`r?`n" | Where-Object { $_.Trim() -ne '' })
-  if ($ls.Count -gt $max) { W ("    … {0} earlier lines not shown" -f ($ls.Count - $max)) }
+  if ($ls.Count -gt $max) { W ("    ... {0} earlier lines not shown" -f ($ls.Count - $max)) }
   foreach ($l in ($ls | Select-Object -Last $max)) { W ('    ' + (Clip $l)) }
 }
 function Marks($text, [string]$pattern, [int]$max = 40) { @((Plain $text) -split "`r?`n" | Where-Object { $_ -match $pattern } | Select-Object -First $max | ForEach-Object { $_.Trim() }) }
