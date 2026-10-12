@@ -53,6 +53,30 @@ fn assert_auction_error(result: Result<(), TransportError>, expected: AuctionErr
     }
 }
 
+/// Reads the auction account back.
+async fn get_auction(banks_client: &mut BanksClient, auction_pubkey: &Pubkey) -> AuctionData {
+    try_from_slice_unchecked(
+        &banks_client
+            .get_account(*auction_pubkey)
+            .await
+            .expect("get_account")
+            .expect("account not found")
+            .data,
+    )
+    .unwrap()
+}
+
+/// Asserts that the auction has been ended with end_auction but the clock has not passed
+/// `ended_at`: the same second end_auction ran, where `ended(now)` is still false. Only the
+/// auction's state says it is over.
+async fn assert_ended_same_second(banks_client: &mut BanksClient, auction_pubkey: &Pubkey) {
+    let auction = get_auction(banks_client, auction_pubkey).await;
+    let now = helpers::get_clock(banks_client).await.unix_timestamp;
+    assert_eq!(auction.state, AuctionState::Ended);
+    assert_eq!(auction.ended_at, Some(now));
+    assert!(!auction.ended(now).unwrap());
+}
+
 /// Initialize an auction with a random resource, and generate bidders with tokens that can be used
 /// for testing.
 async fn setup_auction(
@@ -380,6 +404,27 @@ async fn test_correct_runs() {
             price_floor: PriceFloor::None([0; 32]),
             seller_collects: 9000,
         },
+        // A losing bidder can withdraw in the same second as end_auction.
+        //
+        // Bidder 0's 1000 is outbid three times and retained as a losing bid. Its cancel runs
+        // after End with the clock unmoved: the auction is Ended but ended(now) is still false.
+        // cancel_bid refuses winners once the auction is Ended; a loser must still get their
+        // escrow back. The settlement block below covers a loser's cancel once the clock has
+        // passed ended_at.
+        Test {
+            actions: vec![
+                Action::Bid(0, 1000),
+                Action::Bid(1, 2000),
+                Action::Bid(2, 3000),
+                Action::Bid(3, 4000),
+                Action::End,
+                Action::Cancel(0),
+            ],
+            expect: vec![(1, 2000), (2, 3000), (3, 4000)],
+            max_winners: 3,
+            price_floor: PriceFloor::None([0; 32]),
+            seller_collects: 9000,
+        },
     ];
 
     // Run each strategy with a new auction.
@@ -449,6 +494,14 @@ async fn test_correct_runs() {
                 }
 
                 Action::Cancel(bidder) => {
+                    // A cancel after End runs before settlement warps the clock, so in the same
+                    // second end_auction ran. Only a loser may cancel then.
+                    let auction = get_auction(&mut banks_client, &auction_pubkey).await;
+                    if auction.state == AuctionState::Ended {
+                        assert_ended_same_second(&mut banks_client, &auction_pubkey).await;
+                        assert_eq!(auction.is_winner(&bidders[bidder].0.pubkey()), None);
+                    }
+
                     // Get balances pre bidding.
                     let pre_balance = (
                         helpers::get_token_balance(&mut banks_client, &bidders[bidder].0.pubkey())
@@ -594,8 +647,8 @@ async fn test_correct_runs() {
                     .collect();
 
                 // Settle: claim every winning bid into a fresh account and check what the seller
-                // collects. Every strategy above ends with Action::End, so this always runs; a bid
-                // state other than EnglishAuction fails the match below.
+                // collects. Every strategy above ends its auction with Action::End, so this always
+                // runs; a bid state other than EnglishAuction fails the match below.
                 //
                 // It used to be gated on `auction.ended(0)`. With the end/gap pair this program
                 // records after end_auction -- (Some(ended_at), None) -- that is `0 > ended_at`
@@ -622,13 +675,9 @@ async fn test_correct_runs() {
                 );
 
                 // Once the auction has ended, a winner can no longer withdraw: cancel_bid must
-                // refuse with InvalidState and leave the pot untouched (cancel_bid.rs:177-180).
-                //
-                // That guard is ended(now) -- time, not AuctionState::Ended -- so it only holds
-                // once the clock has passed ended_at, which is why this runs after the warp. In
-                // the same second end_auction ran (and, with an end_auction_gap, until
-                // last_bid + gap), a winner's cancel still succeeds and is refunded. That is
-                // program behaviour, outside what these tests change; it is not asserted here.
+                // refuse with InvalidState and leave the pot untouched. Here the clock has passed
+                // ended_at; test_incorrect_runs covers the same refusal in the second end_auction
+                // ran, where only AuctionState::Ended says the auction is over.
                 for (index, _amount) in strategy.expect.iter() {
                     let pot = &bidders[*index].1.pubkey();
                     let escrowed = helpers::get_token_balance(&mut banks_client, pot).await;
@@ -964,6 +1013,20 @@ async fn test_incorrect_runs() {
             max_winners: 3,
             price_floor: PriceFloor::None([0; 32]),
         },
+        // A winner cancelling in the same second as end_auction.
+        //
+        // The clock still equals ended_at, so ended(now) is false and only the auction's Ended
+        // state says it is over. cancel_bid must refuse the winner (bidder 1's 6000, the one
+        // winning slot) and leave the escrow in place for settlement. The settlement block in
+        // test_correct_runs covers the same refusal once the clock has passed ended_at.
+        Test {
+            setup: vec![Action::Bid(0, 5000), Action::Bid(1, 6000), Action::End],
+            warp: false,
+            rejected: Action::Cancel(1),
+            error: AuctionError::InvalidState,
+            max_winners: 1,
+            price_floor: PriceFloor::None([0; 32]),
+        },
         // Bidding after the auction has ended, once the clock has passed ended_at.
         //
         // Now ended(now) is true, so place_bid tries to move the auction to Ended
@@ -1037,6 +1100,11 @@ async fn test_incorrect_runs() {
             );
             context.last_blockhash
         } else {
+            // Without the warp a strategy that ended the auction is still in the second
+            // end_auction ran. Check it, so the same-second cases cannot pass on the clock.
+            if get_auction(&mut banks_client, &auction_pubkey).await.state == AuctionState::Ended {
+                assert_ended_same_second(&mut banks_client, &auction_pubkey).await;
+            }
             recent_blockhash
         };
 
