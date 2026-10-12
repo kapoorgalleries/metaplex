@@ -23,7 +23,17 @@ $latest = Join-Path $dir "$me-diag-latest.md"
 $L = New-Object System.Collections.Generic.List[string]
 function W([string]$s) { $script:L.Add($s) }
 function Sec([string]$t) { W ''; W "## $t" }
-function Clip([string]$s, [int]$n = 220) { if ($s.Length -gt $n) { $s.Substring(0, $n) + ' …' } else { $s } }
+# Every line that reaches the report passes through Scrub: token-shaped strings, values after
+# --token/--key/--password style switches, bearer values, URL query values and MAC addresses are
+# masked, so a server registered with a secret in its arguments cannot leak through `mcp list`.
+function Scrub([string]$s) {
+  $s = $s -replace '(?i)(--?[\w-]*(token|key|secret|password|passwd|pass|auth|bearer)[\w-]*)([=\s]+)\S+', '$1$3***'
+  $s = $s -replace '(?i)\b(Bearer)\s+\S+', '$1 ***'
+  $s = $s -replace '([?&][^=&\s]+=)[^&\s]+', '$1***'
+  $s = $s -replace '(?i)\b(sk-[A-Za-z0-9_-]{10,}|ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|gho_[A-Za-z0-9]{20,}|hf_[A-Za-z0-9]{20,}|sbp_[A-Za-z0-9]{20,}|AIza[0-9A-Za-z_-]{30,}|xox[abprs]-[A-Za-z0-9-]+|AKIA[0-9A-Z]{16})\b', '***'
+  $s -replace '\b([0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}\b', 'xx:xx:xx:xx:xx:xx'
+}
+function Clip([string]$s, [int]$n = 220) { $s = Scrub $s; if ($s.Length -gt $n) { $s.Substring(0, $n) + ' …' } else { $s } }
 function Lines($text, [int]$max = 14) {
   $ls = @(([string]$text) -split "`r?`n" | Where-Object { $_.Trim() -ne '' })
   foreach ($l in ($ls | Select-Object -First $max)) { W ('    ' + (Clip $l)) }
@@ -32,18 +42,23 @@ function Lines($text, [int]$max = 14) {
 # Run a command line through cmd.exe (so .cmd and .exe shims resolve the same way a user's shell does),
 # stdin from NUL, output to a temp file, killed with its children when it outlives the timeout.
 function Run([string]$label, [string]$cmd, [int]$sec = 45) {
-  $tf = [IO.Path]::GetTempFileName()
+  # The output file lives under the report folder, not %TEMP%, so a leftover is where the agent looks.
+  $tf = Join-Path $script:dir ('run-' + [IO.Path]::GetRandomFileName() + '.tmp')
   $argl = ('/d /s /c "{0} > "{1}" 2>&1 <nul"' -f $cmd, $tf)
   $sw = [Diagnostics.Stopwatch]::StartNew()
-  $to = $false; $code = 'n/a'
+  $to = $false; $code = 'n/a'; $o = ''; $started = $true
   try {
-    $p = Start-Process -FilePath $env:ComSpec -ArgumentList $argl -WindowStyle Hidden -PassThru
-    if (-not $p.WaitForExit($sec * 1000)) { $to = $true; Start-Process -FilePath 'taskkill.exe' -ArgumentList "/PID $($p.Id) /T /F" -WindowStyle Hidden -Wait | Out-Null }
-    else { $code = $p.ExitCode }
-  } catch { W ("- **{0}**: could not start: {1}" -f $label, (Clip $_.Exception.Message)); return }
-  $sw.Stop()
-  $o = ''
-  if (Test-Path $tf) { $o = Get-Content -LiteralPath $tf -Raw -ErrorAction SilentlyContinue; Remove-Item -LiteralPath $tf -Force -ErrorAction SilentlyContinue }
+    try {
+      $p = Start-Process -FilePath $env:ComSpec -ArgumentList $argl -WindowStyle Hidden -PassThru
+      if (-not $p.WaitForExit($sec * 1000)) { $to = $true; Start-Process -FilePath 'taskkill.exe' -ArgumentList "/PID $($p.Id) /T /F" -WindowStyle Hidden -Wait | Out-Null }
+      else { $code = $p.ExitCode }
+    } catch { $started = $false; W ("- **{0}**: could not start: {1}" -f $label, (Clip $_.Exception.Message)) }
+    $sw.Stop()
+    if (Test-Path -LiteralPath $tf) { $o = Get-Content -LiteralPath $tf -Raw -ErrorAction SilentlyContinue }
+  } finally {
+    foreach ($i in 1..3) { if (Test-Path -LiteralPath $tf) { Remove-Item -LiteralPath $tf -Force -ErrorAction SilentlyContinue; if (Test-Path -LiteralPath $tf) { Start-Sleep -Milliseconds 300 } } }
+  }
+  if (-not $started) { return }
   $flag = ''; if ($to) { $flag = ', TIMEOUT after ' + $sec + 's' }
   W ('- **{0}** `{1}` (exit {2}, {3:n1}s{4})' -f $label, $cmd, $code, $sw.Elapsed.TotalSeconds, $flag)
   if ([string]::IsNullOrWhiteSpace($o)) { W '    (no output)' } else { Lines $o }
@@ -56,7 +71,7 @@ function JsonKeys([string]$path, [string]$prop) {
     if ($prop) { $j = $j.$prop }
     if ($null -eq $j) { return '(none)' }
     $k = @($j.PSObject.Properties | ForEach-Object { $_.Name }); if ($k.Count -eq 0) { '(none)' } else { $k -join ', ' }
-  } catch { 'unreadable: ' + (Clip $_.Exception.Message 80) }
+  } catch { 'unreadable (JSON parse error)' }
 }
 function DirNames([string]$p) { if (Test-Path -LiteralPath $p) { $n = @(Get-ChildItem -LiteralPath $p -Directory -ErrorAction SilentlyContinue | ForEach-Object { $_.Name }); if ($n.Count) { $n -join ', ' } else { '(empty)' } } else { '(absent)' } }
 
@@ -108,6 +123,8 @@ $cnt = 0
 foreach ($c in $clones) {
   $url = (& git -C $c remote get-url origin 2>$null | Select-Object -First 1)
   if (-not $url) { $url = '(no origin)' }
+  $u2 = $url -replace '^([A-Za-z][A-Za-z0-9+.-]*://)[^/@]+@', '$1'   # drop user:token@ from an https remote
+  if ($u2 -ne $url) { $url = $u2 + ' (credentials stripped)' }
   $br = (& git -C $c rev-parse --abbrev-ref HEAD 2>$null); $sha = (& git -C $c rev-parse --short HEAD 2>$null)
   $dirty = @(& git -C $c status --porcelain 2>$null).Count
   $skip = @(& git -C $c ls-files -v 2>$null | Where-Object { $_ -match '^[Ss] ' } | ForEach-Object { $_.Substring(2) })
@@ -165,7 +182,13 @@ $gs = Join-Path $H '.gemini\settings.json'
 W ("- ~\.gemini: {0}; settings.json keys: {1}; mcpServers: {2}; google_accounts.json: {3}; oauth_creds.json: {4}; skills: {5}" -f (Has (Join-Path $H '.gemini')), $(if (Test-Path $gs) { JsonKeys $gs $null } else { '(absent)' }), $(if (Test-Path $gs) { JsonKeys $gs 'mcpServers' } else { '-' }), (Has (Join-Path $H '.gemini\google_accounts.json')), (Has (Join-Path $H '.gemini\oauth_creds.json')), (DirNames (Join-Path $H '.gemini\skills')))
 if (Test-Path $gs) { try { $g = Get-Content -LiteralPath $gs -Raw | ConvertFrom-Json; W ("- gemini auth selectedType: {0}" -f $g.security.auth.selectedType) } catch { } }
 $ge = Join-Path $H '.gemini\.env'
-if (Test-Path $ge) { W ("- ~\.gemini\.env defines: " + ((Get-Content -LiteralPath $ge | Where-Object { $_ -match '^\s*[A-Za-z_][A-Za-z0-9_]*\s*=' } | ForEach-Object { ($_ -split '=', 2)[0].Trim() }) -join ', ')) } else { W '- ~\.gemini\.env: absent' }
+if (Test-Path $ge) {
+  # Only names shaped like env vars are shown; anything else (a stray pasted value) is counted, not printed.
+  $ns = @(Get-Content -LiteralPath $ge | ForEach-Object { $_ -replace '^\s*export\s+', '' } | Where-Object { $_ -match '^\s*[A-Za-z_][A-Za-z0-9_]*\s*=' } | ForEach-Object { ($_ -split '=', 2)[0].Trim() })
+  $ok = @($ns | Where-Object { $_ -match '^[A-Z][A-Z0-9_]{0,63}$' })
+  $odd = $ns.Count - $ok.Count
+  W ('- ~\.gemini\.env defines: ' + ($ok -join ', ') + $(if ($odd) { " (+$odd non-standard line(s) not shown)" } else { '' }))
+} else { W '- ~\.gemini\.env: absent' }
 W ("- Antigravity: {0}; review-pr.sh: {1}" -f (Has (Join-Path $H '.gemini\antigravity')), (Has (Join-Path $H '.gemini\antigravity\brain\0f5ca863-d420-4cf5-88fd-8ed94f78d7f6\scratch\review-pr.sh')))
 W ("- HF: ~\.hf-cli {0}; ~\.cache\huggingface\token {1}" -f (Has (Join-Path $H '.hf-cli')), (Has (Join-Path $H '.cache\huggingface\token')))
 $names = 'GEMINI_API_KEY', 'GOOGLE_API_KEY', 'GOOGLE_CLOUD_PROJECT', 'GOOGLE_GENAI_USE_GCA', 'ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN', 'CLAUDE_CONFIG_DIR', 'OPENAI_API_KEY', 'CODEX_HOME', 'HF_TOKEN', 'GEMINI_CLI_HOME'
