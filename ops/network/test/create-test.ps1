@@ -81,6 +81,14 @@ function Set-Fault([string]$Mode) {
         throw (New-Object IO.IOException 'There is not enough space on the disk. (injected at close)')
       }
     }
+    'close' {
+      # Write and flush succeed; dispose fails after really closing the stream.
+      Update-TypeData -TypeName System.IO.FileStream -MemberType ScriptMethod -MemberName Dispose -Force -Value {
+        [void]$global:CreateTestHits.Add($this.Name)
+        [void][IO.Stream].GetMethod('Dispose', [type[]]@()).Invoke($this, @())
+        throw (New-Object IO.IOException 'There is not enough space on the disk. (injected at close)')
+      }
+    }
     'write-undeletable' {
       # Read-only before the failure, so the cleanup's own delete fails too.
       Update-TypeData -TypeName System.IO.FileStream -MemberType ScriptMethod -MemberName Write -Force -Value {
@@ -196,6 +204,7 @@ $r = Invoke-Case 'existing-dir' { param($dir, $cfg) New-Item -ItemType Directory
 $f = New-Object System.Collections.Generic.List[string]
 if ($r.Rc -ne '4') { $f.Add("expected rc 4, got $($r.Rc)") }
 if (-not (Test-Path -LiteralPath $r.Cfg -PathType Container)) { $f.Add('the settings.json directory was changed') }
+if ($r.Info -notmatch '"huggingface": \{') { $f.Add('manual-step snippet not printed') }
 Report $r $f $null
 
 # 4. A read-only settings.json: rc 4, unchanged.
@@ -203,6 +212,7 @@ $r = Invoke-Case 'existing-readonly' { param($dir, $cfg) New-Item -ItemType Dire
 $f = New-Object System.Collections.Generic.List[string]
 if ($r.Rc -ne '4') { $f.Add("expected rc 4, got $($r.Rc)") }
 if ((Sha $r.Cfg) -ne $r.Pre) { $f.Add('existing settings.json changed') }
+if ($r.Info -notmatch '"huggingface": \{') { $f.Add('manual-step snippet not printed') }
 Report $r $f $null
 [IO.File]::SetAttributes($r.Cfg, 'Normal')
 
@@ -218,6 +228,7 @@ else {
   if ($r.Rc -ne '4') { $f.Add("expected rc 4, got $($r.Rc)") }
   if (Test-Path -LiteralPath (Join-Path $r.Dir 'missing-target.json')) { $f.Add('a file was created through the link') }
   if (-not (Test-Reparse $r.Cfg)) { $f.Add('the link is gone or no longer a link') }
+  if ($r.Info -notmatch '"huggingface": \{') { $f.Add('manual-step snippet not printed') }
   Report $r $f $null
 }
 
@@ -236,10 +247,11 @@ $racerText = "{`"racer`":true}`n"
 $rs = if (Test-Path -LiteralPath $r.Cfg -PathType Leaf) { [IO.File]::ReadAllText($r.Cfg) } else { '<missing>' }
 $intact = $rs -eq $racerText
 if (-not $intact) { $f.Add("the other writer's file was changed: $rs") }
+if ($r.Info -notmatch '"huggingface": \{') { $f.Add('manual-step snippet not printed') }
 Report $r $f "racer's file intact: $intact"
 
-# 8-11. Writing fails after CreateNew: rc 1 and an empty .gemini (before the fix: rc 4 and the broken file left).
-foreach ($m in 'write', 'partial', 'flush', 'flush-close') {
+# 8-12. Writing fails after CreateNew: rc 1 and an empty .gemini (before the fix: rc 4 and the broken file left).
+foreach ($m in 'write', 'partial', 'flush', 'flush-close', 'close') {
   $r = Invoke-Case "fail-$m" $null $m $false
   $f = New-Object System.Collections.Generic.List[string]
   & $mustHitOwn $r $f
@@ -251,18 +263,32 @@ foreach ($m in 'write', 'partial', 'flush', 'flush-close') {
   if ($m -eq 'write') {
     # The next run starts clean and succeeds.
     $env:GEMINI_CLI_HOME = $r.Home
-    $rc2 = Add-GeminiHf 6>$null
-    $env:GEMINI_CLI_HOME = $savedHome
+    $out2 = @()
+    try {
+      $out2 = @(Add-GeminiHf 3>&1 6>$null)
+    } catch {
+      $out2 += "UNCAUGHT: $($_.Exception.GetType().FullName): $($_.Exception.Message)"
+    } finally {
+      $env:GEMINI_CLI_HOME = $savedHome
+    }
+    $warn2 = @($out2 | Where-Object { $_ -is [Management.Automation.WarningRecord] } | ForEach-Object { $_.Message })
+    $rest2 = @($out2 | Where-Object { $_ -isnot [Management.Automation.WarningRecord] })
+    $rc2 = if ($rest2.Count) { "$($rest2[-1])" } else { '<none>' }
     $f2 = New-Object System.Collections.Generic.List[string]
     if ("$rc2" -ne '0') { $f2.Add("expected rc 0 on the rerun, got $rc2") }
-    $s2 = if (Test-Path -LiteralPath $r.Cfg -PathType Leaf) { Sha $r.Cfg } else { '<missing>' }
-    if ($s2 -ne $expectSha) { $f2.Add('rerun bytes differ') }
-    $r2 = [pscustomobject]@{ Name = 'fail-write-rerun'; Rc = "$rc2"; Items = @(Get-ChildItem -Force -LiteralPath $r.Dir | ForEach-Object { $_.Name + ':' + $_.Length }); Warn = @(); Extra = @(); FaultLive = $null }
-    Report $r2 $f2 "sha256=$s2"
+    $d2 = ''
+    if (Test-Path -LiteralPath $r.Cfg -PathType Leaf) {
+      $s2 = Sha $r.Cfg; $d2 = "sha256=$s2 bytes=$((Get-Item -LiteralPath $r.Cfg).Length) acl: $(Get-AclSummary $r.Cfg)"
+      if ($s2 -ne $expectSha) { $f2.Add('rerun bytes differ') }
+      if ($onWindows -and $d2 -notmatch 'ok=True') { $f2.Add('DACL is not the protected owner-only one') }
+    } else { $f2.Add('settings.json not created') }
+    $r2 = [pscustomobject]@{ Name = 'fail-write-rerun'; Rc = "$rc2"; Items = @(Get-ChildItem -Force -LiteralPath $r.Dir | ForEach-Object { $_.Name + ':' + $_.Length }); Warn = $warn2; Extra = @(); FaultLive = $null }
+    if ($r2.Warn.Count) { $f2.Add('unexpected warning') }
+    Report $r2 $f2 $d2
   }
 }
 
-# 12. Writing fails and the cleanup's delete fails too: rc 1, a warning naming the file to delete.
+# 13. Writing fails and the cleanup's delete fails too: rc 1, a warning naming the file to delete.
 # Windows only: a read-only attribute does not stop an unlink elsewhere.
 if (-not $onWindows) { "CASE fail-write-undeletable SKIP (needs Windows read-only semantics)"; [void]$results.Add('SKIP') } else {
   $r = Invoke-Case 'fail-write-undeletable' $null 'write-undeletable' $false
@@ -276,12 +302,92 @@ if (-not $onWindows) { "CASE fail-write-undeletable SKIP (needs Windows read-onl
   if (Test-Path -LiteralPath $r.Cfg) { [IO.File]::SetAttributes($r.Cfg, 'Normal') }
 }
 
+# 14. settings.json stream is opened exclusively: concurrent open is refused while writing.
+$script:openRefused = $false
+$r = Invoke-Case 'exclusive-while-writing' {
+  param($dir, $cfg)
+  Clear-Fault
+  Update-TypeData -TypeName System.IO.FileStream -MemberType ScriptMethod -MemberName Write -Force -Value {
+    param($b, $o, $c)
+    [void]$global:CreateTestHits.Add($this.Name)
+    try {
+      $s = [IO.File]::Open($this.Name, 'Open', 'Read', 'ReadWrite')
+      $s.Dispose()
+    } catch {
+      $script:openRefused = $true
+    }
+    [void][IO.FileStream].GetMethod('Write', [type[]]@([byte[]], [int], [int])).Invoke($this, @($b, $o, $c))
+  }
+} $null $false
+Clear-Fault
+$f = New-Object System.Collections.Generic.List[string]
+if ($r.Rc -ne '0') { $f.Add("expected rc 0, got $($r.Rc)") }
+$d = ''
+if (Test-Path -LiteralPath $r.Cfg -PathType Leaf) {
+  $sha = Sha $r.Cfg; $d = "sha256=$sha bytes=$((Get-Item -LiteralPath $r.Cfg).Length) open-refused=$script:openRefused"
+  if ($sha -ne $expectSha) { $f.Add('bytes differ from the bash output') }
+} else { $f.Add('settings.json not created') }
+if (-not $script:openRefused) { $f.Add('concurrent open was not refused') }
+if ($r.Items.Count -ne 1) { $f.Add('expected exactly settings.json in .gemini') }
+if ($r.Warn.Count) { $f.Add('unexpected warning') }
+Report $r $f $d
+
+# 15. Fallback to USERPROFILE when GEMINI_CLI_HOME is unset.
+$readsHome = $fn -match '\bHOME\b'
+if (-not $onWindows -and -not $readsHome) {
+  "CASE userprofile-fallback  SKIP (Add-GeminiHf reads USERPROFILE, not HOME off Windows)"; [void]$results.Add('SKIP')
+} else {
+  $h = Join-Path $Work 'userprofile-fallback'
+  if (-not $h.StartsWith($Work)) { 'GUARD: USERPROFILE outside the work dir'; exit 6 }
+  New-Item -ItemType Directory -Path $h | Out-Null
+  $dir = Join-Path $h '.gemini'; $cfg = Join-Path $dir 'settings.json'
+  $savedUserProfile = $env:USERPROFILE
+  $savedEnvHome = $env:HOME
+  $out = @()
+  try {
+    Remove-Item Env:GEMINI_CLI_HOME -ErrorAction SilentlyContinue
+    $env:USERPROFILE = $h
+    if (-not $env:USERPROFILE.StartsWith($Work)) { 'GUARD: USERPROFILE outside the work dir'; exit 6 }
+    if (-not $onWindows -and $readsHome) {
+      $env:HOME = $h
+      if (-not $env:HOME.StartsWith($Work)) { 'GUARD: HOME outside the work dir'; exit 6 }
+    }
+    $out = @(Add-GeminiHf 3>&1 6>&1)
+  } catch {
+    $out += "UNCAUGHT: $($_.Exception.GetType().FullName): $($_.Exception.Message)"
+  } finally {
+    $env:USERPROFILE = $savedUserProfile
+    $env:GEMINI_CLI_HOME = $savedHome
+    if (-not $onWindows -and $readsHome) { $env:HOME = $savedEnvHome }
+  }
+  $warn = @($out | Where-Object { $_ -is [Management.Automation.WarningRecord] } | ForEach-Object { $_.Message })
+  $info = (@($out | Where-Object { $_ -is [Management.Automation.InformationRecord] } | ForEach-Object { "$($_.MessageData)" }) -join "`n")
+  $rest = @($out | Where-Object { $_ -isnot [Management.Automation.WarningRecord] -and $_ -isnot [Management.Automation.InformationRecord] })
+  $rc = if ($rest.Count) { "$($rest[-1])" } else { '<none>' }
+  $items = @(); $isDir = Test-Path -LiteralPath $dir -PathType Container
+  if ($isDir) { $items = @(Get-ChildItem -Force -LiteralPath $dir | ForEach-Object { if ($_.PSIsContainer) { $_.Name + '/' } else { $_.Name + ':' + $_.Length } }) }
+  $r = [pscustomobject]@{ Name = 'userprofile-fallback'; Home = $h; Dir = $dir; Cfg = $cfg; Rc = $rc; Items = $items; Warn = $warn; Info = $info
+    Extra = @($rest | Select-Object -SkipLast 1); FaultLive = $null; Pre = $null; Hits = @(); IsDir = $isDir }
+  $f = New-Object System.Collections.Generic.List[string]
+  if ($r.Rc -ne '0') { $f.Add("expected rc 0, got $($r.Rc)") }
+  $d = ''
+  if (Test-Path -LiteralPath $r.Cfg -PathType Leaf) {
+    $sha = Sha $r.Cfg; $d = "sha256=$sha bytes=$((Get-Item -LiteralPath $r.Cfg).Length)"
+    if ($sha -ne $expectSha) { $f.Add('bytes differ from the bash output') }
+  } else { $f.Add('settings.json not created') }
+  if ($r.Items.Count -ne 1) { $f.Add('expected exactly settings.json in .gemini') }
+  if ($r.Warn.Count) { $f.Add('unexpected warning') }
+  Report $r $f $d
+}
+
 ''
 $realAfter = if (Test-Path -LiteralPath $real) { "$(Sha $real) $((Get-Item -LiteralPath $real).LastWriteTimeUtc.Ticks)" } else { 'absent' }
 "real settings.json untouched: $($realBefore -eq $realAfter)"
 if ($realBefore -ne $realAfter) { [void]$results.Add('FAIL') }
 "GEMINI_CLI_HOME restored: $($env:GEMINI_CLI_HOME -eq $savedHome)"
+if ($env:GEMINI_CLI_HOME -ne $savedHome) { [void]$results.Add('FAIL') }
 "type data left on FileStream: $([bool](Get-TypeData System.IO.FileStream))"
+if (Get-TypeData System.IO.FileStream) { [void]$results.Add('FAIL') }
 $p = @($results | Where-Object { $_ -eq 'PASS' }).Count; $x = @($results | Where-Object { $_ -eq 'FAIL' }).Count; $k = @($results | Where-Object { $_ -eq 'SKIP' }).Count
 "RESULT pass=$p fail=$x skip=$k"
 if ($x) { exit 1 } else { exit 0 }
