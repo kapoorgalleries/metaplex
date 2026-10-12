@@ -369,8 +369,12 @@ if not p.exists():
     sys.exit(3)
 def reject(constant):  # json.loads alone takes NaN and Infinity; JSON does not
     raise ValueError(constant)
+def unique(pairs):  # a repeated key at any depth: json.loads keeps the last, the client may keep another
+    if len({k for k, _ in pairs}) != len(pairs):
+        raise ValueError("duplicate key")
+    return dict(pairs)
 try:
-    settings = json.loads(p.read_text(encoding="utf-8-sig"), parse_constant=reject)
+    settings = json.loads(p.read_text(encoding="utf-8-sig"), parse_constant=reject, object_pairs_hook=unique)
     servers = settings.get("mcpServers", {})
     if not isinstance(servers, dict):
         sys.exit(1)
@@ -383,22 +387,32 @@ try:
     gemini_url = s.get("httpUrl") if "httpUrl" in s else (s.get("url") if s.get("type") == "http" else None)
     valid = (s.get("url") in urls and s.get("type") == "http") if sys.argv[2] == "claude" else (gemini_url in urls and required.issubset(s.get("excludeTools") or []))
     sys.exit(0 if valid else 1)
-except (ValueError, OSError, TypeError, AttributeError):
+except (ValueError, OSError, TypeError, AttributeError, RecursionError):  # RecursionError: absurdly deep nesting
     sys.exit(1)
 PYJSON
 }
-add_gemini_hf() {  # 0 created; 4 settings.json exists: left untouched, snippet printed; 1 could not create
+add_gemini_hf() {  # 0 created; 4 nothing written, snippet printed (settings.json exists, or not Linux); 1 could not create
   # Gemini's settings.json is only ever created, never edited: an existing file (which may hold other
   # servers' settings) is left byte-for-byte as it is and the entry is printed for a manual paste.
   # Never `gemini mcp add`/`remove`: they write every ${VAR} in mcpServers back expanded.
-  local py cfg="${GEMINI_CLI_HOME:-$HOME}/.gemini/settings.json"
+  local py manual=0 cfg="${GEMINI_CLI_HOME:-$HOME}/.gemini/settings.json"
+  # Creation is verified on Linux (and Windows PowerShell 5.1 in the .ps1) only. Anywhere else (macOS,
+  # BSD, Git Bash, Cygwin) the entry is printed for a manual setup until a native smoke test verifies it.
+  [ "$OS" = Linux ] || manual=1
   py="$(json_python)" || return 1
   # shellcheck disable=SC2086
-  "$py" - "$cfg" "$HF_MCP_URL" $HF_DENY <<'PYJSON'
+  "$py" - "$cfg" "$HF_MCP_URL" "$manual" $HF_DENY <<'PYJSON'
 import json, os, sys
-cfg, url, deny = sys.argv[1], sys.argv[2], sys.argv[3:]
+cfg, url, manual, deny = sys.argv[1], sys.argv[2], sys.argv[3] == "1", sys.argv[4:]
 entry = {"url": url, "type": "http", "headers": {"Authorization": "Bearer ${HF_TOKEN}"}, "excludeTools": deny}
 doc = (json.dumps({"mcpServers": {"huggingface": entry}}, indent=2) + "\n").encode()
+snippet = '"huggingface": ' + json.dumps(entry, indent=2)
+if manual:
+    print("gemini: automatic setup is verified on Linux and Windows PowerShell 5.1 only; nothing was written. "
+          f'To finish, add this entry inside the top-level "mcpServers" object of {cfg} (create "mcpServers": {{ }} '
+          f'if it has none; if the file does not exist, create it, readable only by you, as {{"mcpServers": {{ }}}} '
+          f"with the entry inside), then rerun:\n{snippet}")
+    sys.exit(4)
 try:
     os.makedirs(os.path.dirname(cfg), exist_ok=True)
 except OSError:  # e.g. a file or dangling link named .gemini: there is no settings.json to report
@@ -407,7 +421,6 @@ try:
     # O_EXCL: refuses any existing name, a symlink included, so nothing is ever overwritten.
     fd = os.open(cfg, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
 except FileExistsError:
-    snippet = '"huggingface": ' + json.dumps(entry, indent=2)
     print(f"gemini: {cfg} already exists and was left unchanged. To finish, add this entry inside its "
           f'top-level "mcpServers" object (create "mcpServers": {{ }} if it has none), then rerun:\n{snippet}')
     sys.exit(4)
@@ -449,12 +462,12 @@ register_hf_mcp() {
       if [ "$state" = 0 ] && check_client_hf gemini; then
         log "gemini: created user settings with the huggingface MCP server"
       elif [ "$state" = 4 ]; then
-        warn "gemini: user settings exist; huggingface entry not added (manual step above)"; failed hf-mcp-gemini
+        warn "gemini: huggingface entry not added (manual step above)"; failed hf-mcp-gemini
       else
         warn "gemini: could not create user settings"; failed hf-mcp-gemini
       fi
     else
-      warn "gemini: user settings need manual review (commented/unsupported JSON, incompatible URL or missing blocked tools); left unchanged"; failed hf-mcp-gemini
+      warn "gemini: user settings need manual review (commented/unsupported JSON, a repeated key, an incompatible URL or missing blocked tools); left unchanged"; failed hf-mcp-gemini
     fi
   fi
   if [ "$CLAUDE_HF_MCP" = 1 ] && [ "$SKIP_CLAUDE" = 0 ] && have claude; then
