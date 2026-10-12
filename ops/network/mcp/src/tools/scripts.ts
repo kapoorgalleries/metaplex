@@ -132,6 +132,7 @@ const VerifyRow = z.object({
   claude: z.string(),
   codex: z.string(),
   gemini: z.string(),
+  agy: z.string(),
   hf: z.string(),
   node: z.string(),
   os: z.string(),
@@ -270,12 +271,12 @@ Returns: { job, summary_found, passed[], failed[], reboot_required[], log_tail }
     'trimurti_verify_hosts',
     {
       title: 'Verify the end state',
-      description: `The done-check for the whole network: for each selected host, ping, key-only SSH login, and the installed versions of claude, codex, gemini, hf and node, plus the OS string. Runs scripts/verify.sh and returns the table it saves. Read-only.
+      description: `The done-check for the whole network: for each selected host, ping, key-only SSH login, and the installed versions of claude, codex, gemini, agy, hf and node, plus the OS string. Runs scripts/verify.sh and returns the table it saves. Read-only.
 
 Args: inventory filters (name/os/role/trimurti) and timeout_seconds (default 240).
-Returns: { md_file, exit_code, all_green, key_problem, problems: ['host: what is wrong', ...], rows: [{ host, ping, ssh_key, claude, codex, gemini, hf, node, os }] }.
+Returns: { md_file, exit_code, all_green, key_problem, problems: ['host: what is wrong', ...], rows: [{ host, ping, ssh_key, claude, codex, gemini, agy, hf, node, os }] }.
 
-Every inventory row except the router is listed; only computers (role admin, workstation, new) need the CLIs and count for all_green, other rows show n/a. all_green means every selected computer pings, accepts the key (or is this machine, probed locally), has claude, codex, gemini and hf, and node 20 or newer. Paste rows into status.md.`,
+Every inventory row except the router is listed; only computers (role admin, workstation, new) need the CLIs and count for all_green, other rows show n/a. all_green means every selected computer pings, accepts the key (or is this machine, probed locally), has claude, codex, gemini, agy and hf, and node 20 or newer. Paste rows into status.md.`,
       inputSchema: VerifyInput,
       outputSchema: VerifyOutput,
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
@@ -306,6 +307,7 @@ Every inventory row except the router is listed; only computers (role admin, wor
           claude: row.claude ?? '',
           codex: row.codex ?? '',
           gemini: row.gemini ?? '',
+          agy: row.agy ?? '',
           hf: row.hf ?? '',
           node: row.node ?? '',
           os: row.os ?? '',
@@ -319,7 +321,7 @@ Every inventory row except the router is listed; only computers (role admin, wor
           if (row.ping !== 'yes') bad.push('no ping');
           if (row.ssh_key === 'NO') bad.push('key login fails');
           else if (row.ssh_key !== 'yes' && row.ssh_key !== 'n/a') bad.push(row.ssh_key || 'key login not tried');
-          for (const k of ['claude', 'codex', 'gemini', 'hf', 'node'] as const) {
+          for (const k of ['claude', 'codex', 'gemini', 'agy', 'hf', 'node'] as const) {
             if (row[k] === 'missing' || row[k] === '-' || row[k] === '') bad.push(`${k} missing`);
             else if (row[k].startsWith('error:')) bad.push(`${k} does not run (${row[k].slice(6).trim()})`);
           }
@@ -337,7 +339,7 @@ Every inventory row except the router is listed; only computers (role admin, wor
             : `${problems.length} problem(s)`;
         const others = rows.filter((row) => !computers.has(row.host)).map((row) => row.host);
         return ok(
-          `${summary} (${md})\n\n${mdTable(rows, ['host', 'ping', 'ssh_key', 'claude', 'codex', 'gemini', 'hf', 'node', 'os'])}\n\n${problems.map((x) => `- ${x}`).join('\n')}${others.length ? `\nnot counted (not a computer): ${others.join(', ')}` : ''}`,
+          `${summary} (${md})\n\n${mdTable(rows, ['host', 'ping', 'ssh_key', 'claude', 'codex', 'gemini', 'agy', 'hf', 'node', 'os'])}\n\n${problems.map((x) => `- ${x}`).join('\n')}${others.length ? `\nnot counted (not a computer): ${others.join(', ')}` : ''}`,
           out,
         );
       } catch (e) {
