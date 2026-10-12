@@ -62,13 +62,13 @@ accepted, nor is any other program, since a program such as `find` or `rm`
 given the script as an argument would do something else with it. Every
 script named lives under `.claude/hooks/`, exists (symlinks resolved, and
 neither `.claude` nor `.claude/hooks` may itself be a symlink) and, for
-JavaScript, parses. Where the file system ignores case, as the macOS and
-Windows defaults do, a script counts as under `.claude/hooks/` when the file
-system says so, whatever case a symlink or the working directory spells the
-path in. A script as the command itself is not accepted: on
-Windows exec form needs a real executable, and an interpreter plus the
-script path is the pattern the hooks reference says works on every
-platform.
+JavaScript, parses. On macOS and Windows, which report each path's on-disk
+spelling, a script also counts as under `.claude/hooks/` when a symlink's
+target spells the path, or the root the checker was run from, in another
+case or Unicode normalization; on Linux the spellings must match. A script
+as the command itself is not accepted: on Windows exec form needs a real
+executable, and an interpreter plus the script path is the pattern the
+hooks reference says works on every platform.
 
 **Sends always ask.** `permissions.ask` names the Gmail send, reply and
 forward tools and Opera's `go-to-page`, along with the Hugging Face commands

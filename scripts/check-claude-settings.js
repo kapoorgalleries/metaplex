@@ -310,57 +310,40 @@ function checkMatcher(matcher, event, at, fail) {
 // Where `real`, a resolved script path, sits relative to `hooksDir`, the
 // resolved project root joined with .claude/hooks: 'self', 'inside' or
 // 'outside'. checkPathToken first compares the two as text, which can fail
-// for a script that really is in the hooks directory. On a case-insensitive
-// file system (the macOS and Windows defaults) a symlink's target may spell
-// part of the path in another case, and the root may come from a path typed
-// in another case: fs.realpathSync (the JavaScript one) keeps the case of the
-// text it is given and copies symlink targets verbatim. Switching to
-// fs.realpathSync.native would not help, because it returns the on-disk case,
-// which differs from HOOKS_DIR whenever the directory is cased differently on
-// disk. So before rejecting, this asks the file system instead: is `real`, or
-// one of its parent directories, the hooks directory itself, by device and
-// inode? A match counts only when that path also equals the hooks path apart
-// from case and Unicode normalization, so this accepts nothing but a
-// difference in spelling: a bind mount, or two directories that report the
-// same inode (some overlay and FUSE mounts can), gets the text comparison's
-// answer. Neither .claude nor hooks may be a symlink, so a hooks directory
-// that points somewhere else is still rejected, as the text comparison
-// rejects it.
+// for a script that really is in the hooks directory. On macOS and Windows,
+// whose default file systems ignore case, a symlink's target may spell part
+// of the path, or the root, in another case or Unicode normalization than
+// the root the checker was given: fs.realpathSync (the JavaScript one) keeps
+// the text it is given and copies symlink targets verbatim. So before
+// rejecting, this asks the operating system for both paths' canonical
+// spelling with fs.realpathSync.native (realpath(3) on macOS returns each
+// component's on-disk name; GetFinalPathNameByHandleW does the same on
+// Windows) and compares those as text. Linux's realpath keeps the spelling
+// it is given, so there this gives the text comparison's answer. Neither
+// .claude nor hooks may be a symlink, so a hooks directory that points
+// somewhere else is still rejected, as the text comparison rejects it.
+// Device and inode numbers are not used: some FUSE and overlay mounts give
+// two different directories the same pair.
 const fsIo = {
-  lstat: (p) => fs.lstatSync(p, { bigint: true }),
-  stat: (p) => fs.statSync(p, { bigint: true }),
+  lstat: (p) => fs.lstatSync(p),
+  realpath: (p) => fs.realpathSync.native(p),
 };
 function locateInHooksDir(real, hooksDir, io = fsIo) {
-  // lstat does not follow a symlink, so a symlinked .claude or hooks is not
-  // a directory here.
-  let anchor;
+  let canonReal;
+  let canonHooks;
   try {
+    // lstat does not follow a symlink, so a symlinked .claude or hooks is
+    // not a directory here.
     for (const dir of [path.dirname(hooksDir), hooksDir]) {
-      anchor = io.lstat(dir);
-      if (!anchor.isDirectory()) return 'outside';
+      if (!io.lstat(dir).isDirectory()) return 'outside';
     }
+    canonHooks = io.realpath(hooksDir);
+    canonReal = io.realpath(real);
   } catch (e) {
     return 'outside';
   }
-  // Some file systems report inode 0 for everything; identity means nothing
-  // there, so the text comparison's answer stands.
-  if (anchor.ino === 0n) return 'outside';
-  const fold = (p) => p.normalize('NFC').toLowerCase();
-  for (let p = real; ; ) {
-    let st;
-    try {
-      st = io.stat(p);
-    } catch (e) {
-      return 'outside';
-    }
-    if (st.dev === anchor.dev && st.ino === anchor.ino) {
-      if (fold(p) !== fold(hooksDir)) return 'outside';
-      return p === real ? 'self' : 'inside';
-    }
-    const up = path.dirname(p);
-    if (up === p) return 'outside';
-    p = up;
-  }
+  if (canonReal === canonHooks) return 'self';
+  return canonReal.startsWith(canonHooks + path.sep) ? 'inside' : 'outside';
 }
 
 // One exec-form token: the command, or an element of args. Returns true when
