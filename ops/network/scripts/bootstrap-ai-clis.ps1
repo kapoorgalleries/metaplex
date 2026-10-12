@@ -1,26 +1,27 @@
 <#
-Install Claude Code, OpenAI Codex CLI, Gemini CLI and the Hugging Face CLI (hf)
-on this Windows machine, and register Hugging Face's MCP server with Codex and
-Gemini. Claude Code, Codex and hf are put in place by their official installers,
-each run in a child PowerShell so that its own exit or StrictMode cannot end
-this script (npm is the fallback for Codex); Gemini CLI is an npm package, so
-Node.js LTS is installed for it; hf's installer needs Python 3.10+, so Python
-3.13 is installed when no 3.10+ is present. Idempotent: rerun to upgrade.
+Install Claude Code, OpenAI Codex CLI, Gemini CLI, Antigravity CLI (agy) and the
+Hugging Face CLI (hf) on this Windows machine, and register Hugging Face's MCP
+server with Codex and Gemini. Claude Code, Codex, agy and hf are put in place by
+their official installers, each run in a child PowerShell so that its own exit
+or StrictMode cannot end this script (npm is the fallback for Codex); Gemini CLI
+is an npm package, so Node.js LTS is installed for it; hf's installer needs
+Python 3.10+, so Python 3.13 is installed when no 3.10+ is present. Idempotent:
+rerun to upgrade.
 
 winget (App Installer; present on Windows 10 1809+ and 11) is needed only to
 install Node.js, Python or Git. Node's MSI needs elevation: run from an elevated
 PowerShell, or over SSH as a member of Administrators (those SSH sessions are
 already elevated).
 
-Usage: powershell -ExecutionPolicy Bypass -File scripts\bootstrap-ai-clis.ps1 [-SkipClaude] [-SkipCodex] [-SkipGemini] [-SkipNode] [-WithNode] [-SkipHf] [-WithClaudeHfMcp] [-WithGit]
-  -SkipClaude, -SkipCodex, -SkipGemini   leave that CLI alone
+Usage: powershell -ExecutionPolicy Bypass -File scripts\bootstrap-ai-clis.ps1 [-SkipClaude] [-SkipCodex] [-SkipGemini] [-SkipAgy] [-SkipNode] [-WithNode] [-SkipHf] [-WithClaudeHfMcp] [-WithGit]
+  -SkipClaude, -SkipCodex, -SkipGemini, -SkipAgy   leave that CLI alone
   -SkipHf           no hf CLI and no Hugging Face MCP registration
   -WithClaudeHfMcp  also register the Hugging Face MCP server with Claude Code (see register_hf_mcp in bootstrap-ai-clis.sh)
   -SkipNode    never install Node.js (Gemini then needs Node 20+ already)
   -WithNode    install Node.js 20+ even when Gemini is skipped (the trimurti-ops MCP server needs it)
   -WithGit     also install Git for Windows (the Bash tool for Claude Code)
   -h, --help   this text
-  The bootstrap-ai-clis.sh spellings work too: --skip-claude --skip-codex --skip-gemini --skip-node --with-node --skip-hf --with-claude-hf-mcp --with-git
+  The bootstrap-ai-clis.sh spellings work too: --skip-claude --skip-codex --skip-gemini --skip-agy --skip-node --with-node --skip-hf --with-claude-hf-mcp --with-git
 Exit: 0 every requested CLI is installed, 1 something failed (the last line says what), 2 bad arguments.
 #>
 $ErrorActionPreference = 'Stop'
@@ -30,7 +31,7 @@ function Show-Usage([int]$Code, [string]$Why) {
   if ($Code -eq 0) { Write-Host $text } else { [Console]::Error.WriteLine("$Why`n$text") }
   exit $Code
 }
-$SkipClaude = $false; $SkipCodex = $false; $SkipGemini = $false; $SkipNode = $false; $WithNode = $false; $WithGit = $false
+$SkipClaude = $false; $SkipCodex = $false; $SkipGemini = $false; $SkipAgy = $false; $SkipNode = $false; $WithNode = $false; $WithGit = $false
 $SkipHf = $false; $WithClaudeHfMcp = $false
 foreach ($a in $args) {
   switch -regex ("$a") {
@@ -38,6 +39,7 @@ foreach ($a in $args) {
     '^(-SkipClaude|--skip-claude)$' { $SkipClaude = $true }
     '^(-SkipCodex|--skip-codex)$'   { $SkipCodex = $true }
     '^(-SkipGemini|--skip-gemini)$' { $SkipGemini = $true }
+    '^(-SkipAgy|--skip-agy)$'       { $SkipAgy = $true }
     '^(-SkipNode|--skip-node)$'     { $SkipNode = $true }
     '^(-WithNode|--with-node)$'     { $WithNode = $true }
     '^(-SkipHf|--skip-hf)$'         { $SkipHf = $true }
@@ -364,6 +366,22 @@ if (-not $SkipGemini) {
     else { Refresh-Path; if (-not (Have 'gemini')) { Add-Failure 'gemini' 'Gemini CLI installed, but gemini is not on PATH' } }
   }
 }
+# Antigravity CLI (agy), Google's terminal agent for personal Google accounts since Gemini CLI stopped
+# serving them on 2026-06-18: agy.exe in %LOCALAPPDATA%\agy\bin. Google's installer checks the download's
+# SHA-512, then runs `agy install` for the PATH; it stops, changing nothing, when agy.exe already exists
+# there, so a rerun updates with `agy update`. Add-UserPath makes sure new terminals find it either way.
+if (-not $SkipAgy) {
+  if (Have 'agy') {
+    Log "agy present ($(Get-CliVersion 'agy')); checking for an update"
+    if ((Invoke-Native 'agy' @('update')) -ne 0) { Add-Failure 'agy' "'agy update' failed" }
+  } else {
+    Log 'installing Antigravity CLI (agy; official installer, updates itself)'
+    $rc = Invoke-Installer 'https://antigravity.google/cli/install.ps1'
+    if ($env:LOCALAPPDATA) { Add-UserPath (Join-Path $env:LOCALAPPDATA 'agy\bin') }
+    Refresh-Path
+    if ($rc -ne 0 -or -not (Have 'agy')) { Add-Failure 'agy' "Antigravity CLI install FAILED (installer exit $rc; https://antigravity.google/cli/install.ps1)" }
+  }
+}
 
 # Hugging Face CLI through its official installer: a venv in %USERPROFILE%\.hf-cli, hf.exe copied to
 # %USERPROFILE%\.local\bin. The installer also runs `hf skills add hf-cli --global`: the hf-cli agent
@@ -420,7 +438,7 @@ if (-not $SkipHf) {
 Refresh-Path
 
 Log "versions on ${env:COMPUTERNAME}:"
-foreach ($c in 'node', 'claude', 'codex', 'gemini', 'hf') {
+foreach ($c in 'node', 'claude', 'codex', 'gemini', 'agy', 'hf') {
   if (Have $c) { $v = Get-CliVersion $c } else { $v = 'MISSING' }
   Write-Host ("  {0,-7} {1}" -f $c, $v)
 }
@@ -449,9 +467,18 @@ read it with Read-Host -AsSecureString, and it lasts for that window only.
            Google Workspace account (not personal Gmail): first
            $env:GOOGLE_CLOUD_PROJECT = '<project-id>'; personal Gmail must leave it unset.
            "no longer supported for Gemini Code Assist for individuals": that account's free tier is
-           closed to Gemini CLI; the way in (API key, paid Workspace project, or Antigravity) is Sanjay's call.
+           closed to Gemini CLI; the way in (API key, paid Workspace project, or agy below) is Sanjay's call.
            API key instead (this window only; https://aistudio.google.com/app/apikey):
            $env:GEMINI_API_KEY = [Net.NetworkCredential]::new('', (Read-Host 'key' -AsSecureString)).Password
+  agy      Antigravity CLI. Run `agy` and sign in with the Google account: a browser opens. Over SSH
+           (ssh -t) it prints a URL instead: open it on any machine, then paste the code the page shows
+           back here. The sign-in is kept in the OS keyring.
+           API key instead: "modelProvider": "gemini" in %USERPROFILE%\.gemini\antigravity-cli\settings.json,
+           and $env:GEMINI_API_KEY from the hidden prompt above (agy reads no other key variable).
+           check:  agy -p "hi"     (signed in, it answers; if not, it prints "Authentication required"
+                   and a sign-in URL, waits 60 seconds for the code, then exits 1)
+           Leave "Use AI Credits" (useG1Credits in that settings.json) off, so agy never spends the
+           account's purchased AI credits when the plan's quota runs out.
   hf       run `hf auth login` (over SSH: ssh -t). "Log in with your browser" prints a URL and a code:
            open the URL on any machine and enter the code. "Paste an access token" reads a token at a
            hidden prompt: make one per machine at https://huggingface.co/settings/tokens > New token,
@@ -464,6 +491,8 @@ read it with Read-Host -AsSecureString, and it lasts for that window only.
                    Never run `gemini mcp add` or `gemini mcp remove` with HF_TOKEN set: they save
                    every ${VAR} in its settings file as the value, this token included.
                    Gemini loads MCP servers only in folders it trusts (it asks on the first run there).
+           agy     not registered by this script: `agy mcp add` has no per-tool block, so Jobs and
+                   Sandboxes could not be kept out, and Google does not document ${VAR} in its headers.
            claude  the account's Hugging Face connector comes with the claude.ai login (/mcp lists it).
                    Signed in with setup-token or an API key? Rerun this script with -WithClaudeHfMcp,
                    then  claude mcp login huggingface   (--no-browser over SSH)
