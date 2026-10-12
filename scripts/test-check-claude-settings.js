@@ -172,6 +172,11 @@ const write = (p, text, mode) => {
 };
 write(path.join(hooksDir, 'ok.js'), 'process.exit(0);\n');
 write(path.join(hooksDir, 'ok.mjs'), 'export {};\n');
+// The first bytes of a zip archive; python3 runs a zip named .py as a script.
+write(path.join(hooksDir, 'zipped.py'), Buffer.from('504b0304140000000000', 'hex'));
+write(path.join(hooksDir, 'nul.sh'), 'exit 0\n\0');
+// UTF-16LE with a BOM, as Windows PowerShell 5.1's redirection writes it.
+write(path.join(hooksDir, 'utf16.ps1'), Buffer.from('\ufeffexit 0\r\n', 'utf16le'));
 write(path.join(hooksDir, 'ok.sh'), '#!/bin/sh\nexit 0\n', 0o755);
 write(path.join(hooksDir, 'ok.py'), 'raise SystemExit(0)\n');
 write(path.join(hooksDir, 'ok.ps1'), 'exit 0\n');
@@ -228,6 +233,8 @@ clean('settings from parseStrict (no prototype) are fine', parseStrict('{"permis
 flags('a misspelled "permissions" drops the whole policy', { permisions: { allow: ['A'] } }, /"permisions" looks like a misspelling of "permissions"/);
 flags('a capitalised "Permissions"', { Permissions: { allow: ['A'] } }, /looks like a misspelling of "permissions"/);
 flags('a misspelled "hooks"', { ...P, hook: {} }, /"hook" looks like a misspelling of "hooks"/);
+flags('env is passed to every hook process', { ...P, env: { NODE_OPTIONS: '--require /tmp/x.js' } }, /"env" is not accepted in this file: Claude Code passes it to every hook process/);
+flags('an empty env is still flagged', { ...P, env: {} }, /"env" is not accepted in this file/);
 flags('permissions must be an object', { permissions: [] }, /"permissions" must be an object/);
 flags('hooks must be an object', { ...P, hooks: [] }, /"hooks" must be an object/);
 flags('hooks must be an object (null)', { ...P, hooks: null }, /"hooks" must be an object/);
@@ -420,6 +427,9 @@ flags('missing script', cmd(['${CLAUDE_PROJECT_DIR}/.claude/hooks/missing.js']),
 flags('a root with no .claude/hooks directory', cmd([OK]), outside, /ok\.js does not exist/);
 flags('a root that does not exist', cmd([OK]), path.join(outside, 'nope'), /ok\.js does not exist/);
 flags('a directory, not a file', cmd(['${CLAUDE_PROJECT_DIR}/.claude/hooks/sub']), /sub is not a file/);
+flags('a zip archive that python3 would run', entry({ type: 'command', command: 'python3', args: ['${CLAUDE_PROJECT_DIR}/.claude/hooks/zipped.py'] }), /zipped\.py contains a NUL byte, so git treats it as binary/);
+flags('a script with a NUL byte', entry({ type: 'command', command: 'sh', args: ['${CLAUDE_PROJECT_DIR}/.claude/hooks/nul.sh'] }), /nul\.sh contains a NUL byte/);
+flags('a UTF-16 PowerShell script, which git diffs as binary', entry({ type: 'command', command: 'pwsh', args: ['${CLAUDE_PROJECT_DIR}/.claude/hooks/utf16.ps1'] }), /utf16\.ps1 contains a NUL byte.*\(UTF-16 text: save it as UTF-8\)/);
 flags('a script that does not parse', cmd(['${CLAUDE_PROJECT_DIR}/.claude/hooks/bad.js']), /bad\.js does not parse/);
 flags('an ES module that does not parse', cmd(['${CLAUDE_PROJECT_DIR}/.claude/hooks/bad.mjs']), /bad\.mjs does not parse/);
 flags('the second of two scripts is checked too', cmd([OK, '${CLAUDE_PROJECT_DIR}/.claude/hooks/bad.js']), /bad\.js does not parse/);

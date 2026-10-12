@@ -89,7 +89,14 @@ there is an entry Claude Code drops: an unknown hook event gets a Settings
 Warning in an interactive session and nothing in a `-p` or CI run, and an
 unknown permission key or hook field gets no warning anywhere. It is the
 same failure in another form. It also checks the permission lists, and
-command hooks as described above. Its tests are in
+command hooks as described above. Hook scripts must be text with no NUL
+byte. Git treats a file with one as binary, so a pull request would show
+"Binary files differ" instead of the script: a zip archive or bytecode
+(which `python3` runs even when named `.py`), or UTF-16 text such as a
+`.ps1` written by Windows PowerShell 5.1 (save it as UTF-8). A top-level
+`env` key is rejected: Claude Code passes it to every hook process, where
+`NODE_OPTIONS`, `BASH_ENV` or `PYTHONPATH` would load code from outside
+`.claude/hooks/` first and `PATH` could swap the interpreter. Its tests are in
 `scripts/test-check-claude-settings.js`. CI runs both from
 `.github/workflows/claude-settings.yml` whenever `.claude/` changes.
 

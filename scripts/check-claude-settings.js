@@ -238,6 +238,13 @@ function checkTopLevel(settings, fail) {
     const near = TOP_LEVEL_KEYS_HERE.find((k) => editDistance(key.toLowerCase(), k) <= 2);
     if (near) fail(`"${key}" looks like a misspelling of "${near}"; Claude Code does not read it, so nothing in it applies`);
   }
+  // Claude Code passes "env" to every hook process: NODE_OPTIONS, BASH_ENV
+  // or PYTHONPATH would make an allowed interpreter load code from outside
+  // .claude/hooks/ before the reviewed script, and PATH could swap the
+  // interpreter itself.
+  if (hasOwn(settings, 'env')) {
+    fail('"env" is not accepted in this file: Claude Code passes it to every hook process, where NODE_OPTIONS, BASH_ENV or PYTHONPATH would load code from outside .claude/hooks/ before the reviewed script and PATH could swap the interpreter itself. Set personal variables in .claude/settings.local.json or your shell');
+  }
 }
 
 function checkPermissions(permissions, fail) {
@@ -360,6 +367,14 @@ function checkPathToken(token, root, at, fail) {
   }
   if (!fs.statSync(real).isFile()) {
     fail(`${at}: ${rel} is not a file`);
+    return true;
+  }
+  // A file with a NUL byte is binary to git, so a pull request shows
+  // "Binary files differ" instead of its content. That covers executables,
+  // zip archives (python3 runs one named .py) and bytecode, and also UTF-16
+  // text, such as a .ps1 written by Windows PowerShell 5.1.
+  if (fs.readFileSync(real).includes(0)) {
+    fail(`${at}: ${rel} contains a NUL byte, so git treats it as binary and a pull request does not show its content; a hook script must be text that review can read (UTF-16 text: save it as UTF-8)`);
     return true;
   }
   if (/\.[cm]?js$/.test(rel)) {
