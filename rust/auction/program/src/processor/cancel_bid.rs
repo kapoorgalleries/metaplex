@@ -174,8 +174,12 @@ pub fn cancel_bid(
         return Err(AuctionError::BidderPotDoesNotExist.into());
     }
 
-    // Refuse to cancel if the auction ended and this person is a winning account.
-    if auction.ended(clock.unix_timestamp)? && auction.is_winner(accounts.bidder.key).is_some() {
+    // Refuse to cancel if the auction ended and this person is a winning account. The auction has
+    // ended once its end time has passed, or as soon as end_auction has moved it to Ended:
+    // ended(now) alone stays false in the same second as end_auction, and with an
+    // end_auction_gap until last_bid + gap.
+    let ended = auction.ended(clock.unix_timestamp)? || auction.state == AuctionState::Ended;
+    if ended && auction.is_winner(accounts.bidder.key).is_some() {
         return Err(AuctionError::InvalidState.into());
     }
 
