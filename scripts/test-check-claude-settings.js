@@ -571,6 +571,13 @@ if (caseLinks) {
   }
 }
 
+// CI sets this on the macOS job, the one runner where these tests run, so
+// that a change to the runner image fails the job instead of skipping them.
+if (process.env.CHECK_SETTINGS_REQUIRE_CASE_TESTS) {
+  check('the case-insensitive and on-disk-name tests ran', () =>
+    assert.ok(caseLinks && onDiskNames, `case-insensitive ${caseInsensitive}, symlinks ${caseLinks}, on-disk names ${onDiskNames} in ${caseBase}`));
+}
+
 // ---------------------------------------------------------- the CLI itself
 
 // Run the checker as CI does, from a copy placed in a throwaway repository
