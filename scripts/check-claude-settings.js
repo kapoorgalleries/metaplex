@@ -101,8 +101,10 @@ const HOOK_REQUIRED_STRINGS = { http: ['url'], mcp_tool: ['server', 'tool'], pro
 // file. A tool that can run commands, write files or send data would let a
 // hook do that from inline input that no reviewed script holds, which is
 // what the command-hook rules forbid. So only the server/tool pairs listed
-// here are accepted, matched exactly. Add a pair only after confirming the
-// tool can do none of those things, whatever its input.
+// here are accepted, matched exactly. A pair binds only a server name, which
+// Claude Code looks up among the servers configured on the machine running
+// the hook, so add one only after confirming that every server that could
+// answer to that name there can do none of those things, whatever its input.
 const MCP_TOOL_HOOKS = [];
 // What this file holds at the top level. Anything within two edits of one
 // of these names is a misspelling that would silently drop the whole block.
@@ -431,7 +433,7 @@ function checkCommandHook(hook, root, at, fail) {
   if (hasOwn(hook, 'shell')) fail(`${at}.shell has no effect in exec form`);
 }
 
-function checkHook(hook, event, root, at, fail, mcpToolHooks) {
+function checkHook(hook, event, root, at, fail, { mcpToolHooks, allowAgentHooks }) {
   if (!isPlainObject(hook)) return fail(`${at} must be an object`);
   if (!HOOK_TYPES.includes(hook.type)) return fail(`${at}.type must be one of ${HOOK_TYPES.map((t) => `"${t}"`).join(', ')}`);
   checkUnknownKeys(hook, [...HOOK_COMMON_FIELDS, ...HOOK_TYPE_FIELDS[hook.type]], at, `a ${hook.type} hook field`, fail);
@@ -455,13 +457,19 @@ function checkHook(hook, event, root, at, fail, mcpToolHooks) {
   for (const k of HOOK_REQUIRED_STRINGS[hook.type]) {
     if (!isNonEmptyString(hook[k])) fail(`${at}.${k} must be a non-empty string for a ${hook.type} hook`);
   }
+  // A hook agent runs in dontAsk mode with every allow rule from every
+  // settings scope, so its inline prompt can call any allowed tool, MCP tools
+  // included, which would get around MCP_TOOL_HOOKS. Prompt hooks get no tools.
+  if (hook.type === 'agent' && !allowAgentHooks) {
+    fail(`${at}: agent hooks are not accepted in this file: the hook agent runs in dontAsk mode with every allow rule from every settings scope, so its inline prompt can call any allowed tool, MCP tools included, and get around MCP_TOOL_HOOKS. Use a command hook with a reviewed script, or a prompt hook, which has no tools`);
+  }
   if (hook.type === 'mcp_tool' && isNonEmptyString(hook.server) && isNonEmptyString(hook.tool)
     && !mcpToolHooks.some((p) => p.server === hook.server && p.tool === hook.tool)) {
     fail(`${at}: mcp_tool hook ${JSON.stringify(`${hook.server}/${hook.tool}`)} is not in MCP_TOOL_HOOKS in scripts/check-claude-settings.js. Its input is written in this file and the tool runs outside any reviewed script, so add the pair there only after confirming the tool cannot run commands, write files or send data, whatever its input`);
   }
 }
 
-function checkHooks(hooks, root, fail, mcpToolHooks) {
+function checkHooks(hooks, root, fail, options) {
   if (hooks === undefined) return;
   if (!isPlainObject(hooks)) return fail('"hooks" must be an object');
   for (const event of Object.keys(hooks)) {
@@ -481,15 +489,16 @@ function checkHooks(hooks, root, fail, mcpToolHooks) {
       if (hasOwn(entry, 'matcher')) checkMatcher(entry.matcher, event, at, fail);
       if (!Array.isArray(entry.hooks)) return fail(`${at}.hooks must be an array`);
       if (entry.hooks.length === 0) fail(`${at}.hooks is empty`);
-      entry.hooks.forEach((hook, m) => checkHook(hook, event, root, `${at}.hooks[${m}]`, fail, mcpToolHooks));
+      entry.hooks.forEach((hook, m) => checkHook(hook, event, root, `${at}.hooks[${m}]`, fail, options));
     });
   }
 }
 
 // Returns the list of problems with a parsed settings object. `root` is the
-// repository root that ${CLAUDE_PROJECT_DIR} stands for; `mcpToolHooks`
-// replaces MCP_TOOL_HOOKS (the tests use it).
-function checkSettings(settings, root, { mcpToolHooks = MCP_TOOL_HOOKS } = {}) {
+// repository root that ${CLAUDE_PROJECT_DIR} stands for. The tests pass
+// `mcpToolHooks` in place of MCP_TOOL_HOOKS and `allowAgentHooks` to reach
+// the other rules for those hook types.
+function checkSettings(settings, root, { mcpToolHooks = MCP_TOOL_HOOKS, allowAgentHooks = false } = {}) {
   const problems = [];
   const fail = (msg) => problems.push(msg);
   if (!isPlainObject(settings)) {
@@ -498,7 +507,7 @@ function checkSettings(settings, root, { mcpToolHooks = MCP_TOOL_HOOKS } = {}) {
   }
   checkTopLevel(settings, fail);
   checkPermissions(settings.permissions, fail);
-  checkHooks(settings.hooks, root, fail, mcpToolHooks);
+  checkHooks(settings.hooks, root, fail, { mcpToolHooks, allowAgentHooks });
   return problems;
 }
 

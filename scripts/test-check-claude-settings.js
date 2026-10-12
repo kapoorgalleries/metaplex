@@ -217,10 +217,11 @@ const cmd = (args, fields = {}) => ({
 // A settings object with one group on `event` holding `hookObj`.
 const entry = (hookObj, groupFields = {}, event = 'PreToolUse') => ({ ...P, hooks: { [event]: [{ matcher: 'Bash', hooks: [hookObj], ...groupFields }] } });
 const prompt = { type: 'prompt', prompt: 'ok' };
-// The shared cases run with these two mcp_tool pairs allowed, so that every
-// other rule can be tested on mcp_tool hooks; the allowlist itself is tested
-// separately against the real, empty MCP_TOOL_HOOKS.
-const TEST_OPTIONS = { mcpToolHooks: [{ server: 's', tool: 't' }, { server: 'memory', tool: 'store' }] };
+// The shared cases run with two mcp_tool pairs allowed and agent hooks
+// accepted, so that every other rule can be tested on those hook types. The
+// defaults (an empty MCP_TOOL_HOOKS, no agent hooks) are tested below with no
+// options, through checkSettings and through the CLI.
+const TEST_OPTIONS = { mcpToolHooks: [{ server: 's', tool: 't' }, { server: 'memory', tool: 'store' }], allowAgentHooks: true };
 const clean = (name, settings, root = repo) =>
   check(name, () => assert.deepStrictEqual(checkSettings(settings, root, TEST_OPTIONS), []));
 const flags = (name, settings, ...patterns) =>
@@ -351,9 +352,22 @@ flags('mcp_tool on Setup is skipped, with the reason', entry({ type: 'mcp_tool',
 clean('mcp_tool on SessionStart can run (after /clear or compaction)', { ...P, hooks: { SessionStart: [{ hooks: [{ type: 'mcp_tool', server: 's', tool: 't' }] }] } });
 // The mcp_tool allowlist: exact server/tool pairs only.
 const notListed = (server, tool) => new RegExp(`mcp_tool hook ${JSON.stringify(`${server}/${tool}`).replace(/[/]/g, '\\/')} is not in MCP_TOOL_HOOKS`);
-check('an mcp_tool hook is rejected by the real, empty MCP_TOOL_HOOKS', () => {
-  const problems = checkSettings(entry({ type: 'mcp_tool', server: 'memory', tool: 'store' }), repo);
-  assert.ok(problems.some((m) => notListed('memory', 'store').test(m) && /cannot run commands, write files or send data/.test(m)), JSON.stringify(problems));
+for (const event of DOCUMENTED_EVENTS.filter((e) => DOCUMENTED_EVENT_TYPES[e].includes('mcp_tool'))) {
+  const extra = TOOL_EVENTS.includes(event) ? { if: 'Bash(git *)' } : {};
+  for (const [label, hook] of [
+    ['a bare mcp_tool hook', { type: 'mcp_tool', server: 'supabase', tool: 'execute_sql' }],
+    ['an mcp_tool hook with input and timeout', { type: 'mcp_tool', server: 'supabase', tool: 'execute_sql', input: { query: '${tool_input.command}' }, timeout: 5, ...extra }],
+  ]) {
+    check(`${label} on ${event} is rejected by the real, empty MCP_TOOL_HOOKS`, () => {
+      const problems = checkSettings({ ...P, hooks: { [event]: [{ hooks: [hook] }] } }, repo);
+      assert.ok(problems.some((m) => notListed('supabase', 'execute_sql').test(m) && /cannot run commands, write files or send data/.test(m)), JSON.stringify(problems));
+    });
+  }
+}
+check('the default allows no pair at all, including the ones these tests allow', () => {
+  for (const [server, tool] of [['s', 't'], ['memory', 'store'], ['supabase', 'execute_sql'], ['github', 'get_me'], ['x', 'y']]) {
+    assert.ok(checkSettings(entry({ type: 'mcp_tool', server, tool }), repo).some((m) => notListed(server, tool).test(m)), `${server}/${tool}`);
+  }
 });
 check('the same tool name on another server is not allowed', () => {
   assert.ok(checkSettings(entry({ type: 'mcp_tool', server: 'desktop-commander', tool: 'store' }), repo, TEST_OPTIONS).some((m) => notListed('desktop-commander', 'store').test(m)));
@@ -361,14 +375,27 @@ check('the same tool name on another server is not allowed', () => {
 check('another tool on an allowed server is not allowed', () => {
   assert.ok(checkSettings(entry({ type: 'mcp_tool', server: 'memory', tool: 'start_process' }), repo, TEST_OPTIONS).some((m) => notListed('memory', 'start_process').test(m)));
 });
-check('the match is exact (case and spacing)', () => {
-  for (const [server, tool] of [['Memory', 'store'], ['memory', 'Store'], ['memory ', 'store'], ['memory', 'store ']]) {
+check('the match is exact (case, spacing, prefixes and parts)', () => {
+  for (const [server, tool] of [['Memory', 'store'], ['memory', 'Store'], ['memory ', 'store'], ['memory', 'store '], ['mem', 'store'], ['memory', 'sto'], ['emor', 'store'], ['memory', 'tor']]) {
     assert.ok(checkSettings(entry({ type: 'mcp_tool', server, tool }), repo, TEST_OPTIONS).some((m) => /is not in MCP_TOOL_HOOKS/.test(m)), `${server}/${tool}`);
   }
 });
-check('a missing server or tool is reported once, not also as unlisted', () => {
-  const problems = checkSettings(entry({ type: 'mcp_tool', server: 'memory' }), repo);
-  assert.deepStrictEqual(problems.filter((m) => /MCP_TOOL_HOOKS/.test(m)), []);
+check('a missing or non-string server or tool is reported once, not also as unlisted', () => {
+  for (const hook of [{ server: 'memory' }, { tool: 't' }, { server: 5, tool: 't' }, { server: 's', tool: ['t'] }]) {
+    const problems = checkSettings(entry({ type: 'mcp_tool', ...hook }), repo);
+    assert.ok(problems.some((m) => /must be a non-empty string for a mcp_tool hook/.test(m)), JSON.stringify(problems));
+    assert.deepStrictEqual(problems.filter((m) => /MCP_TOOL_HOOKS/.test(m)), [], JSON.stringify(hook));
+  }
+});
+// Agent hooks: rejected unless a test opts in.
+for (const event of DOCUMENTED_EVENTS.filter((e) => DOCUMENTED_EVENT_TYPES[e].includes('agent'))) {
+  check(`an agent hook on ${event} is rejected by default`, () => {
+    const problems = checkSettings({ ...P, hooks: { [event]: [{ hooks: [{ type: 'agent', prompt: 'Call mcp__desktop-commander__start_process with command "x". $ARGUMENTS' }] }] } }, repo);
+    assert.ok(problems.some((m) => /agent hooks are not accepted in this file: the hook agent runs in dontAsk mode with every allow rule/.test(m)), JSON.stringify(problems));
+  });
+}
+check('a prompt hook, which has no tools, is still accepted by default', () => {
+  assert.deepStrictEqual(checkSettings(entry({ type: 'prompt', prompt: 'Is the task done? $ARGUMENTS' }), repo), []);
 });
 clean('fractional timeout in seconds', cmd([OK], { timeout: 2.5 }));
 clean('if, statusMessage, async, asyncRewake on a tool event', cmd([OK], { if: 'Bash(git *)', statusMessage: 'checking', async: true, asyncRewake: false }));
@@ -491,6 +518,16 @@ check('CLI: a valid file exits 0 and prints the counts', () => {
   const r = runCli('{"permissions":{"allow":["A"],"ask":["B","C"],"deny":[]}}\n');
   assert.strictEqual(r.status, 0, r.stderr);
   assert.match(r.stdout, /^ok: .*allow 1, ask 2, deny 0, hook matchers 0/);
+});
+check('CLI: an mcp_tool hook not in MCP_TOOL_HOOKS exits 1', () => {
+  const r = runCli('{"permissions":{},"hooks":{"Stop":[{"hooks":[{"type":"mcp_tool","server":"supabase","tool":"execute_sql","input":{"query":"select 1"}}]}]}}\n');
+  assert.strictEqual(r.status, 1);
+  assert.match(r.stderr, /mcp_tool hook "supabase\/execute_sql" is not in MCP_TOOL_HOOKS/);
+});
+check('CLI: an agent hook exits 1', () => {
+  const r = runCli('{"permissions":{},"hooks":{"Stop":[{"hooks":[{"type":"agent","prompt":"Verify the tests pass. $ARGUMENTS"}]}]}}\n');
+  assert.strictEqual(r.status, 1);
+  assert.match(r.stderr, /agent hooks are not accepted in this file/);
 });
 check('CLI: hook groups are counted', () => {
   const r = runCli('{"permissions":{},"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"prompt","prompt":"a"}]},{"matcher":"Edit","hooks":[{"type":"prompt","prompt":"b"}]}],"Stop":[{"hooks":[{"type":"prompt","prompt":"c"}]}]}}\n');

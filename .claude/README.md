@@ -97,12 +97,19 @@ byte. Git treats a file with one as binary, so a pull request would show
 `env` key is rejected: Claude Code passes it to every hook process, where
 `NODE_OPTIONS`, `BASH_ENV` or `PYTHONPATH` would load code from outside
 `.claude/hooks/` first and `PATH` could swap the interpreter. An `mcp_tool`
-hook must name a `server`/`tool` pair listed in `MCP_TOOL_HOOKS` in the
-checker, and the list starts empty. Such a hook calls a tool on an MCP server
-configured elsewhere, with `input` written in this file, so a tool that can
-run commands, write files or send data would run code that no reviewed
-script holds. Add a pair only after confirming the tool can do none of
-those, whatever its input. Its tests are in
+hook in `settings.json` must name a `server`/`tool` pair listed in
+`MCP_TOOL_HOOKS` in the checker, and the list starts empty. Such a hook calls
+a tool on an MCP server configured elsewhere, with `input` written in this
+file, so a tool that can run commands, write files or send data would run
+code that no reviewed script holds. A pair binds only a server name, which
+Claude Code looks up among the servers configured on the machine running the
+hook. Add one only after confirming that every server that could answer to
+that name can do none of those things, whatever its input. `agent` hooks are
+rejected for the same reason: the hook agent runs in `dontAsk` mode with
+every allow rule from every settings scope, so its prompt could call any
+allowed tool, MCP tools included. Prompt hooks have no tools and are
+accepted. The check reads only `settings.json`; hooks in skill or agent
+frontmatter and in plugins are outside it. Its tests are in
 `scripts/test-check-claude-settings.js`. CI runs both from
 `.github/workflows/claude-settings.yml` whenever `.claude/` changes.
 
