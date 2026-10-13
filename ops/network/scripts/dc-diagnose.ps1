@@ -1,12 +1,16 @@
 # dc-diagnose.ps1: read-only snapshot of one Windows machine for the Trimurti job, run through Desktop
-# Commander, which has no terminal and few calls to spare. One run writes everything an agent needs into
-# %USERPROFILE%\trimurti-dc\<host>-diag-latest.md (and a stamped copy), so the report costs one read.
+# Commander (no terminal; start_process returns after 3 s, so the result is the report file). One run writes
+# everything an agent needs into %USERPROFILE%\trimurti-dc\<host>-diag-latest.md (and a stamped copy).
 # The file is rewritten after every section: a run that dies leaves a report without its END line, never
 # a stale complete one. Installs, updates, reboots and settings are never touched; the only writes are the
 # report folder and winget's own source cache. `claude mcp list` starts the configured MCP servers to show
-# their health. Secrets are reported by name (set / not set), never by value, and every line of external
-# output is scrubbed. Every external command runs with stdin closed and a timeout (worst case ~12 min).
+# their health. git status runs with --no-optional-locks, so it does not rewrite a clone's index. Config files
+# are read to list key names; secrets are reported by name (set / not set), never by value, and every line of
+# external output is scrubbed. Every external command runs with stdin closed and a timeout (worst case
+# ~12 min), except quick local git calls. No parameters: any argument is an error.
 # Windows PowerShell 5.1 is enough.
+[CmdletBinding()]
+param()
 $ErrorActionPreference = 'Continue'
 $ProgressPreference = 'SilentlyContinue'
 $t0 = Get-Date
@@ -30,15 +34,20 @@ $L = New-Object System.Collections.Generic.List[string]
 function W([string]$s) { $script:L.Add($s) }
 function Flush() { [IO.File]::WriteAllText($script:latest, (($script:L -join "`r`n") + "`r`n"), $script:utf8) }
 function Sec([string]$t) { W ''; W "## $t"; Flush }
-# Scrub runs on every line of external content (command output, file dumps): token-shaped strings, values
-# after token/key/secret/password/auth switches or NAME=/Header: pairs, bearer values, secret-looking URL
-# query values and URL passwords are masked.
+# Scrub runs on every line of external content (command output, file dumps, the verdict JSON): bearer and other
+# Authorization values, values after token/key/secret/password/auth switches and NAME=/Header:/"json_key": pairs,
+# secret-looking URL query values, URL passwords and token-shaped strings are masked. Quotes, \" and \u0027 end a
+# value and a value that opens an object or array is left alone, so scrubbed JSON stays JSON. Not secrets:
+# `passed=` (run-remote.sh's TRIMURTI_SUMMARY line) and claude auth status's authMethod / apiKeySource, which name
+# the kind of sign-in (they show when a PC bills an API key). The same function is in dc-diagnose.ps1, dc-fix.ps1
+# and dc-gemini-review.ps1; test/dc-scrub.ps1 keeps them identical.
 function Scrub([string]$s) {
-  $s = $s -replace '(?i)(--?[\w-]*(token|key|secret|password|passwd|pass|auth|bearer|credential)[\w-]*)([=\s]+)\S+', '$1$3***'
-  $s = $s -replace '(?i)\b([\w-]*(token|key|secret|password|passwd|pass|auth|bearer|credential)[\w-]*)\s*([=:])\s*(?!(?:true|false|yes|no|null|none|\d+)\b)\S+', '$1$3***'
-  $s = $s -replace '(?i)\b(Bearer)\s+\S+', '$1 ***'
-  $s = $s -replace '(?i)([?&][^=&\s]*(token|key|secret|sig|code|auth|pass)[^=&\s]*=)[^&\s]+', '$1***'
-  $s = $s -replace '(://[^/@\s:]+:)[^@\s]+@', '$1***@'
+  $s = $s -replace '(?i)\b(Bearer)\s+(?:[^\s"''\\]|\\[^\s"''u])+', '$1 ***'
+  $s = $s -replace '(?i)\b((?:proxy-)?authorization["'']?\s*[:=]\s*["'']?)[A-Za-z]+\s+(?:[^\s"''\\]|\\[^\s"''u])+', '$1***'
+  $s = $s -replace '(?i)(--?[\w-]*(token|key|secret|password|passwd|pass|auth|bearer|credential)[\w-]*)([=\s]+)(\\?["'']|\\u0027)?(?:[^\s"''\\]|\\[^\s"''u])+', '$1$3$4***'
+  $s = $s -replace '(?i)\b(?!(?:passed|authMethod|apiKeySource)\b)([\w-]*(token|key|secret|password|passwd|pass|auth|bearer|credential)[\w-]*)(\\?["'']|\\u0027)?\s*([=:])\s*(?!(?:true|false|yes|no|null|none|\d+)\b)((?:\\?["'']|\\u0027){0,2})(?![{\[])(?:[^\s"''\\]|\\[^\s"''u])+', '$1$3$4$5***'
+  $s = $s -replace '(?i)([?&][^=&\s"\\]*(token|key|secret|sig|code|auth|pass)[^=&\s"\\]*=)[^&\s"\\]+', '$1***'
+  $s = $s -replace '(://[^/@\s:"\\]+:)[^@\s"\\]+@', '$1***@'
   $s -replace '(?i)\b(sk-[A-Za-z0-9_-]{10,}|ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|gho_[A-Za-z0-9]{20,}|hf_[A-Za-z0-9]{20,}|sbp_[A-Za-z0-9]{20,}|AIza[0-9A-Za-z_-]{30,}|xox[abprs]-[A-Za-z0-9-]+|AKIA[0-9A-Z]{16}|glpat-[\w-]{20,}|npm_[A-Za-z0-9]{30,}|ya29\.[\w.-]+|eyJ[\w-]{10,}\.[\w-]{10,}\.[\w-]{10,})\b', '***'
 }
 function Clip([string]$s, [int]$n = 220) { $s = Scrub $s; if ($s.Length -gt $n) { $s.Substring(0, $n) + ' ...' } else { $s } }
@@ -111,15 +120,15 @@ Get-CimInstance Win32_LogicalDisk -Filter "DriveType=3" -ErrorAction SilentlyCon
 Get-CimInstance Win32_DiskDrive -ErrorAction SilentlyContinue | ForEach-Object { W ("- Drive {0}: serial {1}, {2}, {3:n0} GB" -f $_.Model, ([string]$_.SerialNumber).Trim(), $_.InterfaceType, ($_.Size / 1GB)) }
 Get-SmbMapping -ErrorAction SilentlyContinue | ForEach-Object { W ("- SMB mapping {0} -> {1} ({2})" -f $_.LocalPath, $_.RemotePath, $_.Status) }
 try { $mp = Get-MpComputerStatus -ErrorAction Stop; W ("- Defender: mode {0}; real-time {1}; signatures {2}; last quick scan {3}" -f $mp.AMRunningMode, $mp.RealTimeProtectionEnabled, $mp.AntivirusSignatureLastUpdated, $mp.QuickScanEndTime) } catch { W '- Defender: status unavailable' }
-$rb1 = Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired'
-$rb2 = Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending'
+$rb1 = Test-Path -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired'
+$rb2 = Test-Path -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending'
 W ("- Reboot pending: WindowsUpdate={0} CBS={1}" -f $rb1, $rb2)
 try { $au = (New-Object -ComObject Microsoft.Update.AutoUpdate).Results; W ("- Windows Update: last search {0}; last install {1}" -f $au.LastSearchSuccessDate, $au.LastInstallationSuccessDate) } catch { W '- Windows Update: history unavailable' }
 try { Get-HotFix -ErrorAction Stop | Sort-Object InstalledOn -Descending | Select-Object -First 3 | ForEach-Object { W ("- Hotfix {0} {1} {2}" -f $_.HotFixID, $_.Description, $_.InstalledOn) } } catch { }
 $tk = Get-ScheduledTask -TaskName 'trimurti-windows-update' -ErrorAction SilentlyContinue
 if ($tk) { $ti = $tk | Get-ScheduledTaskInfo; W ("- update-all task: {0}, last run {1}, result {2}" -f $tk.State, $ti.LastRunTime, $ti.LastTaskResult) } else { W '- update-all task: none' }
 $wul = 'C:\ProgramData\trimurti\windows-update.log'
-if (Test-Path $wul) { W "- windows-update.log tail:"; Lines ((Get-Content -LiteralPath $wul -Tail 10 -Encoding UTF8) -join "`n") 10 }
+if (Test-Path -LiteralPath $wul) { W "- windows-update.log tail:"; Lines ((Get-Content -LiteralPath $wul -Tail 10 -Encoding UTF8) -join "`n") 10 }
 
 Sec 'Network'
 Get-NetAdapter -Physical -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq 'Up' } | ForEach-Object { W ("- Adapter {0}: {1}, {2}, MAC {3}" -f $_.Name, $_.LinkSpeed, $_.MediaType, $_.MacAddress) }
@@ -134,14 +143,14 @@ W ("- Port 22 listening on: {0}; sshd.exe present: {1}" -f $(if ($l22.Count) { $
 @((Get-NetFirewallRule -DisplayName '*OpenSSH*' -ErrorAction SilentlyContinue), (Get-NetFirewallRule -DisplayName '*trimurti*' -ErrorAction SilentlyContinue), (Get-NetFirewallRule -Name 'FPS-ICMP4-ERQ-In' -ErrorAction SilentlyContinue)) | ForEach-Object { $_ } | Where-Object { $_ } | ForEach-Object { W ("- Firewall rule {0}: enabled {1}, profile {2}, {3}" -f $_.DisplayName, $_.Enabled, $_.Profile, $_.Direction) }
 $aak = 'C:\ProgramData\ssh\administrators_authorized_keys'; $scf = 'C:\ProgramData\ssh\sshd_config'
 W ("- administrators_authorized_keys: {0}; sshd_config: {1}" -f (Has $aak), (Has $scf))
-if (Test-Path $scf) { W ("- sshd_config auth lines: " + ((Select-String -LiteralPath $scf -Pattern '^\s*(Port|PubkeyAuthentication|PasswordAuthentication|AuthorizedKeysFile|Match Group administrators)' -ErrorAction SilentlyContinue | ForEach-Object { $_.Line.Trim() }) -join ' | ')) }
-if (Test-Path $aak) { Run 'authorized key fingerprints' ('ssh-keygen -lf "' + $aak + '"') 20 }
+if (Test-Path -LiteralPath $scf) { W ("- sshd_config auth lines: " + ((Select-String -LiteralPath $scf -Pattern '^\s*(Port|PubkeyAuthentication|PasswordAuthentication|AuthorizedKeysFile|Match Group administrators)' -ErrorAction SilentlyContinue | ForEach-Object { $_.Line.Trim() }) -join ' | ')) }
+if (Test-Path -LiteralPath $aak) { Run 'authorized key fingerprints' ('ssh-keygen -lf "' + $aak + '"') 20 }
 $sshd = Join-Path $H '.ssh'
-if (Test-Path $sshd) { W ("- ~\.ssh: " + ((Get-ChildItem -LiteralPath $sshd -Force -ErrorAction SilentlyContinue | ForEach-Object { $_.Name }) -join ', ')) } else { W '- ~\.ssh: absent' }
+if (Test-Path -LiteralPath $sshd) { W ("- ~\.ssh: " + ((Get-ChildItem -LiteralPath $sshd -Force -ErrorAction SilentlyContinue | ForEach-Object { $_.Name }) -join ', ')) } else { W '- ~\.ssh: absent' }
 $pub = Join-Path $sshd 'id_ed25519_trimurti.pub'
-if (Test-Path $pub) { Run 'trimurti key fingerprint' ('ssh-keygen -lf "' + $pub + '"') 20 } else { W '- ~\.ssh\id_ed25519_trimurti.pub: absent' }
+if (Test-Path -LiteralPath $pub) { Run 'trimurti key fingerprint' ('ssh-keygen -lf "' + $pub + '"') 20 } else { W '- ~\.ssh\id_ed25519_trimurti.pub: absent' }
 $tc = Join-Path $sshd 'config.d\trimurti'
-if (Test-Path $tc) { W ("- ~\.ssh\config.d\trimurti hosts: " + ((Select-String -LiteralPath $tc -Pattern '^Host ' | ForEach-Object { $_.Line -replace '^Host\s+', '' }) -join ', ')) } else { W '- ~\.ssh\config.d\trimurti: absent' }
+if (Test-Path -LiteralPath $tc) { W ("- ~\.ssh\config.d\trimurti hosts: " + ((Select-String -LiteralPath $tc -Pattern '^Host ' | ForEach-Object { $_.Line -replace '^Host\s+', '' }) -join ', ')) } else { W '- ~\.ssh\config.d\trimurti: absent' }
 Run 'join state' 'dsregcmd /status | findstr /i Joined' 20
 if ((Where1 'tailscale') -ne '-') { Run 'tailscale status' 'tailscale status' 20 }
 
@@ -164,7 +173,7 @@ else {
     $u2 = $url -replace '^([A-Za-z][A-Za-z0-9+.-]*://)[^/@]+@', '$1'   # drop user:token@ from an https remote
     if ($u2 -ne $url) { $url = $u2 + ' (credentials stripped)' }
     $br = (& git -C $c rev-parse --abbrev-ref HEAD 2>$null); $sha = (& git -C $c rev-parse --short HEAD 2>$null)
-    $dirty = @(& git -C $c -c core.fsmonitor=false -c core.untrackedCache=false status --porcelain 2>$null).Count
+    $dirty = @(& git --no-optional-locks -C $c -c core.fsmonitor=false -c core.untrackedCache=false status --porcelain 2>$null).Count
     $hasKit = Test-Path -LiteralPath (Join-Path $c 'ops\network\scripts\verify.sh')
     if ($hasKit) { $skip = @(& git -C $c ls-files -v -- ops/network/inventory.csv ops/network/status.md 2>$null | Where-Object { $_ -match '^[Ss] ' } | ForEach-Object { $_.Substring(2) }) }
     W ("- {0}: {1} @ {2} {3}; {4} changed; skip-worktree: {5}; kit: {6}" -f $c, (Clip $url 90), $br, $sha, $dirty, ($(if ($skip.Count) { $skip -join ' ' } else { 'none' })), $hasKit)
@@ -178,9 +187,9 @@ if ($kit) {
   $k = Join-Path $kit 'ops\network'
   W "- kit: $k"
   $inv = Join-Path $k 'inventory.csv'
-  if (Test-Path $inv) { W '- inventory.csv (rows):'; Get-Content -LiteralPath $inv -Encoding UTF8 | Where-Object { $_ -notmatch '^\s*#' -and $_.Trim() } | ForEach-Object { W ('    ' + (Clip $_)) } }
+  if (Test-Path -LiteralPath $inv) { W '- inventory.csv (rows):'; Get-Content -LiteralPath $inv -Encoding UTF8 | Where-Object { $_ -notmatch '^\s*#' -and $_.Trim() } | ForEach-Object { W ('    ' + (Clip $_)) } }
   $st = Join-Path $k 'status.md'
-  if (Test-Path $st) { $sl = @(Get-Content -LiteralPath $st -Encoding UTF8); W ("- status.md ({0} lines; filled table rows: {1}):" -f $sl.Count, @($sl | Where-Object { $_ -match '^\|' -and $_ -notmatch '^\|[\s\|-]*$' }).Count); $sl | Select-Object -First 70 | ForEach-Object { W ('    ' + (Clip $_)) } }
+  if (Test-Path -LiteralPath $st) { $sl = @(Get-Content -LiteralPath $st -Encoding UTF8); W ("- status.md ({0} lines; filled table rows: {1}):" -f $sl.Count, @($sl | Where-Object { $_ -match '^\|' -and $_ -notmatch '^\|[\s\|-]*$' }).Count); $sl | Select-Object -First 70 | ForEach-Object { W ('    ' + (Clip $_)) } }
   $vo = Get-ChildItem -LiteralPath (Join-Path $k 'out') -Filter 'verify-*.md' -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
   if ($vo) { W "- newest verify: $($vo.Name) ($($vo.LastWriteTime))"; Lines (Get-Content -LiteralPath $vo.FullName -Raw -Encoding UTF8) 40 } else { W '- no out\verify-*.md yet' }
   $lg = Get-ChildItem -LiteralPath (Join-Path $k 'out\logs') -File -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending
@@ -208,19 +217,19 @@ Run 'winget version' 'winget --version' 30
 Run 'winget upgrades' 'winget upgrade --include-unknown --disable-interactivity --source winget' 120
 
 Sec 'Config present (names only, no values)'
-W ("- ~\.claude: {0}; settings.json keys: {1}; .credentials.json: {2}; ~\.claude.json: {3}; its mcpServers: {4}" -f (Has (Join-Path $H '.claude')), $(if (Test-Path (Join-Path $H '.claude\settings.json')) { JsonKeys (Join-Path $H '.claude\settings.json') $null } else { '(absent)' }), (Has (Join-Path $H '.claude\.credentials.json')), (Has (Join-Path $H '.claude.json')), $(if (Test-Path (Join-Path $H '.claude.json')) { JsonKeys (Join-Path $H '.claude.json') 'mcpServers' } else { '-' }))
+W ("- ~\.claude: {0}; settings.json keys: {1}; .credentials.json: {2}; ~\.claude.json: {3}; its mcpServers: {4}" -f (Has (Join-Path $H '.claude')), $(if (Test-Path -LiteralPath (Join-Path $H '.claude\settings.json')) { JsonKeys (Join-Path $H '.claude\settings.json') $null } else { '(absent)' }), (Has (Join-Path $H '.claude\.credentials.json')), (Has (Join-Path $H '.claude.json')), $(if (Test-Path -LiteralPath (Join-Path $H '.claude.json')) { JsonKeys (Join-Path $H '.claude.json') 'mcpServers' } else { '-' }))
 W ("- ~\.claude\skills: {0}" -f (DirNames (Join-Path $H '.claude\skills')))
 W ("- ~\.claude\plugins: {0}" -f (DirNames (Join-Path $H '.claude\plugins')))
 W ("- ~\.agents\skills: {0}; hf-cli skill: {1}" -f (DirNames (Join-Path $H '.agents\skills')), (Has (Join-Path $H '.agents\skills\hf-cli\SKILL.md')))
 W ("- ~\.codex: {0}; auth.json: {1}; skills: {2}" -f (Has (Join-Path $H '.codex')), (Has (Join-Path $H '.codex\auth.json')), (DirNames (Join-Path $H '.codex\skills')))
 $ct = Join-Path $H '.codex\config.toml'
-if (Test-Path $ct) { W ("- ~\.codex\config.toml: " + ((Select-String -LiteralPath $ct -Pattern '^\s*(\[mcp_servers\.|model\s*=|approval_policy|sandbox_mode)' | ForEach-Object { $_.Line.Trim() }) -join ' | ')) } else { W '- ~\.codex\config.toml: absent' }
+if (Test-Path -LiteralPath $ct) { W ("- ~\.codex\config.toml: " + ((Select-String -LiteralPath $ct -Pattern '^\s*(\[mcp_servers\.|model\s*=|approval_policy|sandbox_mode)' | ForEach-Object { $_.Line.Trim() }) -join ' | ')) } else { W '- ~\.codex\config.toml: absent' }
 $gs = Join-Path $H '.gemini\settings.json'
-W ("- ~\.gemini: {0}; settings.json keys: {1}; mcpServers: {2}; google_accounts.json: {3}; oauth_creds.json: {4}; skills: {5}" -f (Has (Join-Path $H '.gemini')), $(if (Test-Path $gs) { JsonKeys $gs $null } else { '(absent)' }), $(if (Test-Path $gs) { JsonKeys $gs 'mcpServers' } else { '-' }), (Has (Join-Path $H '.gemini\google_accounts.json')), (Has (Join-Path $H '.gemini\oauth_creds.json')), (DirNames (Join-Path $H '.gemini\skills')))
-if (Test-Path $gs) { try { $g = Get-Content -LiteralPath $gs -Raw | ConvertFrom-Json; W ("- gemini auth selectedType: {0}" -f $g.security.auth.selectedType) } catch { } }
+W ("- ~\.gemini: {0}; settings.json keys: {1}; mcpServers: {2}; google_accounts.json: {3}; oauth_creds.json: {4}; skills: {5}" -f (Has (Join-Path $H '.gemini')), $(if (Test-Path -LiteralPath $gs) { JsonKeys $gs $null } else { '(absent)' }), $(if (Test-Path -LiteralPath $gs) { JsonKeys $gs 'mcpServers' } else { '-' }), (Has (Join-Path $H '.gemini\google_accounts.json')), (Has (Join-Path $H '.gemini\oauth_creds.json')), (DirNames (Join-Path $H '.gemini\skills')))
+if (Test-Path -LiteralPath $gs) { try { $g = Get-Content -LiteralPath $gs -Raw | ConvertFrom-Json; W ("- gemini auth selectedType: {0}" -f $g.security.auth.selectedType) } catch { } }
 W ("- Desktop Commander process env: ComSpec '{0}', COMPUTERNAME '{1}', SystemRoot '{2}'" -f $env:ComSpec, $env:COMPUTERNAME, $env:SystemRoot)
 $ge = Join-Path $H '.gemini\.env'
-if (Test-Path $ge) {
+if (Test-Path -LiteralPath $ge) {
   # Only names shaped like env vars are shown; anything else (a stray pasted value) is counted, not printed.
   $ns = @(Get-Content -LiteralPath $ge | ForEach-Object { $_ -replace '^\s*export\s+', '' } | Where-Object { $_ -match '^\s*[A-Za-z_][A-Za-z0-9_]*\s*=' } | ForEach-Object { ($_ -split '=', 2)[0].Trim() })
   $ok = @($ns | Where-Object { $_ -match '^[A-Z][A-Z0-9_]{0,63}$' })

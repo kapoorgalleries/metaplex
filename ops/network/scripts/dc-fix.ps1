@@ -1,25 +1,30 @@
 # dc-fix.ps1: the unattended "fix and update" run for one Windows machine in the Trimurti job, through Desktop
-# Commander (no terminal, few calls to spare). One run: rebuild PATH; git fetch + log in the kit clone (never a
-# checkout); the kit's update-all.ps1 without the ASK flags; bootstrap-ai-clis.ps1 when a CLI is missing; compare
-# the kg-permission-gates copies (report, never overwrite); on the admin machine verify.sh and run-remote.sh
-# --os windows update-all through Git Bash. The report %USERPROFILE%\trimurti-dc\<host>-fix-latest.md (plus a
-# stamped copy) is rewritten after every step and before every long command; a finished run ends with the END
-# line. Never reboots, never passes an ASK flag, never touches inventory.csv or status.md, never the router.
-# Secrets: names only, never a value; every line of external output passes through Scrub. Every external command
-# runs with stdin closed and a timeout. winget upgrade --all may replace the app that runs Desktop Commander; the
-# run and the report survive that. Windows PowerShell 5.1 is enough.
+# Commander (no terminal; start_process returns after 3 s, so the result is the report file). One run: rebuild
+# PATH; git fetch + log in the kit clone (never a checkout); compare the kg-permission-gates copies (and copy the
+# newest over the others with -SyncPermissionGates, backups first); the kit's read-only netscan.ps1;
+# bootstrap-ai-clis.ps1 when a CLI is missing; the kit's update-all.ps1 without the ASK flags; on the admin
+# machine verify.sh and run-remote.sh --os windows update-all through Git Bash; the version and sign-in checks
+# again. Not elevated, update-all.ps1 gets -NoOS (the CLIs only) and winget only lists the pending app
+# upgrades: a machine-wide installer waits on a UAC prompt that nobody answers, and an open app makes its own
+# installer wait. The report %USERPROFILE%\trimurti-dc\<host>-fix-latest.md is rewritten after every step and
+# before every long command; the END line comes last, after a FATAL too, and a stamped copy is written then.
+# Never reboots, never passes an ASK flag, never touches inventory.csv or status.md, never the router.
+# Secrets: names only, never a value; every line of external output passes through Scrub. Every long-running
+# command runs with stdin closed and a timeout. winget upgrade --all may replace the app that runs Desktop
+# Commander; the run and the report survive that. Windows PowerShell 5.1 is enough. An unknown switch is an
+# error (no -h): nothing runs.
 #   -Kit <ops\network path>   default: %USERPROFILE%\trimurti-network\ops\network, then any clone with scripts\verify.sh
-#   -SkipWinget, -SkipWindowsUpdate   update-all.ps1 then gets -NoOS (it cannot skip one of the two alone);
-#                                     winget still runs here unless -SkipWinget
+#   -SkipWinget, -SkipWindowsUpdate   update-all.ps1 then gets -NoOS (it cannot skip one of the two alone); winget
+#                                     still upgrades here unless -SkipWinget, and only when elevated
 #   -NoRemote                 admin machine: verify.sh only, no run-remote.sh to the other PCs
 #   -SyncPermissionGates      copy the highest-version kg-permission-gates folder over the stale copies (each
 #                             backed up first under trimurti-dc\backup-<stamp>); without it the copies are only compared
 #   -NoScan                   skip the kit's read-only netscan.ps1 LAN sweep
-#   -NoGemini                 skip the PR #26 review (dc-gemini-review.ps1 fetched from -ScriptBranch into a full
-#                             metaplex clone and run there; it writes trimurti-dc\pr26-verdict.json)
-# Order: PATH, kit fetch, kg-permission-gates, netscan, the review, then the long steps (bootstrap, update-all,
-# verify, run-remote) and the final checks, so the report has the quick results early.
-param([string]$Kit = '', [switch]$SkipWinget, [switch]$SkipWindowsUpdate, [switch]$NoRemote, [switch]$SyncPermissionGates, [switch]$NoScan, [switch]$NoGemini, [string]$ScriptBranch = 'claude/eloquent-wright-woxv2e')
+# A PR review is a separate run: dc-gemini-review.ps1 (through dc-bootstrap.ps1).
+# Order: PATH, kit fetch, kg-permission-gates, netscan, then the long steps (bootstrap, update-all, verify,
+# run-remote) and the final checks, so the report has the quick results early.
+[CmdletBinding()]
+param([string]$Kit = '', [switch]$SkipWinget, [switch]$SkipWindowsUpdate, [switch]$NoRemote, [switch]$SyncPermissionGates, [switch]$NoScan)
 $ErrorActionPreference = 'Continue'
 $ProgressPreference = 'SilentlyContinue'
 $t0 = Get-Date
@@ -45,16 +50,20 @@ $L = New-Object System.Collections.Generic.List[string]
 function W([string]$s) { $script:L.Add($s) }
 function Flush() { [IO.File]::WriteAllText($script:latest, (($script:L -join "`r`n") + "`r`n"), $script:utf8) }
 function Sec([string]$t) { W ''; W "## $t"; Flush }
-# Scrub runs on every line of external content (command output, file dumps): token-shaped strings, values
-# after token/key/secret/password/auth switches or NAME=/Header: pairs, bearer values, secret-looking URL
-# query values and URL passwords are masked. One difference from dc-diagnose: run-remote.sh's own
-# `TRIMURTI_SUMMARY passed=<hosts>` line stays readable (passed is not a password).
+# Scrub runs on every line of external content (command output, file dumps, the verdict JSON): bearer and other
+# Authorization values, values after token/key/secret/password/auth switches and NAME=/Header:/"json_key": pairs,
+# secret-looking URL query values, URL passwords and token-shaped strings are masked. Quotes, \" and \u0027 end a
+# value and a value that opens an object or array is left alone, so scrubbed JSON stays JSON. Not secrets:
+# `passed=` (run-remote.sh's TRIMURTI_SUMMARY line) and claude auth status's authMethod / apiKeySource, which name
+# the kind of sign-in (they show when a PC bills an API key). The same function is in dc-diagnose.ps1, dc-fix.ps1
+# and dc-gemini-review.ps1; test/dc-scrub.ps1 keeps them identical.
 function Scrub([string]$s) {
-  $s = $s -replace '(?i)(--?[\w-]*(token|key|secret|password|passwd|pass|auth|bearer|credential)[\w-]*)([=\s]+)\S+', '$1$3***'
-  $s = $s -replace '(?i)\b(?!passed\b)([\w-]*(token|key|secret|password|passwd|pass|auth|bearer|credential)[\w-]*)\s*([=:])\s*(?!(?:true|false|yes|no|null|none|\d+)\b)\S+', '$1$3***'
-  $s = $s -replace '(?i)\b(Bearer)\s+\S+', '$1 ***'
-  $s = $s -replace '(?i)([?&][^=&\s]*(token|key|secret|sig|code|auth|pass)[^=&\s]*=)[^&\s]+', '$1***'
-  $s = $s -replace '(://[^/@\s:]+:)[^@\s]+@', '$1***@'
+  $s = $s -replace '(?i)\b(Bearer)\s+(?:[^\s"''\\]|\\[^\s"''u])+', '$1 ***'
+  $s = $s -replace '(?i)\b((?:proxy-)?authorization["'']?\s*[:=]\s*["'']?)[A-Za-z]+\s+(?:[^\s"''\\]|\\[^\s"''u])+', '$1***'
+  $s = $s -replace '(?i)(--?[\w-]*(token|key|secret|password|passwd|pass|auth|bearer|credential)[\w-]*)([=\s]+)(\\?["'']|\\u0027)?(?:[^\s"''\\]|\\[^\s"''u])+', '$1$3$4***'
+  $s = $s -replace '(?i)\b(?!(?:passed|authMethod|apiKeySource)\b)([\w-]*(token|key|secret|password|passwd|pass|auth|bearer|credential)[\w-]*)(\\?["'']|\\u0027)?\s*([=:])\s*(?!(?:true|false|yes|no|null|none|\d+)\b)((?:\\?["'']|\\u0027){0,2})(?![{\[])(?:[^\s"''\\]|\\[^\s"''u])+', '$1$3$4$5***'
+  $s = $s -replace '(?i)([?&][^=&\s"\\]*(token|key|secret|sig|code|auth|pass)[^=&\s"\\]*=)[^&\s"\\]+', '$1***'
+  $s = $s -replace '(://[^/@\s:"\\]+:)[^@\s"\\]+@', '$1***@'
   $s -replace '(?i)\b(sk-[A-Za-z0-9_-]{10,}|ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|gho_[A-Za-z0-9]{20,}|hf_[A-Za-z0-9]{20,}|sbp_[A-Za-z0-9]{20,}|AIza[0-9A-Za-z_-]{30,}|xox[abprs]-[A-Za-z0-9-]+|AKIA[0-9A-Z]{16}|glpat-[\w-]{20,}|npm_[A-Za-z0-9]{30,}|ya29\.[\w.-]+|eyJ[\w-]{10,}\.[\w-]{10,}\.[\w-]{10,})\b', '***'
 }
 function Clip([string]$s, [int]$n = 220) { $s = Scrub $s; if ($s.Length -gt $n) { $s.Substring(0, $n) + ' ...' } else { $s } }
@@ -148,11 +157,11 @@ try {
 
 Sec '1. PATH rebuilt (Machine + User + the kit''s folders)'
 W ("- {0} PATH entries" -f @($env:Path -split ';' | Where-Object { $_ }).Count)
-foreach ($n in 'claude', 'codex', 'gemini.cmd', 'hf', 'node', 'npm', 'git', 'winget', 'python', 'bash') { W ("- {0}: {1}" -f $n, (Where1 $n)) }
+foreach ($n in 'claude', 'codex', 'gemini.cmd', 'agy', 'hf', 'node', 'npm', 'git', 'winget', 'python', 'bash') { W ("- {0}: {1}" -f $n, (Where1 $n)) }
 $id = [Security.Principal.WindowsIdentity]::GetCurrent()
 $elev = (New-Object Security.Principal.WindowsPrincipal $id).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 W ("- running as {0}; elevated token: {1}; PowerShell {2}; arch {3}" -f $id.Name, $elev, $PSVersionTable.PSVersion, $env:PROCESSOR_ARCHITECTURE)
-$missing = @(foreach ($n in 'claude', 'codex', 'gemini.cmd', 'hf') { if ((Where1 $n) -eq '-') { $n } })
+$missing = @(foreach ($n in 'claude', 'codex', 'gemini.cmd', 'agy', 'hf') { if ((Where1 $n) -eq '-') { $n } })
 W ("- CLIs missing before the run: {0}" -f $(if ($missing.Count) { $missing -join ', ' } else { 'none' }))
 
 Sec '2. Kit clone: git fetch and log only (no checkout; inventory.csv and status.md untouched)'
@@ -175,8 +184,9 @@ else {
   $url = "$(& git -C $kitDir remote get-url origin 2>$null)".Trim() -replace '^([A-Za-z][A-Za-z0-9+.-]*://)[^/@]+@', '$1'
   W ("- origin {0}; branch {1} @ {2}" -f (Clip $url 90), $br, "$(& git -C $kitDir rev-parse --short HEAD 2>$null)".Trim())
   $skip = @(& git -C $kitDir ls-files -v -- inventory.csv status.md 2>$null | Where-Object { $_ -match '^[Ss] ' } | ForEach-Object { $_.Substring(2) })
-  W ("- {0} changed file(s); skip-worktree: {1}" -f @(& git -C $kitDir -c core.fsmonitor=false -c core.untrackedCache=false status --porcelain 2>$null).Count, $(if ($skip.Count) { $skip -join ' ' } else { 'none' }))
-  [void](Exec 'git fetch' ('git -C "{0}" fetch origin' -f $kitDir) 180 8)
+  W ("- {0} changed file(s); skip-worktree: {1}" -f @(& git --no-optional-locks -C $kitDir -c core.fsmonitor=false -c core.untrackedCache=false status --porcelain 2>$null).Count, $(if ($skip.Count) { $skip -join ' ' } else { 'none' }))
+  $kf = Exec 'git fetch' ('git -C "{0}" fetch origin' -f $kitDir) 180 8
+  if ($kf.Started -and $kf.Code -ne 0) { Note ("kit: git fetch failed (exit {0}); the behind count is from the last good fetch" -f $kf.Code) }
   if ($br -and $br -ne 'HEAD') {
     $rem = "$(& git -C $kitDir log -1 --format=%h origin/$br 2>$null)".Trim(); $behind = "$(& git -C $kitDir rev-list --count HEAD..origin/$br 2>$null)".Trim()
     W ('- origin/{0} at {1}; this clone is {2} commit(s) behind (no checkout here)' -f $br, $(if ($rem) { $rem } else { '? (fetch failed or branch gone)' }), $(if ($behind) { $behind } else { '?' }))
@@ -184,7 +194,7 @@ else {
   } else { W '- detached HEAD: no branch to compare with origin' }
 }
 
-Sec '5. kg-permission-gates copies (compared, never changed)'
+Sec '5. kg-permission-gates copies (compared; copied over only with -SyncPermissionGates)'
 $pg = @()
 foreach ($b in (Join-Path $H '.claude\skills'), (Join-Path $H '.agents\skills'), (Join-Path $H '.codex\skills'), (Join-Path $H '.gemini\skills'), (Join-Path $H '.claude\plugins')) {
   if (-not (Test-Path -LiteralPath $b)) { continue }
@@ -216,7 +226,7 @@ else {
         $dst = Join-Path $bk ("permission-gates-$n")
         New-Item -ItemType Directory -Force -Path $dst | Out-Null
         Copy-Item -LiteralPath $o.Path -Destination $dst -Recurse -Force
-        Copy-Item -Path (Join-Path $new.Path '*') -Destination $o.Path -Recurse -Force
+        Get-ChildItem -LiteralPath $new.Path -Force | Copy-Item -Destination $o.Path -Recurse -Force
         $h2 = (Get-FileHash -LiteralPath $o.Skill -Algorithm SHA256).Hash.Substring(0, 16).ToLower()
         W ("    {0}: was {1}, now SKILL.md sha256 {2} ({3})" -f $o.Path, $o.Hash, $h2, $(if ($h2 -eq $new.Hash) { 'matches' } else { 'STILL DIFFERS' }))
         if ($h2 -ne $new.Hash) { Note "kg-permission-gates: $($o.Path) still differs after the copy" }
@@ -249,43 +259,6 @@ else {
   if ($csv -and $csv.LastWriteTime -gt $t0) { W "- $($csv.Name):"; Lines (Get-Content -LiteralPath $csv.FullName -Raw -Encoding UTF8) 60; Note "netscan: $($csv.Name) has the live hosts; inventory.csv is still the template" }
 }
 
-Sec ('6b. PR #26 review: dc-gemini-review.ps1 from origin/' + $ScriptBranch + ' in a full metaplex clone')
-if ($NoGemini) { W '- skipped (-NoGemini)' }
-elseif ((Where1 'git') -eq '-') { W '- git not on PATH: no review' }
-else {
-  # A full (non-sparse) clone of kapoorgalleries/metaplex; the review script is taken from this branch so the run
-  # needs no second delivery. Nothing is checked out: fetch and `git show` only.
-  $mp = $null
-  foreach ($c in @(Get-ChildItem -LiteralPath $H -Directory -Force -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })) {
-    if (-not (Test-Path -LiteralPath (Join-Path $c '.git'))) { continue }
-    $u = "$(& git -C $c remote get-url origin 2>$null)"; if ($u -notmatch '(?i)kapoorgalleries/metaplex') { continue }
-    if ("$(& git -C $c config --bool core.sparseCheckout 2>$null)".Trim() -eq 'true') { continue }
-    $mp = $c; break
-  }
-  if (-not $mp) { W '- no full metaplex clone under the profile: no review'; Note 'PR #26 review not run: no full metaplex clone' }
-  else {
-    W "- clone: $mp"
-    # dc-bootstrap.ps1 unpacks the whole scripts folder, so the review script is usually a sibling of this one.
-    $gf = Join-Path $PSScriptRoot 'dc-gemini-review.ps1'
-    if (-not (Test-Path -LiteralPath $gf)) {
-      $gf = Join-Path $script:dir 'dc-gemini-review.ps1'
-      [void](Exec 'fetch script branch' ('git -C "{0}" fetch --no-tags origin +refs/heads/{1}:refs/remotes/origin/{1}' -f $mp, $ScriptBranch) 180 4)
-      $prev = $null; try { $prev = [Console]::OutputEncoding; [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch { }
-      $src = @(& git -C $mp show ("refs/remotes/origin/{0}:ops/network/scripts/dc-gemini-review.ps1" -f $ScriptBranch) 2>$null)
-      if ($prev) { try { [Console]::OutputEncoding = $prev } catch { } }
-      if ($src.Count -ge 50) { [IO.File]::WriteAllText($gf, (($src -join "`r`n") + "`r`n"), (New-Object Text.UTF8Encoding $true)) }
-    }
-    if (-not (Test-Path -LiteralPath $gf)) { W '- dc-gemini-review.ps1 neither beside this script nor readable from the branch: no review'; Note 'PR #26 review not run: script not available' }
-    else {
-      W "- review script: $gf"
-      $gr = Exec 'dc-gemini-review.ps1' ('powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}" -Clone "{1}" -Via auto' -f $gf, $mp) 1200 12
-      $vj = Join-Path $script:dir 'pr26-verdict.json'
-      if ((Test-Path -LiteralPath $vj) -and (Get-Item -LiteralPath $vj).LastWriteTime -gt $t0) { W '- pr26-verdict.json:'; Lines (Get-Content -LiteralPath $vj -Raw -Encoding UTF8) 80; Note ('PR #26 review: exit ' + $gr.Code + '; verdict in trimurti-dc\pr26-verdict.json') }
-      else { W '- no new pr26-verdict.json'; Note ('PR #26 review did not produce a verdict (exit ' + $gr.Code + ')') }
-    }
-  }
-}
-
 Sec '4. Missing CLIs: bootstrap-ai-clis.ps1'
 if ($missing.Count -eq 0) { W '- nothing missing: bootstrap not run' }
 elseif ($kitDir) {
@@ -305,34 +278,44 @@ elseif ($kitDir) {
 
 Sec '3. Updates: update-all.ps1 (no ASK flags; never a reboot)'
 $wgArgs = 'upgrade --all --silent --include-unknown --accept-source-agreements --accept-package-agreements --disable-interactivity'
-function WingetAll { if ((Where1 'winget') -eq '-') { W '- winget not on PATH: app upgrades skipped' } else { $w = Exec 'winget upgrade --all' "winget $wgArgs" 2700 25; if ($w.Started -and $w.Code -eq -1978335189) { W '    (0x8A15002B: nothing to upgrade)' } } }
+# Not elevated, app upgrades cannot finish unattended: machine-wide installers wait on UAC, and an app that is
+# open (Antigravity on the gallery desktop, 2026-10-12) makes its own installer wait. Then the pending upgrades
+# are listed for an elevated run with the apps closed, and nothing is upgraded.
+function WingetAll {
+  if ((Where1 'winget') -eq '-') { W '- winget not on PATH: app upgrades skipped'; return }
+  if (-not $script:elev) {
+    [void](Exec 'winget upgrades pending' 'winget upgrade --include-unknown --disable-interactivity --source winget' 120 30)
+    W '- not elevated: winget upgrade --all not attempted'
+    Note 'app upgrades need an elevated update-all.ps1 run with the apps closed (pending list in step 3)'
+    return
+  }
+  $w = Exec 'winget upgrade --all' "winget $wgArgs" 2700 25
+  if (-not $w.Started) { return }
+  if ($w.Code -eq -1978335189) { W '    (0x8A15002B: nothing to upgrade)' }
+  elseif ($w.Code -ne 0) { Note ('winget upgrade --all: exit ' + $w.Code + $(if ($w.Timeout) { ', killed at the time limit' } else { '' }) + ' (some upgrades may have failed; see step 3)') }
+}
 if ($kitDir) {
   $flags = ''; $secs = 3600; $why = @()
   if ($SkipWinget) { $why += '-SkipWinget' }; if ($SkipWindowsUpdate) { $why += '-SkipWindowsUpdate' }
-  # Unattended and not elevated, app upgrades cannot finish: machine-wide installers wait on UAC, and an app
-  # that is open (Antigravity on the gallery desktop, 2026-10-12) makes its own installer wait to be closed.
-  # So: CLIs only, then the list of pending upgrades for an elevated run with the apps closed.
-  $listOnly = $false
   if ($why.Count) { $flags = ' -NoOS'; $secs = 1800; W ("- {0}: update-all.ps1 -NoOS (it cannot skip one of the two alone)" -f ($why -join ' and ')) }
-  elseif (-not $elev) { $flags = ' -NoOS'; $secs = 1800; $listOnly = $true; W '- not elevated: update-all.ps1 -NoOS (the CLIs only); app upgrades and Windows Update are listed for an elevated run, not attempted' }
+  elseif (-not $elev) { $flags = ' -NoOS'; $secs = 1800; W '- not elevated: update-all.ps1 -NoOS (the CLIs only); app upgrades are only listed and Windows Update is not run' }
   $upd = Exec 'update-all.ps1' ('powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}"{1}' -f (KitScript 'update-all.ps1'), $flags) $secs 20
   Markers $upd '^(==> |WARNING:|UPDATE_FAILED=|REBOOT_REQUIRED=|\s{2}(claude|codex|gemini|hf|node)\s|\s+(not installed on purpose|->|\(files are queued))' '(no REBOOT_REQUIRED= line: the run did not finish)'
   if ($upd.Started) { $mk = Marks $upd.Out '^(UPDATE_FAILED=|REBOOT_REQUIRED=)'; if ($mk.Count) { foreach ($m in $mk) { Note "update-all: $m" } } else { Note 'update-all.ps1 did not finish (no REBOOT_REQUIRED= line)' } }
-  if ($listOnly) {
-    if ((Where1 'winget') -ne '-') { [void](Exec 'winget upgrades pending' 'winget upgrade --include-unknown --disable-interactivity --source winget' 120 30) }
-    W '- app upgrades and Windows Update: not attempted (not elevated); run update-all.ps1 from an elevated PowerShell with the apps closed'
-    Note 'app upgrades and Windows Update need an elevated update-all.ps1 run with the apps closed (list in step 3)'
-  } elseif ($flags) {
+  if ($flags) {
     if (-not $SkipWinget) { WingetAll } else { W '- winget: skipped (-SkipWinget)' }
     W '- Windows Update: skipped (-NoOS)'
+    if (-not $elev -and -not $SkipWindowsUpdate) { Note 'Windows Update needs an elevated update-all.ps1 run (not elevated here)' }
   }
 } else {
   W '- no kit: minimal safe updates'
-  if ((Where1 'claude') -ne '-') { [void](Exec 'claude update' 'claude update' 300 8) }
+  # A failed update goes into the summary too, not only into its section.
+  function ExecNote([string]$label, [string]$cmd, [int]$sec) { $r = Exec $label $cmd $sec 8; if ($r.Started -and $r.Code -ne 0) { Note ("{0}: exit {1}" -f $label, $r.Code) } }
+  if ((Where1 'claude') -ne '-') { ExecNote 'claude update' 'claude update' 300 }
   $cx = Where1 'codex'
-  if ($cx -ne '-') { if ($cx -match '\\npm\\') { [void](Exec 'codex (npm)' 'npm install -g --no-fund --no-audit @openai/codex@latest' 600 8) } else { [void](Exec 'codex update' 'codex update' 300 8) } }
-  if ((Where1 'gemini.cmd') -ne '-' -and (Where1 'npm') -ne '-') { [void](Exec 'gemini (npm)' 'npm install -g --no-fund --no-audit @google/gemini-cli@latest' 600 8) }
-  if ((Where1 'hf') -ne '-') { [void](Exec 'hf update' 'hf update' 600 8) }
+  if ($cx -ne '-') { if ($cx -match '\\npm\\') { ExecNote 'codex (npm)' 'npm install -g --no-fund --no-audit @openai/codex@latest' 600 } else { ExecNote 'codex update' 'codex update' 300 } }
+  if ((Where1 'gemini.cmd') -ne '-' -and (Where1 'npm') -ne '-') { ExecNote 'gemini (npm)' 'npm install -g --no-fund --no-audit @google/gemini-cli@latest' 600 }
+  if ((Where1 'hf') -ne '-') { ExecNote 'hf update' 'hf update' 600 }
   if ($SkipWinget) { W '- winget: skipped (-SkipWinget)' } else { WingetAll }
   W '- Windows Update: needs the kit''s update-all.ps1 (SYSTEM task); not run'
 }
@@ -400,11 +383,11 @@ Run 'hf version' 'hf --version' 45
 Run 'hf whoami' 'hf auth whoami' 45
 Run 'winget version' 'winget --version' 30
 Run 'winget upgrades left' 'winget upgrade --include-unknown --disable-interactivity --source winget' 120
-$rb1 = Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired'
-$rb2 = Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending'
+$rb1 = Test-Path -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired'
+$rb2 = Test-Path -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending'
 W ("- reboot pending now: WindowsUpdate={0} CBS={1} (nothing here reboots)" -f $rb1, $rb2)
 if ($rb1 -or $rb2) { Note 'Windows says a reboot is pending (not done)' }
-$still = @(foreach ($n in 'claude', 'codex', 'gemini.cmd', 'hf') { if ((Where1 $n) -eq '-') { $n } })
+$still = @(foreach ($n in 'claude', 'codex', 'gemini.cmd', 'agy', 'hf') { if ((Where1 $n) -eq '-') { $n } })
 W ("- CLIs still missing: {0}" -f $(if ($still.Count) { $still -join ', ' } else { 'none' }))
 if ($still.Count) { Note ('CLIs still missing: ' + ($still -join ', ')) }
 

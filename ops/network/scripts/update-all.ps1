@@ -3,7 +3,10 @@ Update this Windows machine: every winget-managed app (Store apps included),
 Windows Update through the PSWindowsUpdate module, and the AI CLIs (claude,
 codex, gemini, hf). Never reboots; prints REBOOT_REQUIRED=yes when one is
 needed. Run elevated (an SSH session as an administrator already is), or push
-it with run-remote.sh --os windows update-all.
+it with run-remote.sh --os windows update-all. Not elevated, winget upgrades
+only per-user apps (--scope user) and reports winget-machine in UPDATE_FAILED,
+because a machine-wide installer would wait on a UAC prompt; an app that is
+open can still make its own installer wait, so close the apps first.
 
 Windows Update installs security and critical updates only, unless a flag
 widens it. Drivers and feature upgrades (a new Windows version) need Sanjay's
@@ -254,7 +257,12 @@ if (-not $NoCLIs) {
     Log 'Claude Code'
     if ((Invoke-Native 'claude' @('update')) -ne 0) { Add-Failure 'claude' "'claude update' failed" }
   }
-  if ($Winget) { & $Winget upgrade --id Anthropic.ClaudeCode --silent --disable-interactivity --accept-source-agreements --accept-package-agreements *> $null }
+  # A winget-installed Claude Code too. Not elevated, only a per-user install: a machine-wide one would wait on UAC.
+  if ($Winget) {
+    $ccArgs = @('upgrade', '--id', 'Anthropic.ClaudeCode', '--silent', '--disable-interactivity', '--accept-source-agreements', '--accept-package-agreements')
+    if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { $ccArgs += @('--scope', 'user') }
+    & $Winget @ccArgs *> $null
+  }
   if (Have 'codex') {   # codex update knows whether it came from the installer or npm
     Log 'Codex CLI'
     if ((Invoke-Native 'codex' @('update')) -ne 0) { Add-Failure 'codex' "'codex update' failed" }
