@@ -15,7 +15,7 @@ foreach ($n in 'dc-diagnose.ps1', 'dc-fix.ps1', 'dc-gemini-review.ps1') {
   $ast = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $scripts $n), [ref]$null, [ref]$null)
   $f = $ast.FindAll({ param($a) $a -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $a.Name -eq 'Scrub' }, $true)
   Check ($f.Count -eq 1) "$n defines Scrub once"
-  if ($f.Count -ge 1) { $bodies[$n] = $f[0].Extent.Text }
+  if ($f.Count -ge 1) { $bodies[$n] = $f[0].Extent.Text -replace "`r", '' }   # git may check a file out with CRLF
 }
 $texts = @($bodies.Values | Select-Object -Unique)
 Check ($texts.Count -eq 1) 'the three Scrub copies are identical'

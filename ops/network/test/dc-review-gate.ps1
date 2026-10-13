@@ -58,6 +58,14 @@ foreach ($c in '{"agentMode":"always-proceed"}', '{"permissions":{"cycleMode":"a
 }
 Check (@(AgyModes (Cfg '{"command":{"data":{"config":{"agentMode":"default","themeMode":"auto","ui":{"editorMode":"vim"},"useG1Credits":false,"allowNonWorkspaceFileAccess":false,"pickerGrouping":"workspace","queuedMessages":"Queue"}}}}')).Count -eq 0) 'default settings do not block'
 Check (@(AgyModes 'text').Count -eq 1 -and @(AgyModes $null).Count -eq 1) 'a /config that is not an object blocks'
+# The keys agy 1.3.3 printed on the desktop (paths replaced): nothing blocks, and a trusted folder blocks only when
+# it holds the review folder.
+$real = '{"command":{"data":{"config":{"agentMode":"","allowNonWorkspaceAccess":false,"altScreenMode":"default","artifactReviewPolicy":"asks-for-review","enableTerminalSandbox":false,"editorMode":"default","pickerGrouping":"none","queuedMessages":"queue","toolPermission":"request-review","trustedWorkspaces":["C:\\Users\\u\\AppData\\Local\\Temp\\Kapoor"],"useG1Credits":false,"verbosity":"medium","permissions":{"allow":["mcp(hf-mcp-server/hf_whoami)"]}}}}}'
+$ws = 'C:\Users\u\trimurti-dc\agy-pr31-1'
+Check (@(AgyModes (Cfg $real) $ws).Count -eq 0) 'the desktop /config does not block'
+Check (@(AgyModes (Cfg ($real -replace 'request-review', 'always-proceed')) $ws).Count -eq 1) 'toolPermission always-proceed blocks'
+Check (@(AgyModes (Cfg ($real -replace '"allowNonWorkspaceAccess":false', '"allowNonWorkspaceAccess":true')) $ws).Count -eq 1) 'allowNonWorkspaceAccess true blocks'
+Check (@(AgyModes (Cfg ($real -replace 'AppData\\\\Local\\\\Temp\\\\Kapoor', 'trimurti-dc')) $ws).Count -eq 1) 'a trusted parent of the review folder blocks'
 
 # The verdict object: ScrubObj masks strings anywhere in it and the JSON always parses.
 foreach ($n in 'ScrubObj') { $f = @($ast.FindAll({ param($a) $a -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $a.Name -eq $n }, $true)); Check ($f.Count -eq 1) "defines $n once"; if ($f.Count) { . ([ScriptBlock]::Create($f[0].Extent.Text)) } }

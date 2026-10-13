@@ -199,9 +199,11 @@ function AgyRules($scopes) {
   @{ counts = $counts; blocked = $blocked.ToArray() }
 }
 # Settings from -p "/config" (.command.data.config) that could let agy act without a prompt: a value naming an
-# auto-approving mode (always-proceed, accept-edits, bypass and the like), or a setting about workspace access,
-# auto-execution or approval that is not off. Walked six levels deep, arrays included; another shape blocks.
-function AgyModes($cfg) {
+# auto-approving mode (always-proceed, accept-edits, bypass and the like), a setting about workspace access,
+# auto-execution or approval that is not off, or a trusted folder that holds the review folder $ws. Walked six
+# levels deep, arrays included; another shape blocks. agy 1.3.3's keys include toolPermission (request-review),
+# agentMode, allowNonWorkspaceAccess (False), enableTerminalSandbox and trustedWorkspaces.
+function AgyModes($cfg, [string]$ws = '') {
   if (-not ($cfg -is [System.Management.Automation.PSCustomObject])) { return @('(unexpected /config shape)') }
   $modes = New-Object System.Collections.Generic.List[string]
   $todo = New-Object System.Collections.Generic.Queue[object]; $todo.Enqueue(@($cfg, 0, ''))
@@ -211,6 +213,10 @@ function AgyModes($cfg) {
       $nm = ($it[2] + '.' + $q.Name).TrimStart('.')
       foreach ($x in @($q.Value)) {
         if ($x -is [System.Management.Automation.PSCustomObject]) { if ($it[1] -lt 6) { $todo.Enqueue(@($x, ($it[1] + 1), $nm)) } }
+        elseif ($nm -match '(?i)trust') {
+          $tp = ([string]$x).TrimEnd('\', '/')
+          if ($tp -and $ws -and ($ws -ieq $tp -or $ws.StartsWith($tp + '\', [StringComparison]::OrdinalIgnoreCase) -or $ws.StartsWith($tp + '/', [StringComparison]::OrdinalIgnoreCase))) { $modes.Add($nm + '=' + (Clip $tp 60) + ' (holds the review folder)') }
+        }
         elseif ([string]$x -match '(?i)always|proceed|yolo|accept|bypass|skip|dangerous' -or ($nm -match '(?i)workspace|outside|auto.?exec|approv|bypass|skip|dangerous' -and $x -ne $false -and [string]$x -notmatch '(?i)^(?:false|off|never|none|default|request-review|ask|)$')) { $modes.Add($nm + '=' + (Clip ([string]$x) 40)) }
       }
     }
@@ -408,7 +414,7 @@ if ($route -eq 'agy') {
   $ce = ScrubFile $cfgErr; if ($ce.Trim()) { W '- agy /config stderr:'; Lines $ce 4 }
   $cfg = $null; try { $cfg = (ConvertFrom-Json -InputObject ([string]$cr.Out) -ErrorAction Stop).command.data.config } catch { }
   if ($cr.Code -ne 0 -or $null -eq $cfg) { Fail 'agy /config did not answer in the expected JSON shape; agy not run' @{ route = 'agy'; exit = $cr.Code; timeout = $cr.Timeout; head = $sha; credential_scan = $scan; workspace = $ws } }
-  $modes = @(AgyModes $cfg)
+  $modes = @(AgyModes $cfg $ws)
   if ($blocked.Count -or $modes.Count) {
     W ("- refused: saved agy settings would let it act without a prompt ({0})" -f ((@($blocked) + @($modes)) -join ', '))
     Fail 'saved agy permissions or settings would let it act without a prompt; agy not run' @{ route = 'agy'; allow_rule_counts = $counts; blocking = @($blocked) + @($modes); fix = 'remove agy''s saved allow rules (agy /permissions) and turn those settings off, or review with -Via api'; head = $sha; credential_scan = $scan; workspace = $ws }
