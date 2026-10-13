@@ -29,8 +29,10 @@ development project or a Supabase branch instead.
 
 ## Permissions and the settings check
 
-`settings.json` is the committed permission policy for every Claude Code
-session in this repo. What to know about it:
+`settings.json` is the committed permission policy for Claude Code sessions
+started at the repository root. Claude Code reads `.claude/settings.json`
+only from the directory a session starts in, so a session started in a
+subdirectory, such as `ops/network/`, runs without it. What to know about it:
 
 **What is allowed without a prompt.** The committed `permissions.allow` holds
 one rule, `Bash(ldd --version)`, as an exact command. (Claude Code's built-in
@@ -93,9 +95,58 @@ there is an entry Claude Code drops: an unknown hook event gets a Settings
 Warning in an interactive session and nothing in a `-p` or CI run, and an
 unknown permission key or hook field gets no warning anywhere. It is the
 same failure in another form. It also checks the permission lists, and
-command hooks as described above. Its tests are in
+command hooks as described above. Hook scripts must be text with no NUL
+byte. Git treats a file with one as binary, so a pull request would show
+"Binary files differ" instead of the script: a zip archive or bytecode
+(which `python3` runs even when named `.py`), or UTF-16 text such as a
+`.ps1` written by Windows PowerShell 5.1 (save it as UTF-8). For the same
+reason no `.gitattributes` file may mark a hook script `-diff` or `binary`,
+which makes git show any file as binary, or give it a `working-tree-encoding`,
+which re-encodes it on checkout so the bytes that run are not the ones
+review saw. A top-level
+`env` key is rejected: Claude Code passes it to every hook process, where
+`NODE_OPTIONS`, `BASH_ENV` or `PYTHONPATH` would load code from outside
+`.claude/hooks/` first and `PATH` could swap the interpreter. Beyond command
+hooks, nothing in the file may run code that no reviewed script holds:
+
+- An `mcp_tool` hook must name a `server`/`tool` pair listed in
+  `MCP_TOOL_HOOKS` in the checker; the list starts empty. Each entry also
+  pins the server's definition in the root `.mcp.json`, since a pair alone
+  binds only a name: the server must be defined there exactly as pinned,
+  with no `${VAR}` expansion, and an edit to it fails the check until the
+  pin is reviewed. Add a pair only after confirming the tool cannot run
+  commands, write files or send data, whatever its input. A developer's own
+  local-scope, managed or `--mcp-config` server of the same name still
+  replaces it on their machine, and so does a user-scope one until they
+  approve the project server.
+- An `http` hook must use a URL listed in `HTTP_HOOK_URLS`, also empty:
+  Claude Code posts every hook input, tool inputs and prompts included, to
+  it, and its reply can approve a tool call or change the call's input. Its
+  headers can also carry environment variables named in `allowedEnvVars`.
+- `agent` hooks are rejected: the hook agent runs in `dontAsk` mode with
+  every allow rule from every settings scope, so its prompt could call any
+  allowed tool, MCP tools included. Prompt hooks have no tools and are
+  accepted.
+- At the top level the file may hold only `permissions`, `hooks` and a
+  string `$schema` (Claude Code skips a file whose `$schema` is not a
+  string). `enabledPlugins` and `extraKnownMarketplaces` would load a plugin
+  with its own hooks, and `apiKeyHelper`, `statusLine`, `awsAuthRefresh`,
+  `awsCredentialExport` and `otelHeadersHelper` run commands.
+- Only this `.claude/settings.json` may be tracked. A nested one applies to
+  sessions started in its directory, which this check does not read, and
+  Claude Code treats a tracked `settings.local.json` as repository-supplied;
+  personal settings belong in an untracked `settings.local.json`. Paths are
+  compared ignoring case, as macOS and Windows open them, and a tracked
+  `.claude` that is a symlink or submodule is rejected too.
+
+Hooks in skill or agent frontmatter, and plugins a developer enables for
+themselves, are outside this check. So is a submodule's own
+`.claude/settings.json`: a submodule is a separate repository, which Claude
+Code does not trust along with this one. The checker's tests are in
 `scripts/test-check-claude-settings.js`. CI runs both from
-`.github/workflows/claude-settings.yml` whenever `.claude/` changes.
+`.github/workflows/claude-settings.yml` whenever a `.claude` folder at any
+depth and in any case, a `.gitattributes` file, or the root `.mcp.json`
+changes.
 
 The check is a lint that catches mistakes, not a security boundary. CI runs
 the pull request's own copy of the checker, so a pull request can change the
