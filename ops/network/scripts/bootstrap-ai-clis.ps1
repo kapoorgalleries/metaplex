@@ -1,26 +1,27 @@
 <#
-Install Claude Code, OpenAI Codex CLI, Gemini CLI and the Hugging Face CLI (hf)
-on this Windows machine, and register Hugging Face's MCP server with Codex and
-Gemini. Claude Code, Codex and hf are put in place by their official installers,
-each run in a child PowerShell so that its own exit or StrictMode cannot end
-this script (npm is the fallback for Codex); Gemini CLI is an npm package, so
-Node.js LTS is installed for it; hf's installer needs Python 3.10+, so Python
-3.13 is installed when no 3.10+ is present. Idempotent: rerun to upgrade.
+Install Claude Code, OpenAI Codex CLI, Gemini CLI, Antigravity CLI (agy) and the
+Hugging Face CLI (hf) on this Windows machine, and register Hugging Face's MCP
+server with Codex and Gemini. Claude Code, Codex, agy and hf are put in place by
+their official installers, each run in a child PowerShell so that its own exit
+or StrictMode cannot end this script (npm is the fallback for Codex); Gemini CLI
+is an npm package, so Node.js LTS is installed for it; hf's installer needs
+Python 3.10+, so Python 3.13 is installed when no 3.10+ is present. Idempotent:
+rerun to upgrade.
 
 winget (App Installer; present on Windows 10 1809+ and 11) is needed only to
 install Node.js, Python or Git. Node's MSI needs elevation: run from an elevated
 PowerShell, or over SSH as a member of Administrators (those SSH sessions are
 already elevated).
 
-Usage: powershell -ExecutionPolicy Bypass -File scripts\bootstrap-ai-clis.ps1 [-SkipClaude] [-SkipCodex] [-SkipGemini] [-SkipNode] [-WithNode] [-SkipHf] [-WithClaudeHfMcp] [-WithGit]
-  -SkipClaude, -SkipCodex, -SkipGemini   leave that CLI alone
+Usage: powershell -ExecutionPolicy Bypass -File scripts\bootstrap-ai-clis.ps1 [-SkipClaude] [-SkipCodex] [-SkipGemini] [-SkipAgy] [-SkipNode] [-WithNode] [-SkipHf] [-WithClaudeHfMcp] [-WithGit]
+  -SkipClaude, -SkipCodex, -SkipGemini, -SkipAgy   leave that CLI alone
   -SkipHf           no hf CLI and no Hugging Face MCP registration
   -WithClaudeHfMcp  also register the Hugging Face MCP server with Claude Code (see register_hf_mcp in bootstrap-ai-clis.sh)
   -SkipNode    never install Node.js (Gemini then needs Node 20+ already)
   -WithNode    install Node.js 20+ even when Gemini is skipped (the trimurti-ops MCP server needs it)
   -WithGit     also install Git for Windows (the Bash tool for Claude Code)
   -h, --help   this text
-  The bootstrap-ai-clis.sh spellings work too: --skip-claude --skip-codex --skip-gemini --skip-node --with-node --skip-hf --with-claude-hf-mcp --with-git
+  The bootstrap-ai-clis.sh spellings work too: --skip-claude --skip-codex --skip-gemini --skip-agy --skip-node --with-node --skip-hf --with-claude-hf-mcp --with-git
 Exit: 0 every requested CLI is installed, 1 something failed (the last line says what), 2 bad arguments.
 #>
 $ErrorActionPreference = 'Stop'
@@ -31,7 +32,7 @@ function Show-Usage([int]$Code, [string]$Why) {
   if ($Code -eq 0) { Write-Host $text } else { [Console]::Error.WriteLine("$Why`n$text") }
   exit $Code
 }
-$SkipClaude = $false; $SkipCodex = $false; $SkipGemini = $false; $SkipNode = $false; $WithNode = $false; $WithGit = $false
+$SkipClaude = $false; $SkipCodex = $false; $SkipGemini = $false; $SkipAgy = $false; $SkipNode = $false; $WithNode = $false; $WithGit = $false
 $SkipHf = $false; $WithClaudeHfMcp = $false
 foreach ($a in $args) {
   switch -regex ("$a") {
@@ -39,6 +40,7 @@ foreach ($a in $args) {
     '^(-SkipClaude|--skip-claude)$' { $SkipClaude = $true }
     '^(-SkipCodex|--skip-codex)$'   { $SkipCodex = $true }
     '^(-SkipGemini|--skip-gemini)$' { $SkipGemini = $true }
+    '^(-SkipAgy|--skip-agy)$'       { $SkipAgy = $true }
     '^(-SkipNode|--skip-node)$'     { $SkipNode = $true }
     '^(-WithNode|--with-node)$'     { $WithNode = $true }
     '^(-SkipHf|--skip-hf)$'         { $SkipHf = $true }
@@ -205,6 +207,9 @@ function Read-Utf8([byte[]]$Bytes) {
 $jsonString = '"(?:[^"\\\x00-\x1f]|\\(?:["\\/bfnrt]|u[0-9A-Fa-f]{4}))*"'
 $jsonScalar = '-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?|true|false|null'
 $jsonToken = [regex]($jsonString + '|' + $jsonScalar + '|[{}\[\],:]')
+$jsonMember = [regex]('(' + $jsonString + ')([ \t\r\n]*:)?|[{}]')
+$jsonEscape = [regex]'\\(?:u([0-9A-Fa-f]{4})|(["\\/bfnrt]))'
+$jsonUnescape = [Text.RegularExpressions.MatchEvaluator]{ param($e) if ($e.Groups[1].Success) { [string][char][Convert]::ToInt32($e.Groups[1].Value, 16) } else { switch -CaseSensitive ($e.Groups[2].Value) { 'b' { "`b" } 'f' { "`f" } 'n' { "`n" } 'r' { "`r" } 't' { "`t" } default { $e.Groups[2].Value } } } }
 $jsonString = [regex]$jsonString
 $jsonScalar = [regex]$jsonScalar
 $jsonWs = [regex]'[ \t\r\n]+'
@@ -218,9 +223,32 @@ function Test-StrictJson([string]$T) {
   do { $prev = $s; $s = $jsonFold.Replace($s, '0') } while ($s -cne $prev)
   return $s -ceq '0' -or $s -ceq '"'
 }
+# A repeated key at any depth needs manual review, as in the bash validator: ConvertFrom-Json keeps
+# one of them, the client may keep another. Keys compare as decoded text; only escaped ones need decoding.
+function Test-UniqueKeys([string]$T) {
+  $open = New-Object 'Collections.Generic.Stack[object]'
+  foreach ($m in $jsonMember.Matches($T)) {
+    $v = $m.Value
+    if ($v -ceq '{') { $open.Push((New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal))) }
+    elseif ($v -ceq '}') { [void]$open.Pop() }
+    elseif ($m.Groups[2].Success) {
+      $k = $m.Groups[1].Value
+      $k = $k.Substring(1, $k.Length - 2)
+      # Escapes are decoded by hand: Windows PowerShell's ConvertFrom-Json turns "\/Date(n)\/" into a DateTime.
+      if ($k.IndexOf([char]92) -ge 0) { $k = $jsonEscape.Replace($k, $jsonUnescape) }
+      if (-not $open.Peek().Add($k)) { return $false }
+    }
+  }
+  return $true
+}
 function Skip-JsonWs([string]$T, [int]$i) {
   while ($i -lt $T.Length -and " `t`r`n".IndexOf($T[$i]) -ge 0) { $i++ }
   return $i
+}
+# A member by its exact name. PowerShell's own property lookup ignores case ("MCPServers" would
+# find mcpServers) where bash's dict does not, so every member is matched with -ceq. $null if absent.
+function Get-JsonMember($Obj, [string]$Name) {
+  return $Obj.PSObject.Properties | Where-Object { $_.Name -ceq $Name } | Select-Object -First 1
 }
 # 0 compatible, 3 absent, 1 unsupported/incompatible. Use properties, not a textual key match.
 function Get-HfClientState([string]$Client) {
@@ -234,23 +262,37 @@ function Get-HfClientState([string]$Client) {
   try {
     $raw = Read-Utf8 ([IO.File]::ReadAllBytes($cfg))
     # The root must be an object: [pscustomobject] is [psobject], which a parsed array also passes.
-    if (-not (Test-StrictJson $raw) -or $raw[(Skip-JsonWs $raw 0)] -cne [char]'{') { return 1 }
+    if (-not (Test-StrictJson $raw) -or $raw[(Skip-JsonWs $raw 0)] -cne [char]'{' -or -not (Test-UniqueKeys $raw)) { return 1 }
     $settings = $raw | ConvertFrom-Json -ErrorAction Stop
     if ($null -eq $settings -or $settings -isnot [pscustomobject]) { return 1 }
-    $servers = $settings.mcpServers
+    # Members are read by exact name, and each value must have the type bash expects: an object
+    # entry, string url/type/httpUrl, an array excludeTools. Otherwise manual review, never "compatible".
+    $sp = Get-JsonMember $settings 'mcpServers'
+    if ($null -eq $sp) { return 3 }
     # A present-but-null mcpServers needs manual review, as in the bash validator; absent means absent.
-    if ($null -eq $servers) { if ($settings.PSObject.Properties['mcpServers']) { return 1 }; return 3 }
+    $servers = $sp.Value
     if ($servers -isnot [pscustomobject]) { return 1 }
-    $property = $servers.PSObject.Properties | Where-Object { $_.Name -ceq 'huggingface' } | Select-Object -First 1
+    $property = Get-JsonMember $servers 'huggingface'
     if ($null -eq $property) { return 3 }
     $entry = $property.Value
+    if ($entry -isnot [pscustomobject]) { return 1 }
+    $p = @{}
+    foreach ($name in 'url', 'type', 'httpUrl', 'excludeTools') {
+      $m = Get-JsonMember $entry $name
+      if ($null -ne $m) { $p[$name] = $m.Value }
+    }
+    foreach ($name in 'url', 'type', 'httpUrl') { if ($p.ContainsKey($name) -and $p[$name] -isnot [string]) { return 1 } }
+    $urls = @($hfUrl, "$($hfUrl)?login")
     if ($Client -eq 'claude') {
-      if ($entry.type -cne 'http' -or @($hfUrl, "$($hfUrl)?login") -cnotcontains $entry.url) { return 1 }
+      if ($p['type'] -cne 'http' -or -not $p.ContainsKey('url') -or $urls -cnotcontains $p['url']) { return 1 }
     } else {
       # Gemini CLI 0.61 writes url + type "http"; older settings carry the deprecated httpUrl. Both count.
-      $gurl = if ($entry.PSObject.Properties['httpUrl']) { $entry.httpUrl } elseif ($entry.type -ceq 'http') { $entry.url } else { $null }
-      if (@($hfUrl, "$($hfUrl)?login") -cnotcontains $gurl) { return 1 }
-      foreach ($tool in $hfDeny) { if (@($entry.excludeTools) -cnotcontains $tool) { return 1 } }
+      $gurl = if ($p.ContainsKey('httpUrl')) { $p['httpUrl'] } elseif ($p['type'] -ceq 'http') { $p['url'] } else { $null }
+      if ($null -eq $gurl -or $urls -cnotcontains $gurl) { return 1 }
+      # A string or object here is not a list of tools, even if PowerShell would iterate it.
+      $tools = $p['excludeTools']
+      if (-not ($tools -is [array])) { return 1 }
+      foreach ($tool in $hfDeny) { if (@($tools | Where-Object { $_ -is [string] }) -cnotcontains $tool) { return 1 } }
     }
     return 0
   } catch { return 1 }
@@ -260,7 +302,7 @@ function Get-HfClientState([string]$Client) {
 # Never `gemini mcp add` (or `remove`): Gemini 0.61 writes back the whole mcpServers map as loaded,
 # with every ${VAR} already expanded, so another server's secret would be saved in the clear.
 # Parity with add_gemini_hf in bootstrap-ai-clis.sh: same bytes, same return codes.
-# 0 created; 4 settings.json exists: left untouched, snippet printed; 1 could not create.
+# 0 created; 4 nothing written, snippet printed (settings.json exists, or not Windows PowerShell 5.1); 1 could not create.
 function Add-GeminiHf {
   $geminiDir = if ($env:GEMINI_CLI_HOME) { $env:GEMINI_CLI_HOME } else { $env:USERPROFILE }
   $dir = Join-Path $geminiDir '.gemini'
@@ -271,6 +313,16 @@ function Add-GeminiHf {
   $entry = @('{', ('  "url": "' + $hfUrl + '",'), '  "type": "http",', '  "headers": {',
     '    "Authorization": "Bearer ${HF_TOKEN}"', '  },', '  "excludeTools": [') + $tools + @('  ]', '}')
   $doc = (@('{', '  "mcpServers": {', ('    "huggingface": ' + $entry[0])) + @($entry[1..($entry.Count - 1)] | ForEach-Object { '    ' + $_ }) + @('  }', '}')) -join "`n"
+  # Creation is verified on Windows PowerShell 5.1 (and Linux in the .sh) only. Anywhere else (PowerShell 7,
+  # or an older PowerShell without PSEdition) the entry is printed for a manual setup.
+  if ($PSVersionTable.PSEdition -cne 'Desktop') {
+    Write-Host ('gemini: automatic setup is verified on Linux and Windows PowerShell 5.1 only; nothing was written. ' +
+      'To finish, add this entry inside the top-level "mcpServers" object of ' + $cfg + ' (create "mcpServers": { } ' +
+      'if it has none; if the file does not exist, create it, readable only by you, as {"mcpServers": { }} ' +
+      'with the entry inside), then rerun:')
+    Write-Host ('"huggingface": ' + ($entry -join "`n"))
+    return 4
+  }
   # GetAttributes sees the name itself, a dangling link included, so nothing is created through one.
   $taken = { try { [void][IO.File]::GetAttributes($cfg); $true } catch { $false } }
   if (-not (& $taken)) {
@@ -283,9 +335,7 @@ function Add-GeminiHf {
       $acl.SetAccessRuleProtection($true, $false)
       $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule([Security.Principal.WindowsIdentity]::GetCurrent().User, 'FullControl', 'Allow')))
       $w = [Security.AccessControl.FileSystemRights]::Write
-      $fs = if ($PSVersionTable.PSEdition -ceq 'Core') {
-        [IO.FileSystemAclExtensions]::Create([IO.FileInfo]$cfg, [IO.FileMode]::CreateNew, $w, [IO.FileShare]::None, 4096, [IO.FileOptions]::None, $acl)
-      } else { New-Object IO.FileStream($cfg, [IO.FileMode]::CreateNew, $w, [IO.FileShare]::None, 4096, [IO.FileOptions]::None, $acl) }
+      $fs = New-Object IO.FileStream($cfg, [IO.FileMode]::CreateNew, $w, [IO.FileShare]::None, 4096, [IO.FileOptions]::None, $acl)
       $made = $true
       try { $bytes = [Text.Encoding]::UTF8.GetBytes($doc + "`n"); $fs.Write($bytes, 0, $bytes.Length); $fs.Flush($true) } finally { $fs.Dispose() }
       return 0
@@ -372,6 +422,26 @@ if (-not $SkipGemini) {
     else { Refresh-Path; if (-not (Have 'gemini')) { Add-Failure 'gemini' 'Gemini CLI installed, but gemini is not on PATH' } }
   }
 }
+# Antigravity CLI (agy), Google's terminal agent for personal Google accounts since Gemini CLI stopped
+# serving them on 2026-06-18: agy.exe in %LOCALAPPDATA%\agy\bin. Google's installer checks the download's
+# SHA-512, then runs `agy install` for the PATH; it stops, changing nothing, when agy.exe already exists
+# there, so a rerun updates with `agy update`. Add-UserPath makes sure new terminals find it either way.
+if (-not $SkipAgy) {
+  if (Have 'agy') {
+    Log "agy present ($(Get-CliVersion 'agy')); checking for an update"
+    if ((Invoke-Native 'agy' @('update')) -ne 0) { Add-Failure 'agy' "'agy update' failed" }
+  } else {
+    Log 'installing Antigravity CLI (agy; official installer, updates itself)'
+    $rc = Invoke-Installer 'https://antigravity.google/cli/install.ps1'
+    # LOCALAPPDATA can be unset (some SSH and service sessions): ask .NET, then fall back to the profile.
+    $localApp = $env:LOCALAPPDATA
+    if (-not $localApp) { $localApp = [Environment]::GetFolderPath('LocalApplicationData') }
+    if (-not $localApp -and $env:USERPROFILE) { $localApp = Join-Path $env:USERPROFILE 'AppData\Local' }
+    if ($localApp) { Add-UserPath (Join-Path $localApp 'agy\bin') }
+    Refresh-Path
+    if ($rc -ne 0 -or -not (Have 'agy')) { Add-Failure 'agy' "Antigravity CLI install FAILED (installer exit $rc; https://antigravity.google/cli/install.ps1)" }
+  }
+}
 
 # Hugging Face CLI through its official installer: a venv in %USERPROFILE%\.hf-cli, hf.exe copied to
 # %USERPROFILE%\.local\bin. The installer also runs `hf skills add hf-cli --global`: the hf-cli agent
@@ -412,9 +482,9 @@ if (-not $SkipHf) {
     elseif ($state -eq 3) {
       $rc = Add-GeminiHf
       if ($rc -eq 0 -and (Get-HfClientState 'gemini') -eq 0) { Log 'gemini: created user settings with the huggingface MCP server' }
-      elseif ($rc -eq 4) { Add-Failure 'hf-mcp-gemini' 'gemini: user settings exist; huggingface entry not added (manual step above)' }
+      elseif ($rc -eq 4) { Add-Failure 'hf-mcp-gemini' 'gemini: huggingface entry not added (manual step above)' }
       else { Add-Failure 'hf-mcp-gemini' 'gemini: could not create user settings' }
-    } else { Add-Failure 'hf-mcp-gemini' 'gemini: user settings need manual review (commented/unsupported JSON, incompatible URL or missing blocked tools); left unchanged' }
+    } else { Add-Failure 'hf-mcp-gemini' 'gemini: user settings need manual review (commented/unsupported JSON, a repeated key, an incompatible URL or missing blocked tools); left unchanged' }
   }
   if ($WithClaudeHfMcp -and -not $SkipClaude -and (Have 'claude')) {
     $state = Get-HfClientState 'claude'
@@ -430,8 +500,9 @@ if (-not $SkipHf) {
 Refresh-Path
 
 Log "versions on ${env:COMPUTERNAME}:"
-foreach ($c in 'node', 'claude', 'codex', 'gemini', 'hf') {
-  if (Have $c) { $v = Get-CliVersion $c } else { $v = 'MISSING' }
+$skipped = @{ node = $SkipNode; claude = $SkipClaude; codex = $SkipCodex; gemini = $SkipGemini; agy = $SkipAgy; hf = $SkipHf }
+foreach ($c in 'node', 'claude', 'codex', 'gemini', 'agy', 'hf') {
+  if (Have $c) { $v = Get-CliVersion $c } elseif ($skipped[$c]) { $v = 'not installed (skipped)' } else { $v = 'MISSING' }
   Write-Host ("  {0,-7} {1}" -f $c, $v)
 }
 @'
@@ -459,9 +530,18 @@ read it with Read-Host -AsSecureString, and it lasts for that window only.
            Google Workspace account (not personal Gmail): first
            $env:GOOGLE_CLOUD_PROJECT = '<project-id>'; personal Gmail must leave it unset.
            "no longer supported for Gemini Code Assist for individuals": that account's free tier is
-           closed to Gemini CLI; the way in (API key, paid Workspace project, or Antigravity) is Sanjay's call.
+           closed to Gemini CLI; the way in (API key, paid Workspace project, or agy below) is Sanjay's call.
            API key instead (this window only; https://aistudio.google.com/app/apikey):
            $env:GEMINI_API_KEY = [Net.NetworkCredential]::new('', (Read-Host 'key' -AsSecureString)).Password
+  agy      Antigravity CLI. Run `agy` and sign in with the Google account: a browser opens. Over SSH
+           (ssh -t) it prints a URL instead: open it on any machine, then paste the code the page shows
+           back here. The sign-in is kept in the OS keyring.
+           API key instead: "modelProvider": "gemini" in %USERPROFILE%\.gemini\antigravity-cli\settings.json,
+           and $env:GEMINI_API_KEY from the hidden prompt above (agy reads no other key variable).
+           check:  agy -p "hi"     (signed in, it answers; if not, it prints "Authentication required"
+                   and a sign-in URL, waits 60 seconds for the code, then exits 1)
+           Leave "Use AI Credits" (useG1Credits in that settings.json) off, so agy never spends the
+           account's purchased AI credits when the plan's quota runs out.
   hf       run `hf auth login` (over SSH: ssh -t). "Log in with your browser" prints a URL and a code:
            open the URL on any machine and enter the code. "Paste an access token" reads a token at a
            hidden prompt: make one per machine at https://huggingface.co/settings/tokens > New token,
@@ -474,6 +554,8 @@ read it with Read-Host -AsSecureString, and it lasts for that window only.
                    Never run `gemini mcp add` or `gemini mcp remove` with HF_TOKEN set: they save
                    every ${VAR} in its settings file as the value, this token included.
                    Gemini loads MCP servers only in folders it trusts (it asks on the first run there).
+           agy     not registered by this script: `agy mcp add` has no per-tool block, so Jobs and
+                   Sandboxes could not be kept out, and Google does not document ${VAR} in its headers.
            claude  the account's Hugging Face connector comes with the claude.ai login (/mcp lists it).
                    Signed in with setup-token or an API key? Rerun this script with -WithClaudeHfMcp,
                    then  claude mcp login huggingface   (--no-browser over SSH)

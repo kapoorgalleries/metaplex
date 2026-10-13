@@ -44,3 +44,21 @@ jobs:
 
       - name: Check settings.json
         run: node scripts/check-claude-settings.js
+
+  # The checker's tests again on macOS, whose default file system ignores case
+  # and whose realpath(3) returns on-disk names: the only runner where the
+  # tests for a hook path spelled in another case actually run.
+  claude-settings-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .node-version
+
+      - name: Test the checker
+        run: node scripts/test-check-claude-settings.js
+        env:
+          # Fail rather than skip if those tests cannot run here.
+          CHECK_SETTINGS_REQUIRE_CASE_TESTS: "1"

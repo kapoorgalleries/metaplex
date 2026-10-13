@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# Install Claude Code, OpenAI Codex CLI, Gemini CLI and the Hugging Face CLI
-# (hf) on this macOS or Linux machine, and register Hugging Face's MCP server
-# with Codex and Gemini. Claude Code and Codex are native binaries put in place
-# by their official installers (npm is the fallback for Codex); Gemini CLI is an
-# npm package, so Node.js 20+ is installed for it; hf comes from its official
-# installer, which needs Python 3.10+. Idempotent: rerun to upgrade.
+# Install Claude Code, OpenAI Codex CLI, Gemini CLI, Antigravity CLI (agy) and
+# the Hugging Face CLI (hf) on this macOS or Linux machine, and register Hugging
+# Face's MCP server with Codex and Gemini. Claude Code, Codex and agy are native
+# binaries put in place by their official installers (npm is the fallback for
+# Codex); Gemini CLI is an npm package, so Node.js 20+ is installed for it; hf
+# comes from its official installer, which needs Python 3.10+. Idempotent: rerun
+# to upgrade.
 # Run it on the target, or push it to every host with run-remote.sh (add --tty
 # there when sudo on the host asks for a password).
 #
@@ -17,17 +18,18 @@
 # Exit: 0 when every requested CLI is installed and a plain ssh command finds
 # it, 1 when something failed (the last line says what), 2 on bad arguments.
 #
-# Usage: bootstrap-ai-clis.sh [--skip-claude] [--skip-codex] [--skip-gemini] [--skip-node] [--with-node]
-#                             [--skip-hf] [--with-claude-hf-mcp]
+# Usage: bootstrap-ai-clis.sh [--skip-claude] [--skip-codex] [--skip-gemini] [--skip-agy] [--skip-node]
+#                             [--with-node] [--skip-hf] [--with-claude-hf-mcp]
 set -u
 
 usage() {
   cat <<'EOF'
-Usage: bootstrap-ai-clis.sh [--skip-claude] [--skip-codex] [--skip-gemini] [--skip-node] [--with-node]
-                            [--skip-hf] [--with-claude-hf-mcp]
-Installs or updates Claude Code, Codex CLI, Gemini CLI and the Hugging Face CLI (hf; Node.js 20+
-for Gemini, Python 3.10+ for hf), and registers Hugging Face's MCP server with Codex and Gemini.
-  --skip-claude|--skip-codex|--skip-gemini   leave that CLI alone
+Usage: bootstrap-ai-clis.sh [--skip-claude] [--skip-codex] [--skip-gemini] [--skip-agy] [--skip-node]
+                            [--with-node] [--skip-hf] [--with-claude-hf-mcp]
+Installs or updates Claude Code, Codex CLI, Gemini CLI, Antigravity CLI (agy) and the Hugging Face
+CLI (hf; Node.js 20+ for Gemini, Python 3.10+ for hf), and registers Hugging Face's MCP server with
+Codex and Gemini.
+  --skip-claude|--skip-codex|--skip-gemini|--skip-agy   leave that CLI alone
   --skip-hf             no hf CLI and no Hugging Face MCP registration
   --with-claude-hf-mcp  also register the Hugging Face MCP server with Claude Code (see register_hf_mcp)
   --skip-node   never install Node.js (Gemini then needs Node 20+ already)
@@ -39,12 +41,13 @@ Exit: 0 all requested CLIs installed and on the PATH of a plain 'ssh <host> <cli
 EOF
 }
 
-SKIP_CLAUDE=0; SKIP_CODEX=0; SKIP_GEMINI=0; SKIP_NODE=0; WITH_NODE=0; SKIP_HF=0; CLAUDE_HF_MCP=0
+SKIP_CLAUDE=0; SKIP_CODEX=0; SKIP_GEMINI=0; SKIP_AGY=0; SKIP_NODE=0; WITH_NODE=0; SKIP_HF=0; CLAUDE_HF_MCP=0
 for a in "$@"; do
   case "$a" in
     --skip-claude) SKIP_CLAUDE=1 ;;
     --skip-codex)  SKIP_CODEX=1 ;;
     --skip-gemini) SKIP_GEMINI=1 ;;
+    --skip-agy)    SKIP_AGY=1 ;;
     --skip-node)   SKIP_NODE=1 ;;
     --with-node)   WITH_NODE=1 ;;
     --skip-hf)     SKIP_HF=1 ;;
@@ -241,6 +244,24 @@ install_gemini() {
   have gemini || { warn "Gemini CLI installed, but gemini is not on PATH"; return 1; }
 }
 
+# Antigravity CLI (agy): Google's terminal agent for personal Google accounts, which Gemini CLI stopped
+# serving on 2026-06-18. A native binary in ~/.local/bin, so no Node. Google's installer checks the
+# download's SHA-512 against its manifest, then runs `agy install` for the shell setup; it stops,
+# changing nothing, when ~/.local/bin/agy already exists, so a rerun updates with `agy update` instead.
+install_agy() {
+  if have agy; then
+    log "agy present ($(agy --version 2>/dev/null | head -1)); checking for an update"
+    agy update </dev/null >/dev/null 2>&1 || { warn "'agy update' failed"; return 1; }
+    return 0
+  fi
+  log "installing Antigravity CLI (agy; official installer, updates itself)"
+  fetch_run https://antigravity.google/cli/install.sh bash </dev/null \
+    || { warn "Antigravity CLI install FAILED (https://antigravity.google/cli/install.sh)"; return 1; }
+  [ -x "$HOME/.local/bin/agy" ] || { warn "the Antigravity CLI installer finished, but there is no executable ~/.local/bin/agy"; return 1; }
+  ensure_path "$HOME/.local/bin"
+  have agy || { warn "agy is in ~/.local/bin, but not on PATH after adding ~/.local/bin"; return 1; }
+}
+
 # The hf installer builds a venv, so it needs Python 3.10+ with venv and ensurepip, and installs
 # neither. Debian/Ubuntu ship ensurepip in python3-venv, which desktop installs often lack.
 py_ok() {
@@ -369,8 +390,12 @@ if not p.exists():
     sys.exit(3)
 def reject(constant):  # json.loads alone takes NaN and Infinity; JSON does not
     raise ValueError(constant)
+def unique(pairs):  # a repeated key at any depth: json.loads keeps the last, the client may keep another
+    if len({k for k, _ in pairs}) != len(pairs):
+        raise ValueError("duplicate key")
+    return dict(pairs)
 try:
-    settings = json.loads(p.read_text(encoding="utf-8-sig"), parse_constant=reject)
+    settings = json.loads(p.read_text(encoding="utf-8-sig"), parse_constant=reject, object_pairs_hook=unique)
     servers = settings.get("mcpServers", {})
     if not isinstance(servers, dict):
         sys.exit(1)
@@ -383,22 +408,32 @@ try:
     gemini_url = s.get("httpUrl") if "httpUrl" in s else (s.get("url") if s.get("type") == "http" else None)
     valid = (s.get("url") in urls and s.get("type") == "http") if sys.argv[2] == "claude" else (gemini_url in urls and required.issubset(s.get("excludeTools") or []))
     sys.exit(0 if valid else 1)
-except (ValueError, OSError, TypeError, AttributeError):
+except (ValueError, OSError, TypeError, AttributeError, RecursionError):  # RecursionError: absurdly deep nesting
     sys.exit(1)
 PYJSON
 }
-add_gemini_hf() {  # 0 created; 4 settings.json exists: left untouched, snippet printed; 1 could not create
+add_gemini_hf() {  # 0 created; 4 nothing written, snippet printed (settings.json exists, or not Linux); 1 could not create
   # Gemini's settings.json is only ever created, never edited: an existing file (which may hold other
   # servers' settings) is left byte-for-byte as it is and the entry is printed for a manual paste.
   # Never `gemini mcp add`/`remove`: they write every ${VAR} in mcpServers back expanded.
-  local py cfg="${GEMINI_CLI_HOME:-$HOME}/.gemini/settings.json"
+  local py manual=0 cfg="${GEMINI_CLI_HOME:-$HOME}/.gemini/settings.json"
+  # Creation is verified on Linux (and Windows PowerShell 5.1 in the .ps1) only. Anywhere else (macOS,
+  # BSD, Git Bash, Cygwin) the entry is printed for a manual setup until a native smoke test verifies it.
+  [ "$OS" = Linux ] || manual=1
   py="$(json_python)" || return 1
   # shellcheck disable=SC2086
-  "$py" - "$cfg" "$HF_MCP_URL" $HF_DENY <<'PYJSON'
+  "$py" - "$cfg" "$HF_MCP_URL" "$manual" $HF_DENY <<'PYJSON'
 import json, os, sys
-cfg, url, deny = sys.argv[1], sys.argv[2], sys.argv[3:]
+cfg, url, manual, deny = sys.argv[1], sys.argv[2], sys.argv[3] == "1", sys.argv[4:]
 entry = {"url": url, "type": "http", "headers": {"Authorization": "Bearer ${HF_TOKEN}"}, "excludeTools": deny}
 doc = (json.dumps({"mcpServers": {"huggingface": entry}}, indent=2) + "\n").encode()
+snippet = '"huggingface": ' + json.dumps(entry, indent=2)
+if manual:
+    print("gemini: automatic setup is verified on Linux and Windows PowerShell 5.1 only; nothing was written. "
+          f'To finish, add this entry inside the top-level "mcpServers" object of {cfg} (create "mcpServers": {{ }} '
+          f'if it has none; if the file does not exist, create it, readable only by you, as {{"mcpServers": {{ }}}} '
+          f"with the entry inside), then rerun:\n{snippet}")
+    sys.exit(4)
 try:
     os.makedirs(os.path.dirname(cfg), exist_ok=True)
 except OSError:  # e.g. a file or dangling link named .gemini: there is no settings.json to report
@@ -407,7 +442,6 @@ try:
     # O_EXCL: refuses any existing name, a symlink included, so nothing is ever overwritten.
     fd = os.open(cfg, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
 except FileExistsError:
-    snippet = '"huggingface": ' + json.dumps(entry, indent=2)
     print(f"gemini: {cfg} already exists and was left unchanged. To finish, add this entry inside its "
           f'top-level "mcpServers" object (create "mcpServers": {{ }} if it has none), then rerun:\n{snippet}')
     sys.exit(4)
@@ -449,12 +483,12 @@ register_hf_mcp() {
       if [ "$state" = 0 ] && check_client_hf gemini; then
         log "gemini: created user settings with the huggingface MCP server"
       elif [ "$state" = 4 ]; then
-        warn "gemini: user settings exist; huggingface entry not added (manual step above)"; failed hf-mcp-gemini
+        warn "gemini: huggingface entry not added (manual step above)"; failed hf-mcp-gemini
       else
         warn "gemini: could not create user settings"; failed hf-mcp-gemini
       fi
     else
-      warn "gemini: user settings need manual review (commented/unsupported JSON, incompatible URL or missing blocked tools); left unchanged"; failed hf-mcp-gemini
+      warn "gemini: user settings need manual review (commented/unsupported JSON, a repeated key, an incompatible URL or missing blocked tools); left unchanged"; failed hf-mcp-gemini
     fi
   fi
   if [ "$CLAUDE_HF_MCP" = 1 ] && [ "$SKIP_CLAUDE" = 0 ] && have claude; then
@@ -484,24 +518,25 @@ fi
 [ "$SKIP_CLAUDE" = 1 ] || install_claude || failed claude
 [ "$SKIP_CODEX" = 1 ]  || install_codex  || failed codex
 [ "$SKIP_GEMINI" = 1 ] || install_gemini || failed gemini
+[ "$SKIP_AGY" = 1 ]    || install_agy    || failed agy
 [ "$SKIP_HF" = 1 ]     || install_hf     || failed hf
 [ "$SKIP_HF" = 1 ]     || register_hf_mcp
 [ "$WITH_NODE" = 0 ] || node_once || true   # node_once reports its own failure
-for c in claude codex gemini hf; do
-  case "$c" in claude) s=$SKIP_CLAUDE ;; codex) s=$SKIP_CODEX ;; gemini) s=$SKIP_GEMINI ;; *) s=$SKIP_HF ;; esac
+for c in claude codex gemini agy hf; do
+  case "$c" in claude) s=$SKIP_CLAUDE ;; codex) s=$SKIP_CODEX ;; gemini) s=$SKIP_GEMINI ;; agy) s=$SKIP_AGY ;; *) s=$SKIP_HF ;; esac
   [ "$s" = 0 ] && have "$c" || continue
   reach "$c" || failed "$c-path"
 done
 
 log "versions on $HOST ($OS):"
-for c in node claude codex gemini hf; do
+for c in node claude codex gemini agy hf; do
   skipped=0
-  case "$c" in node) skipped=$SKIP_NODE ;; claude) skipped=$SKIP_CLAUDE ;; codex) skipped=$SKIP_CODEX ;; gemini) skipped=$SKIP_GEMINI ;; hf) skipped=$SKIP_HF ;; esac
+  case "$c" in node) skipped=$SKIP_NODE ;; claude) skipped=$SKIP_CLAUDE ;; codex) skipped=$SKIP_CODEX ;; gemini) skipped=$SKIP_GEMINI ;; agy) skipped=$SKIP_AGY ;; hf) skipped=$SKIP_HF ;; esac
   if have "$c"; then printf '  %-7s %s\n' "$c" "$("$c" --version 2>&1 | head -1)"
   elif [ "$skipped" = 1 ]; then printf '  %-7s not installed (skipped)\n' "$c"
   else printf '  %-7s MISSING\n' "$c"; fi
 done
-[ "$SKIP_CLAUDE$SKIP_CODEX$SKIP_GEMINI$SKIP_HF" = 1111 ] || cat <<'EOF'
+[ "$SKIP_CLAUDE$SKIP_CODEX$SKIP_GEMINI$SKIP_AGY$SKIP_HF" = 11111 ] || cat <<'EOF'
 
 Sign in once per machine, per user (open a NEW terminal first so PATH is fresh). Never type
 a token or key into a command line: it lands in shell history. The routes below read it with
@@ -527,9 +562,19 @@ the terminal's echo off, and it lasts for that shell only.
            NO_BROWSER=true gemini  and paste the code back within 5 minutes. Google Workspace account (not personal Gmail): first
            export GOOGLE_CLOUD_PROJECT=<project-id>; personal Gmail must leave it unset.
            "no longer supported for Gemini Code Assist for individuals": that account's free tier is
-           closed to Gemini CLI; the way in (API key, paid Workspace project, or Antigravity) is Sanjay's call.
+           closed to Gemini CLI; the way in (API key, paid Workspace project, or agy below) is Sanjay's call.
            API key instead (this shell only; https://aistudio.google.com/app/apikey):
            printf 'key: '; read -rs GEMINI_API_KEY; echo; export GEMINI_API_KEY
+  agy      Antigravity CLI. Run `agy` and sign in with the Google account: a browser opens. Over SSH
+           (ssh -t) it prints a URL instead: open it on any machine, then paste the code the page shows
+           back here. The sign-in is kept in the OS keyring; on Linux over SSH that needs a D-Bus
+           session and an unlocked GNOME Keyring or KWallet (`export $(dbus-launch)` starts the session).
+           API key instead: "modelProvider": "gemini" in ~/.gemini/antigravity-cli/settings.json, and
+           GEMINI_API_KEY from the hidden prompt above (agy reads no other key variable).
+           check:  agy -p "hi"     (signed in, it answers; if not, it prints "Authentication required"
+                   and a sign-in URL, waits 60 seconds for the code, then exits 1)
+           Leave "Use AI Credits" (useG1Credits in that settings.json) off, so agy never spends the
+           account's purchased AI credits when the plan's quota runs out.
   hf       run `hf auth login` (over SSH: ssh -t). "Log in with your browser" prints a URL and a code:
            open the URL on any machine and enter the code. "Paste an access token" reads a token at a
            hidden prompt: make one per machine at https://huggingface.co/settings/tokens > New token,
@@ -542,6 +587,8 @@ the terminal's echo off, and it lasts for that shell only.
                    Never run `gemini mcp add` or `gemini mcp remove` with HF_TOKEN set: they save
                    every ${VAR} in its settings file as the value, this token included.
                    Gemini loads MCP servers only in folders it trusts (it asks on the first run there).
+           agy     not registered by this script: `agy mcp add` has no per-tool block, so Jobs and
+                   Sandboxes could not be kept out, and Google does not document ${VAR} in its headers.
            claude  the account's Hugging Face connector comes with the claude.ai login (/mcp lists it).
                    Signed in with setup-token or an API key? Rerun this script with --with-claude-hf-mcp,
                    then  claude mcp login huggingface   (--no-browser over SSH)
