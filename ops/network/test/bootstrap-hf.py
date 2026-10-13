@@ -73,7 +73,7 @@ class BootstrapHf(unittest.TestCase):
             p.chmod(0o755)
         self.env = dict(os.environ, HOME=str(self.root), CODEX_HOME=str(self.root / '.codex'),
                         PATH=str(self.bin) + os.pathsep + os.environ['PATH'],
-                        HF_TOKEN='test-' + 'secret-must-not-appear', TMPDIR=str(self.root))
+                        HF_TOKEN='test-secret-must-not-appear', TMPDIR=str(self.root))
         self.env.pop('CLAUDE_CONFIG_DIR', None)
         self.env.pop('GEMINI_CLI_HOME', None)
         self.source = SCRIPT.read_text()
