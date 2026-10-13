@@ -9,10 +9,14 @@ name: Claude settings
 # against the Claude Code reference, and confirms that every command hook is
 # in exec form with its scripts under .claude/hooks/, present and parsing.
 # Hook scripts must live there so that the .claude/** path filter below
-# covers an edit to one. The .claude filters match at any depth: Claude
-# Code reads .claude/settings.json from whichever directory a session starts
-# in, and the checker rejects any tracked settings file but the root one, and
-# a tracked .claude that is a symlink or submodule. The root .mcp.json is
+# covers an edit to one. The .claude filters match at any depth and in any
+# case: Claude Code reads .claude/settings.json from whichever directory a
+# session starts in, macOS and Windows open .Claude/settings.json under that
+# name, and the checker rejects any tracked settings file but the root one,
+# and a tracked .claude that is a symlink or submodule. (The lowercase
+# patterns stay beside the bracketed ones.) A .gitattributes file can make
+# git show a hook script as binary or re-encode it on checkout, which the
+# checker rejects, so a change to one runs it too. The root .mcp.json is
 # included because each mcp_tool pair the checker allows pins its server's
 # definition there, so an edit to it must fail until the pin is reviewed.
 # The workflow file itself is included so that an edit to it is exercised by
@@ -24,6 +28,9 @@ on:
     paths:
       - "**/.claude"
       - "**/.claude/**"
+      - "**/.[cC][lL][aA][uU][dD][eE]"
+      - "**/.[cC][lL][aA][uU][dD][eE]/**"
+      - "**/.gitattributes"
       - ".mcp.json"
       - "scripts/check-claude-settings.js"
       - "scripts/test-check-claude-settings.js"
@@ -33,6 +40,9 @@ on:
     paths:
       - "**/.claude"
       - "**/.claude/**"
+      - "**/.[cC][lL][aA][uU][dD][eE]"
+      - "**/.[cC][lL][aA][uU][dD][eE]/**"
+      - "**/.gitattributes"
       - ".mcp.json"
       - "scripts/check-claude-settings.js"
       - "scripts/test-check-claude-settings.js"

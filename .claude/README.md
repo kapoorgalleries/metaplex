@@ -99,7 +99,11 @@ command hooks as described above. Hook scripts must be text with no NUL
 byte. Git treats a file with one as binary, so a pull request would show
 "Binary files differ" instead of the script: a zip archive or bytecode
 (which `python3` runs even when named `.py`), or UTF-16 text such as a
-`.ps1` written by Windows PowerShell 5.1 (save it as UTF-8). A top-level
+`.ps1` written by Windows PowerShell 5.1 (save it as UTF-8). For the same
+reason no `.gitattributes` file may mark a hook script `-diff` or `binary`,
+which makes git show any file as binary, or give it a `working-tree-encoding`,
+which re-encodes it on checkout so the bytes that run are not the ones
+review saw. A top-level
 `env` key is rejected: Claude Code passes it to every hook process, where
 `NODE_OPTIONS`, `BASH_ENV` or `PYTHONPATH` would load code from outside
 `.claude/hooks/` first and `PATH` could swap the interpreter. Beyond command
@@ -139,7 +143,8 @@ Hooks in skill or agent frontmatter, and plugins a developer enables for
 themselves, are outside this check. Its tests are in
 `scripts/test-check-claude-settings.js`. CI runs both from
 `.github/workflows/claude-settings.yml` whenever a `.claude` folder at any
-depth, or the root `.mcp.json`, changes.
+depth and in any case, a `.gitattributes` file, or the root `.mcp.json`
+changes.
 
 The check is a lint that catches mistakes, not a security boundary. CI runs
 the pull request's own copy of the checker, so a pull request can change the

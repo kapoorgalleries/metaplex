@@ -21,6 +21,7 @@
 'use strict';
 
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const { spawnSync } = require('child_process');
 
@@ -452,6 +453,26 @@ function checkPathToken(token, root, at, fail) {
   if (!fs.statSync(real).isFile()) {
     fail(`${at}: ${rel} is not a file`);
     return true;
+  }
+  // A .gitattributes file at any level can hide a text script as well:
+  // "-diff" or "binary" makes git show "Binary files differ", and
+  // working-tree-encoding re-encodes the script on checkout, so the bytes
+  // that run, and that the NUL check below reads, are not the ones a pull
+  // request shows. Only attributes the repository commits count; a
+  // developer's own attributes file is ignored. Outside a git repository
+  // there are none, and main() fails there anyway.
+  const attrs = spawnSync('git', ['-c', `core.attributesFile=${os.devNull}`, '-C', path.dirname(real), 'check-attr', '-z', '-a', '--', path.basename(real)], { encoding: 'utf8', env: { ...process.env, GIT_ATTR_NOSYSTEM: '1' } });
+  const attr = attrs.status === 0 ? attrs.stdout.split('\0') : [];
+  for (let n = 0; n + 2 < attr.length; n += 3) {
+    const [name, value] = [attr[n + 1], attr[n + 2]];
+    if (name === 'diff' && value === 'unset') {
+      fail(`${at}: ${rel} is marked -diff or binary by a .gitattributes file, so git and a pull request show "Binary files differ" instead of its content; a hook script must be text that review can read. Remove that attribute for it`);
+      return true;
+    }
+    if (name === 'working-tree-encoding' && value !== 'unset') {
+      fail(`${at}: ${rel} has working-tree-encoding ${value} from a .gitattributes file, so git re-encodes it on checkout and the bytes that run are not the ones a pull request shows. Remove that attribute and commit the script as UTF-8`);
+      return true;
+    }
   }
   // A file with a NUL byte is binary to git, so a pull request shows
   // "Binary files differ" instead of its content. That covers executables,

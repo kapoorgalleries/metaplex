@@ -520,7 +520,9 @@ check('an http hook URL must match a listed one exactly', () => {
   }
 });
 check('a missing http hook url is reported once, not also as unlisted', () => {
-  assert.deepStrictEqual(checkSettings(entry({ type: 'http' }), repo).filter((m) => /HTTP_HOOK_URLS/.test(m)), []);
+  const problems = checkSettings(entry({ type: 'http' }), repo);
+  assert.ok(problems.some((m) => /\.url must be a non-empty string for a http hook/.test(m)), JSON.stringify(problems));
+  assert.deepStrictEqual(problems.filter((m) => /HTTP_HOOK_URLS/.test(m)), []);
 });
 // Only the root .claude/settings.json may be tracked, compared ignoring case.
 check('tracked files: the committed layout passes', () => {
@@ -816,8 +818,9 @@ if (process.env.CHECK_SETTINGS_REQUIRE_CASE_TESTS) {
 // whose .claude/settings.json holds the given text.
 // The tree is a git repository holding the real .mcp.json, as a checkout is;
 // `extra` maps further paths to their contents, or to { symlink: target },
-// all tracked. With `git: false` the tree is not a repository.
-function runCli(settingsText, extra = {}, { git = true } = {}) {
+// all tracked. With `git: false` the tree is not a repository. `env` adds
+// to the checker's environment.
+function runCli(settingsText, extra = {}, { git = true, env: extraEnv = {} } = {}) {
   const tree = tmp('claude-settings-cli-');
   try {
     fs.mkdirSync(path.join(tree, 'scripts'));
@@ -837,7 +840,7 @@ function runCli(settingsText, extra = {}, { git = true } = {}) {
       }
     }
     // The ceiling keeps git from finding a repository that encloses the tree.
-    const env = { ...process.env, GIT_CEILING_DIRECTORIES: path.dirname(tree) };
+    const env = { ...process.env, GIT_CEILING_DIRECTORIES: path.dirname(tree), ...extraEnv };
     return spawnSync(process.execPath, [path.join(tree, 'scripts', 'check-claude-settings.js')], { encoding: 'utf8', env });
   } finally {
     fs.rmSync(tree, { recursive: true, force: true });
@@ -857,6 +860,36 @@ check('CLI: a tracked settings.local.json exits 1', () => {
   const r = runCli('{"permissions":{}}\n', { '.claude/settings.local.json': '{"apiKeyHelper":"sh -c x"}\n' });
   assert.strictEqual(r.status, 1);
   assert.match(r.stderr, /\.claude\/settings\.local\.json is tracked/);
+});
+// A .gitattributes file can make git show a text hook script as binary, or
+// re-encode it on checkout.
+const SH_HOOK = '{"permissions":{},"hooks":{"Stop":[{"hooks":[{"type":"command","command":"sh","args":["${CLAUDE_PROJECT_DIR}/.claude/hooks/x.sh"]}]}]}}\n';
+for (const [name, files, pattern] of [
+  ['-diff beside it', { '.claude/hooks/.gitattributes': 'x.sh -diff\n' }, /x\.sh is marked -diff or binary by a \.gitattributes file/],
+  ['binary in the root .gitattributes', { '.gitattributes': '*.sh binary\n' }, /x\.sh is marked -diff or binary/],
+  ['a root macro that unsets diff', { '.gitattributes': '[attr]quiet -diff\n', '.claude/.gitattributes': 'hooks/x.sh quiet\n' }, /x\.sh is marked -diff or binary/],
+  ['working-tree-encoding, as git suggests for a .ps1', { '.claude/hooks/.gitattributes': 'x.sh working-tree-encoding=UTF-16LE\n', '.claude/hooks/x.sh': Buffer.from('exit 0\n', 'utf16le') }, /x\.sh has working-tree-encoding UTF-16LE from a \.gitattributes file/],
+]) {
+  check(`CLI: a hook script with ${name} exits 1`, () => {
+    const r = runCli(SH_HOOK, { '.claude/hooks/x.sh': 'exit 0\n', ...files });
+    assert.strictEqual(r.status, 1, r.stdout);
+    assert.match(r.stderr, pattern);
+  });
+}
+check('CLI: line-ending attributes and a diff driver on a hook script are accepted', () => {
+  const r = runCli(SH_HOOK, { '.claude/hooks/x.sh': 'exit 0\n', '.gitattributes': '*.sh text eol=lf diff=bash\n' });
+  assert.strictEqual(r.status, 0, r.stderr);
+});
+check('CLI: a developer\'s own attributes file does not count', () => {
+  const home = tmp('claude-settings-xdg-');
+  try {
+    fs.mkdirSync(path.join(home, 'git'));
+    fs.writeFileSync(path.join(home, 'git', 'attributes'), '*.sh -diff\n');
+    const r = runCli(SH_HOOK, { '.claude/hooks/x.sh': 'exit 0\n' }, { env: { XDG_CONFIG_HOME: home } });
+    assert.strictEqual(r.status, 0, r.stderr);
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
 });
 check('CLI: a nested .claude/settings.json exits 1', () => {
   const r = runCli('{"permissions":{}}\n', { 'js/web/.claude/settings.json': '{"permissions":{}}\n' });
