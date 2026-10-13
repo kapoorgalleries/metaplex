@@ -8,8 +8,8 @@
 #        only as the x-goog-api-key header. It is never printed, logged, written or put on a command line.
 #   agy  Antigravity's CLI, signed in, headless: the packet goes into a new folder under trimurti-dc, and
 #        `agy -p --sandbox` reads it there. Headless runs honour agy's saved permissions, so the review stops
-#        before agy runs when a saved rule allows file reads or writes, URL access or unsandboxed commands, or
-#        a command or MCP rule has a wildcard; and after it, without a verdict, when agy reports refused actions.
+#        before agy runs when agy has any saved allow rule or a setting that skips approval or opens access
+#        outside the workspace; and after it, without a verdict, when agy reports refused actions.
 #   cli  the signed-in gemini.cmd in headless mode, packet on stdin (Gemini CLI refuses personal Google
 #        accounts; README, "Gemini CLI").
 #   auto api when a key is found, else agy, else cli.
@@ -59,21 +59,33 @@ function W([string]$s) { $script:L.Add($s) }
 # in place (the END line is written only by Finish).
 function Flush() { [IO.File]::WriteAllText($script:latest, (($script:L -join "`r`n") + "`r`n"), $script:u8) }
 function Sec([string]$t) { W ''; W "## $t"; Flush }
-# Scrub runs on every line of external content (command output, file dumps, the verdict JSON): bearer and other
-# Authorization values, values after token/key/secret/password/auth switches and NAME=/Header:/"json_key": pairs,
-# secret-looking URL query values, URL passwords and token-shaped strings are masked. Quotes, \" and \u0027 end a
-# value and a value that opens an object or array is left alone, so scrubbed JSON stays JSON. Not secrets:
-# `passed=` (run-remote.sh's TRIMURTI_SUMMARY line) and claude auth status's authMethod / apiKeySource, which name
-# the kind of sign-in (they show when a PC bills an API key). The same function is in dc-diagnose.ps1, dc-fix.ps1
-# and dc-gemini-review.ps1; test/dc-scrub.ps1 keeps them identical.
+# Scrub runs on every line of external content (command output, file dumps) and on each string of the verdict
+# object. It masks: JSON strings and numbers under key-like names (counts excepted); Bearer and other
+# Authorization values; values after token/key/secret/password/auth switches and in NAME=, Header: and
+# "json_key": pairs; secret-looking URL query values and URL passwords; curl -u, smbclient -U, sshpass -p and
+# net use passwords; ConvertTo-SecureString strings; token-shaped strings. A quote or an escaped quote inside a
+# value continues it only when another value character follows, so a closing quote still ends it, and a value
+# that opens an object or array is left alone: scrubbed JSON stays JSON. Not secrets: `passed=` (run-remote.sh's
+# TRIMURTI_SUMMARY line) and claude auth status's authMethod / apiKeySource, which name the kind of sign-in (they
+# show when a PC bills an API key). The same function is in dc-diagnose.ps1, dc-fix.ps1 and dc-gemini-review.ps1;
+# test/dc-scrub.ps1 keeps them identical.
 function Scrub([string]$s) {
-  $s = $s -replace '(?i)\b(Bearer)\s+(?:[^\s"''\\]|\\[^\s"''u])+', '$1 ***'
-  $s = $s -replace '(?i)\b((?:proxy-)?authorization["'']?\s*[:=]\s*["'']?)[A-Za-z]+\s+(?:[^\s"''\\]|\\[^\s"''u])+', '$1***'
-  $s = $s -replace '(?i)(--?[\w-]*(token|key|secret|password|passwd|pass|auth|bearer|credential)[\w-]*)([=\s]+)(\\?["'']|\\u0027)?(?:[^\s"''\\]|\\[^\s"''u])+', '$1$3$4***'
-  $s = $s -replace '(?i)\b(?!(?:passed|authMethod|apiKeySource)\b)([\w-]*(token|key|secret|password|passwd|pass|auth|bearer|credential)[\w-]*)(\\?["'']|\\u0027)?\s*([=:])\s*(?!(?:true|false|yes|no|null|none|\d+)\b)((?:\\?["'']|\\u0027){0,2})(?![{\[])(?:[^\s"''\\]|\\[^\s"''u])+', '$1$3$4$5***'
+  $v = '(?:[^\s"''\\]|\\u(?!0027)[0-9a-fA-F]{4}|\\[^\s"''u]|(?:\\?["'']|\\u0027)(?![\s,;:}\])"''\\]|$))+'
+  $s = $s -replace '(?i)("(?!(?:passed|authMethod|apiKeySource)")[\w-]*(?:token|key|secret|password|passwd|pass|auth|bearer|credential)[\w-]*"\s*:\s*")(?:[^"\\]|\\.)+(")', '$1***$2'
+  $s = $s -replace '(?i)("(?!(?:passed|authMethod|apiKeySource)")[\w-]*(?:token|key|secret|password|passwd|pass|auth|bearer|credential)[\w-]*(?<!count|tokens)"\s*:\s*)-?\d+(?![\w.])', '$1"***"'
+  $s = $s -replace ('(?i)\b(Bearer)\s+' + $v), '$1 ***'
+  $s = $s -replace ('(?i)\b((?:proxy-)?authorization["'']?\s*[:=]\s*["'']?)[A-Za-z]+\s+' + $v), '$1***'
+  $s = $s -replace ('(?i)(--?[\w-]*(token|key|secret|password|passwd|pass|auth|bearer|credential)[\w-]*)([=\s]+)(\\?["'']|\\u0027)?(?![,}\]])' + $v), '$1$3$4***'
+  $s = $s -replace ('(?i)\b(?!(?:passed|authMethod|apiKeySource)\b)([\w-]*(token|key|secret|password|passwd|pass|auth|bearer|credential)[\w-]*)(\\?["'']|\\u0027)?\s*([=:])\s*(?!(?:true|false|yes|no|null|none)(?=[\s,;}\])]|$)|(?<=(?:count|tokens)(?:\\?["'']|\\u0027)?\s*[=:]\s*)\d+(?=[\s,;}\])]|$))(?![{\[])(\\?["'']|\\u0027|"(?:\\u0027|''|\\"))?(?![,;}\])])' + $v), '$1$3$4$5***'
   $s = $s -replace '(?i)([?&][^=&\s"\\]*(token|key|secret|sig|code|auth|pass)[^=&\s"\\]*=)[^&\s"\\]+', '$1***'
   $s = $s -replace '(://[^/@\s:"\\]+:)[^@\s"\\]+@', '$1***@'
-  $s -replace '(?i)\b(sk-[A-Za-z0-9_-]{10,}|ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|gho_[A-Za-z0-9]{20,}|hf_[A-Za-z0-9]{20,}|sbp_[A-Za-z0-9]{20,}|AIza[0-9A-Za-z_-]{30,}|xox[abprs]-[A-Za-z0-9-]+|AKIA[0-9A-Z]{16}|glpat-[\w-]{20,}|npm_[A-Za-z0-9]{30,}|ya29\.[\w.-]+|eyJ[\w-]{10,}\.[\w-]{10,}\.[\w-]{10,})\b', '***'
+  $s = $s -replace '(?i)(\s-u\s+[^\s:]+:)\S+', '$1***'
+  $s = $s -creplace '(\s-U\s+[^\s%]+%)\S+', '$1***'
+  $s = $s -replace '(?i)(\bsshpass\s+-p\s*)\S+', '$1***'
+  $s = $s -replace '(?i)(\bnet\s+use\s+(?:\S+:\s+)?\\\\\S+\s+)(?!/)\S+', '$1***'
+  $s = $s -replace '(?i)(ConvertTo-SecureString\s+(?:-String\s+)?)(["''])[^"'']*(["''])', '$1$2***$3'
+  $s = $s -replace '(\bbot\d+:)[A-Za-z0-9_-]{30,}', '$1***'
+  $s -replace '(?i)\b(sk-[A-Za-z0-9_-]{10,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|hf_[A-Za-z0-9]{20,}|sbp_[A-Za-z0-9]{20,}|AIza[0-9A-Za-z_-]{30,}|xox[abprs]-[A-Za-z0-9-]+|AKIA[0-9A-Z]{16}|glpat-[\w-]{20,}|npm_[A-Za-z0-9]{30,}|ya29\.[\w.-]+|eyJ[\w-]{10,}\.[\w-]{10,}\.[\w-]{10,})\b', '***'
 }
 function Clip([string]$s, [int]$n = 220) { $s = Scrub $s; if ($s.Length -gt $n) { $s.Substring(0, $n) + ' ...' } else { $s } }
 function Lines($text, [int]$max = 14) {
@@ -116,7 +128,7 @@ function Run([string]$label, [string]$cmd, [int]$sec = 45, [int]$show = 14, [str
 # Finish writes the verdict JSON, appends it and the END line to the report, saves both report copies and exits.
 function Finish([int]$code, $obj) {
   $obj['exit_code'] = $code
-  $json = Scrub (ConvertTo-Json -InputObject $obj -Depth 10)
+  $json = ConvertTo-Json -InputObject (ScrubObj $obj) -Depth 10
   Sec 'Verdict JSON'
   try { [IO.File]::WriteAllText($script:verdictPath, $json, (New-Object Text.UTF8Encoding $false)); W "- wrote $script:verdictPath" } catch { W ("- could not write verdict file: " + (Clip $_.Exception.Message)) }
   W '```json'; W $json; W '```'
@@ -161,35 +173,65 @@ function Pick([string]$want, [string[]]$prefs) {
 }
 
 # agy's saved allow rules, from -p "/permissions" --output-format json (agy 1.3.3: {command:{data:{permissions:
-# [{scope, allow:[rule]}]}}}, each rule 'type(argument)'). Returns the count per scope/type and the scope/types
-# that allow more than reading the review folder: a file read or write, URL access or unsandboxed commands (any
-# path is outside a new workspace), a command or MCP rule with a wildcard or no argument, or a type not known here.
+# [{scope, allow:[rule]}]}}}, each rule 'type(argument)'). Every allow rule blocks the review: it needs no command,
+# MCP tool, URL or file outside its folder, and a saved rule grants one without a prompt (command rules match by
+# command words or regex, MCP calls run outside --sandbox). Returns the count per scope/type and the scope/types
+# that block; a scope in another shape blocks as '(unexpected /permissions shape)'.
 function AgyRules($scopes) {
   $counts = [ordered]@{}; $blocked = New-Object System.Collections.Generic.List[string]
   foreach ($s in @($scopes)) {
+    if ($null -eq $s) { continue }
+    $ok = ($s -is [System.Management.Automation.PSCustomObject]) -and ($s.scope -is [string])
+    if ($ok) {
+      foreach ($q in @($s.PSObject.Properties)) {
+        if (@('scope', 'allow', 'ask', 'deny') -notcontains $q.Name) { $ok = $false }
+        elseif ($q.Name -ne 'scope') { foreach ($x in @($q.Value)) { if ($null -ne $x -and -not ($x -is [string])) { $ok = $false } } }
+      }
+    }
+    if (-not $ok) { if (-not $blocked.Contains('(unexpected /permissions shape)')) { $blocked.Add('(unexpected /permissions shape)') }; continue }
     foreach ($r in @($s.allow | Where-Object { $_ })) {
-      $t = '(unparsed)'; $arg = ''
-      if ([string]$r -match '(?s)^\s*([A-Za-z_]+)\s*(?:\((.*)\))?\s*$') { $t = $Matches[1].ToLower(); $arg = [string]$Matches[2] }
-      $k = [string]$s.scope + '/' + $t
+      $t = '(unparsed)'; if ($r -match '^\s*([A-Za-z_]+)') { $t = $Matches[1].ToLower() }
+      $k = $s.scope + '/' + $t
       $counts[$k] = 1 + [int]$counts[$k]
-      if (-not (($t -eq 'command' -or $t -eq 'mcp') -and $arg.Trim() -and $arg -notmatch '\*') -and -not $blocked.Contains($k)) { $blocked.Add($k) }
+      if (-not $blocked.Contains($k)) { $blocked.Add($k) }
     }
   }
   @{ counts = $counts; blocked = $blocked.ToArray() }
 }
-# Settings from -p "/config" (.command.data.config, four levels deep) whose name says mode and whose value skips
-# the approval step (always-proceed and the like).
+# Settings from -p "/config" (.command.data.config) that could let agy act without a prompt: a value naming an
+# auto-approving mode (always-proceed, accept-edits, bypass and the like), or a setting about workspace access,
+# auto-execution or approval that is not off. Walked six levels deep, arrays included; another shape blocks.
 function AgyModes($cfg) {
+  if (-not ($cfg -is [System.Management.Automation.PSCustomObject])) { return @('(unexpected /config shape)') }
   $modes = New-Object System.Collections.Generic.List[string]
-  $todo = New-Object System.Collections.Generic.Queue[object]; $todo.Enqueue(@($cfg, 0))
+  $todo = New-Object System.Collections.Generic.Queue[object]; $todo.Enqueue(@($cfg, 0, ''))
   while ($todo.Count) {
     $it = $todo.Dequeue()
     foreach ($q in @($it[0].PSObject.Properties)) {
-      if ($q.Value -is [pscustomobject]) { if ($it[1] -lt 4) { $todo.Enqueue(@($q.Value, ($it[1] + 1))) } }
-      elseif ($q.Name -match '(?i)mode' -and [string]$q.Value -match '(?i)always|proceed|yolo') { $modes.Add($q.Name + '=' + (Clip ([string]$q.Value) 40)) }
+      $nm = ($it[2] + '.' + $q.Name).TrimStart('.')
+      foreach ($x in @($q.Value)) {
+        if ($x -is [System.Management.Automation.PSCustomObject]) { if ($it[1] -lt 6) { $todo.Enqueue(@($x, ($it[1] + 1), $nm)) } }
+        elseif ([string]$x -match '(?i)always|proceed|yolo|accept|bypass|skip|dangerous' -or ($nm -match '(?i)workspace|outside|auto.?exec|approv|bypass|skip|dangerous' -and $x -ne $false -and [string]$x -notmatch '(?i)^(?:false|off|never|none|default|request-review|ask|)$')) { $modes.Add($nm + '=' + (Clip ([string]$x) 40)) }
+      }
     }
   }
   $modes.ToArray()
+}
+# A copy of an object with every string scrubbed: the verdict file is built from it, so Scrub never runs on JSON
+# text and the file always parses.
+function ScrubObj($o) {
+  if ($null -eq $o) { return $null }
+  if ($o -is [string]) { return (Scrub $o) }
+  if ($o -is [System.Collections.IDictionary]) { $r = [ordered]@{}; foreach ($k in @($o.Keys)) { $r[$k] = ScrubObj $o[$k] }; return $r }
+  if ($o -is [System.Management.Automation.PSCustomObject]) { $r = [ordered]@{}; foreach ($q in @($o.PSObject.Properties)) { $r[$q.Name] = ScrubObj $q.Value }; return $r }
+  if ($o -is [System.Collections.IEnumerable]) { return , @(foreach ($x in $o) { ScrubObj $x }) }
+  $o
+}
+# Reads a stderr file and rewrites it scrubbed; returns the text as read ('' when there is none).
+function ScrubFile([string]$p) {
+  $t = ''; try { $t = [IO.File]::ReadAllText($p, [Text.Encoding]::UTF8) } catch { }
+  if ($t) { try { [IO.File]::WriteAllText($p, (Scrub $t), $script:u8) } catch { } }
+  $t
 }
 
 W "# DC-REVIEW BEGIN $me $stamp"
@@ -250,7 +292,7 @@ if (-not $Clone) {
   }
   W ("- metaplex clones found: {0}" -f $(if ($cands.Count) { $cands -join '; ' } else { 'none' }))
   # A full clone first (a sparse one works too, but a blobless kit clone fetches every blob of the diff on demand).
-  foreach ($c in $cands) { $sp = [string](& git -C $c config --bool core.sparseCheckout 2>$null); if ($sp.Trim() -ne 'true') { $Clone = $c; break } }
+  foreach ($c in $cands) { $sp = "$(& git -C $c config --bool core.sparseCheckout 2>$null)"; if ($sp.Trim() -ne 'true') { $Clone = $c; break } }
   if (-not $Clone -and $cands.Count) { $Clone = $cands[0] }
 }
 if (-not $Clone) { Fail 'no metaplex clone found under the usual folders; pass -Clone <path>' }
@@ -289,23 +331,38 @@ $meta = @("PR: $REPO#$PR", "branch: $Branch", "base: $Base @ $baseSha", "merge-b
 $meta += @($commits | ForEach-Object { '  ' + $_ })
 $meta += @('files:') + @(([string]$statR.Out) -split "`r?`n" | Where-Object { $_.Trim() } | ForEach-Object { '  ' + $_ })
 # The full commit messages too: they say what the PR is for. Called directly, not through cmd.exe, whose
-# command line would read the format's percent signs.
-$bodies = @(& git -C $Clone log --no-decorate --no-color ('--format=commit %h%n%B') ($mb + '..' + $sha) 2>$null)
+# command line would read the format's percent signs; git writes them to a file read as UTF-8, because
+# Windows PowerShell would decode its stdout in the console's code page.
+$bt = Join-Path $dir ('log-' + [IO.Path]::GetRandomFileName() + '.tmp')
+& git -C $Clone log --no-decorate --no-color ('--format=commit %h%n%B') ('--output=' + $bt) ($mb + '..' + $sha) 2>$null
+$bodies = @(); if (Test-Path -LiteralPath $bt) { $bodies = @(([IO.File]::ReadAllText($bt, [Text.Encoding]::UTF8) -replace '\r?\n\z', '') -split "`r?`n"); Remove-Item -LiteralPath $bt -Force -ErrorAction SilentlyContinue }
 $meta += @('', 'commit messages:') + $bodies
 $metaTxt = $meta -join "`n"
 
 Sec 'Credential scan (every line that would be sent)'
 # Every line of the diff (file headers too; for a hunk header, the line of code git appends after the second @@)
-# and of the commit messages. Prefixed tokens, private keys, JWTs, quoted or JSON values of key/secret/token/
-# password names, unquoted UPPER_CASE dotenv lines and URL passwords; ${VAR}, $env:VAR, %VAR% and <placeholder>
+# and of the commit messages. Caught: prefixed tokens, private keys and JWTs; quoted, YAML, JSON and dotenv values
+# of key/secret/token/password names (unquoted lower-case ones when they hold a digit and 16+ characters);
+# Bearer values; --token/--password/-Password switch values; URL passwords; curl -u, smbclient -U, sshpass -p and
+# net use passwords; ConvertTo-SecureString strings. ${VAR}, $VAR, $env:VAR, %VAR%, <placeholder> and YOUR_...
 # references do not count. Only line numbers are reported, never the line.
-$CRED = [regex]'AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{35}|hf_[A-Za-z0-9]{30,}|\bsk-(?:ant-)?[A-Za-z0-9_-]{20,}|gh[pousr]_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{22,}|glpat-[A-Za-z0-9_-]{20,}|npm_[A-Za-z0-9]{36}|ya29\.[A-Za-z0-9_-]{20,}|sbp_[A-Za-z0-9]{40}|xox[baprs]-[A-Za-z0-9-]{10,}|-----BEGIN [A-Z ]*PRIVATE KEY|eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}|(?i:api[_-]?key|(?:secret|access)[_-]?key|secret|token|password)["'']?\s*[:=]\s*["''][^"''\s]{12,}|^[+ -]?\s*(?:export\s+)?[A-Z0-9_]*(?:KEY|SECRET|TOKEN|PASSWORD)\s*=\s*[A-Za-z0-9_./+-]{12,}\s*$|://[^/@\s:"'']+:(?![$%{<(])[^@\s"''/]{6,}@'
+$CRED = [regex]('AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{35}|hf_[A-Za-z0-9]{30,}|\bsk-(?:ant-)?[A-Za-z0-9_-]{20,}|gh[pousr]_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{22,}|glpat-[A-Za-z0-9_-]{20,}|npm_[A-Za-z0-9]{36}|ya29\.[A-Za-z0-9_-]{20,}|sbp_[A-Za-z0-9]{40}|xox[baprs]-[A-Za-z0-9-]{10,}|-----BEGIN [A-Z ]*PRIVATE KEY|eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}' +
+  '|(?i:api[_-]?key|(?:secret|access)[_-]?key|secret|token|password)["'']?\s*[:=]\s*["''](?!\$\{|\$env:|%\w+%|<|YOUR_)[^"''\s]{12,}' +
+  '|^[+ -]?\s*(?:-\s+)?(?:export\s+|set\s+)?[A-Z0-9_]*(?:KEY|SECRET|TOKEN|PASSWORD|PASSWD)\s*[=:]\s*(?![$%{<]|(?i:your)[_-])[^\s"''#]{12,}' +
+  '|(?i:\b[\w-]*(?:key|secret|token|passw(?:or)?d)["'']?\s*[:=]\s*["'']?(?![$%{(\[<])(?=[^\s"''.]*\d)[A-Za-z0-9_/+=~-]{16,}(?![\w.(/+=~-]))' +
+  '|(?i:\bBearer\s+(?![$%{<])[A-Za-z0-9._~+/=-]{20,})' +
+  '|(?i:\s--?[\w-]*(?:token|key|secret|password)\s+["'']?(?![$%{(<-])(?=[^\s"'']*\d)[A-Za-z0-9_./+=-]{16,})' +
+  '|(?i:(?:^|\s)-{1,2}(?:password|passwd|secret|token|auth|api-?key)(?![\w-])(?:\s+|[:=]))(?!["'']?(?:[$%{<(*]|(?i:your[-_])|[A-Z][A-Z0-9_]*(?:["'']|\s|$)))["'']?[^\s"'']{8,}' +
+  '|://[^/@\s:"'']+:(?![${<(]|%[A-Za-z_]\w*%)[^@\s"''/]{6,}@' +
+  '|(?i:ConvertTo-SecureString\s+(?:-String\s+)?["''](?![$%{<(])[^"'']{6,})|(?i:\bnet\s+use\s+(?:\S+:\s+)?\\\\\S+\s+(?!["'']?[/*$%])\S{6,})' +
+  '|\s-u\s+[^\s:$%]+:(?![$%{<])[^\s@]{6,}|(?i:\bsshpass\s+-p\s*(?!["'']?[$%{<])\S{6,})|\s-U\s+[^\s%$]+%(?![$%{<])[^\s%]{6,}')
 $hits = New-Object System.Collections.Generic.List[string]
 $checked = 0
 for ($i = 0; $i -lt $dl.Count; $i++) {
-  $l = $dl[$i]
-  if ($l -match '^@@ [^@]*@@(.*)$') { $l = $Matches[1] }
-  $checked++; if ($CRED.IsMatch($l)) { $hits.Add('diff:' + ($i + 1)) }
+  # Not $l: PowerShell names ignore case, and $L is the report.
+  $dline = $dl[$i]
+  if ($dline -match '^@@ [^@]*@@(.*)$') { $dline = $Matches[1] }
+  $checked++; if ($CRED.IsMatch($dline)) { $hits.Add('diff:' + ($i + 1)) }
 }
 for ($i = 0; $i -lt $meta.Count; $i++) { $checked++; if ($CRED.IsMatch([string]$meta[$i])) { $hits.Add('meta:' + ($i + 1)) } }
 $scan = [ordered]@{ clean = ($hits.Count -eq 0); details = $(if ($hits.Count) { $hits.ToArray() } else { "no credential patterns in $checked lines" }) }
@@ -336,30 +393,34 @@ if ($route -eq 'agy') {
   [IO.File]::WriteAllText((Join-Path $ws 'schema.json'), $sch, $u8)
   W "- workspace: $ws"
   # -p "/permissions", "/config" and "/model" answer from the CLI's settings without starting an agent turn. An
-  # answer in another shape, a blocking rule (AgyRules) or an always-proceed agent mode (AgyModes) stops the review
-  # here. Only counts go into the report, never the rules.
-  $permR = Run 'agy permissions' ('"{0}" --output-format json -p "/permissions"' -f $agyExe) 180 0
+  # answer in another shape, any allow rule (AgyRules) or a setting that skips approval (AgyModes) stops the
+  # review here. Only counts and setting names go into the report, never the rules.
+  # In the review folder, as the review runs; stderr to its own file outside it, so a warning cannot break the JSON.
+  $permErr = Join-Path $dir ("pr{0}-agy-permissions-stderr.txt" -f $Pr)
+  $permR = Run 'agy permissions' ('"{0}" --output-format json -p "/permissions"' -f $agyExe) 180 0 $ws $permErr
+  $pe = ScrubFile $permErr; if ($pe.Trim()) { W '- agy /permissions stderr:'; Lines $pe 4 }
   $scopes = $null; try { $scopes = (ConvertFrom-Json -InputObject ([string]$permR.Out) -ErrorAction Stop).command.data.permissions } catch { }
   if ($permR.Code -ne 0 -or $null -eq $scopes) { Fail 'agy /permissions did not answer in the expected JSON shape; agy not run' @{ route = 'agy'; exit = $permR.Code; timeout = $permR.Timeout; head = $sha; credential_scan = $scan; workspace = $ws } }
   $ag = AgyRules $scopes; $counts = $ag.counts; $blocked = @($ag.blocked)
   W ("- agy allow rules: {0}" -f $(if ($counts.Count) { (@($counts.Keys | ForEach-Object { $_ + ' ' + $counts[$_] }) -join ', ') } else { 'none' }))
-  $cr = Run 'agy config' ('"{0}" --output-format json -p "/config"' -f $agyExe) 180 0
+  $cfgErr = Join-Path $dir ("pr{0}-agy-config-stderr.txt" -f $Pr)
+  $cr = Run 'agy config' ('"{0}" --output-format json -p "/config"' -f $agyExe) 180 0 $ws $cfgErr
+  $ce = ScrubFile $cfgErr; if ($ce.Trim()) { W '- agy /config stderr:'; Lines $ce 4 }
   $cfg = $null; try { $cfg = (ConvertFrom-Json -InputObject ([string]$cr.Out) -ErrorAction Stop).command.data.config } catch { }
   if ($cr.Code -ne 0 -or $null -eq $cfg) { Fail 'agy /config did not answer in the expected JSON shape; agy not run' @{ route = 'agy'; exit = $cr.Code; timeout = $cr.Timeout; head = $sha; credential_scan = $scan; workspace = $ws } }
   $modes = @(AgyModes $cfg)
   if ($blocked.Count -or $modes.Count) {
-    W ("- refused: saved agy settings allow more than reading this folder ({0})" -f ((@($blocked) + @($modes)) -join ', '))
-    Fail 'saved agy permissions allow more than reading the review folder; agy not run' @{ route = 'agy'; allow_rule_counts = $counts; blocking = @($blocked) + @($modes); fix = 'remove those allow rules or set the agent mode back to default in agy, or review with -Via api'; head = $sha; credential_scan = $scan; workspace = $ws }
+    W ("- refused: saved agy settings would let it act without a prompt ({0})" -f ((@($blocked) + @($modes)) -join ', '))
+    Fail 'saved agy permissions or settings would let it act without a prompt; agy not run' @{ route = 'agy'; allow_rule_counts = $counts; blocking = @($blocked) + @($modes); fix = 'remove agy''s saved allow rules (agy /permissions) and turn those settings off, or review with -Via api'; head = $sha; credential_scan = $scan; workspace = $ws }
   }
-  $mr = Run 'agy model' ('"{0}" -p "/model"' -f $agyExe) 60 2
+  $mr = Run 'agy model' ('"{0}" -p "/model"' -f $agyExe) 60 2 $ws
   $model = 'agy: ' + $(if ($mr.Code -eq 0 -and $mr.Out) { ([string]$mr.Out -split "`t|`r?`n")[0].Trim() } else { 'account default' })
   $agyPrompt = 'Read REVIEW.md in the current folder and do exactly what it asks. Work read-only. Reply with the JSON only.'
   $errTxt = Join-Path $ws 'err.txt'
   # --sandbox fences any command agy might still run; it does not fence file reads or URL fetches (the check above).
   $ar = Run 'agy -p' ('"{0}" --output-format json --json-schema schema.json --print-timeout 25m --sandbox -p "{1}"' -f $agyExe, $agyPrompt) 1800 0 $ws $errTxt
   $raw = [string]$ar.Out
-  $et = ''; try { $et = [IO.File]::ReadAllText($errTxt, [Text.Encoding]::UTF8) } catch { }
-  if ($et) { try { [IO.File]::WriteAllText($errTxt, (Scrub $et), $u8) } catch { } }
+  $et = ScrubFile $errTxt
   if ($et.Trim()) { W '- agy stderr:'; Lines $et 6 }
   [IO.File]::WriteAllText((Join-Path $ws 'out.json'), (Scrub $raw), $u8)
   if ($ar.Timeout -or $ar.Code -ne 0 -or [string]::IsNullOrWhiteSpace($raw)) { Fail 'agy failed' @{ route = 'agy'; exit = $ar.Code; timeout = $ar.Timeout; output = (Clip $raw 600); stderr = (Clip $et 600); head = $sha; credential_scan = $scan; workspace = $ws } }
@@ -393,8 +454,7 @@ if ($route -eq 'cli') {
   # stderr to its own file, so a warning line cannot break the JSON envelope on stdout.
   $gErr = Join-Path $dir ("pr{0}-gemini-stderr.txt" -f $Pr)
   $r1 = Run 'gemini -p -o json' ('(type "{0}" | gemini.cmd -p "{1}" -o json)' -f $pkt, $cliPrompt) 600 6 '' $gErr
-  $e1 = ''; try { $e1 = [IO.File]::ReadAllText($gErr, [Text.Encoding]::UTF8) } catch { }
-  if ($e1) { try { [IO.File]::WriteAllText($gErr, (Scrub $e1), $u8) } catch { } }
+  $e1 = ScrubFile $gErr
   if ($e1.Trim()) { W '- gemini stderr:'; Lines $e1 6 }
   if ($r1.Code -ne 0 -and ($e1 + [string]$r1.Out) -match 'Unknown argument|output-format') { $isJson = $false; $r1 = Run 'gemini -p' ('(type "{0}" | gemini.cmd -p "{1}")' -f $pkt, $cliPrompt) 600 6 }
   Remove-Item -LiteralPath $pkt -Force -ErrorAction SilentlyContinue

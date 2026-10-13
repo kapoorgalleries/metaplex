@@ -53,7 +53,18 @@ W '# DC-BOOT END handing over'
 # The target's own output (a refused switch shows here) and its exit code go after that line, appended so the
 # lines above stay as they are.
 $u8 = New-Object Text.UTF8Encoding $false
-& powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $target @argv 2>&1 | ForEach-Object { [IO.File]::AppendAllText($log, ('    ' + $_ + "`r`n"), $u8); $_ }
+# A refused argument stops the target before it writes anything, so its report and verdict files are an earlier
+# run's: that is exit 2 (error) here, never the 1 a review would mean as request_changes.
+$bindErr = $false
+& powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $target @argv 2>&1 | ForEach-Object {
+  $s = [string]$_
+  if ($s -match 'NamedParameterNotFound|ParameterArgument(Validation|Transformation)Error|MissingArgument|PositionalParameterNotFound|A parameter cannot be found that matches|Cannot validate argument on parameter|Cannot process argument transformation on parameter|Missing an argument for parameter|A positional parameter cannot be found') { $bindErr = $true }
+  [IO.File]::AppendAllText($log, ('    ' + $s + "`r`n"), $u8); $_
+}
 $rc = $LASTEXITCODE
+if ($rc -ne 0 -and $bindErr) {
+  [IO.File]::AppendAllText($log, ("- {0} refused its arguments and did not run: its report and verdict files are from an earlier run`r`n# DC-BOOT END failed`r`n" -f $Script), $u8)
+  exit 2
+}
 [IO.File]::AppendAllText($log, ("- {0} exit {1} {2}`r`n" -f $Script, $rc, (Get-Date -Format o)), $u8)
 exit $rc

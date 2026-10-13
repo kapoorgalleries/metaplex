@@ -60,6 +60,9 @@ class DcPack(unittest.TestCase):
     def test_args_whitelist(self):
         self.assertNotEqual(pack(SCRIPTS / 'dc-bootstrap.ps1', '--args', '-Script x.ps1; Remove-Item C:\\').returncode, 0)
         self.assertEqual(pack(SCRIPTS / 'dc-bootstrap.ps1', '--args', '-Script dc-gemini-review.ps1 -Pr 31 -Branch claude/x -Head 2c9a38a -Via agy').returncode, 0)
+        r = pack(SCRIPTS / 'dc-bootstrap.ps1', '--args', '-NoRemote')   # one dash-led value
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn('-NoRemote', travelling_copy(r.stdout)[0])
 
 
 if __name__ == '__main__':

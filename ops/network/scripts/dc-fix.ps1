@@ -50,21 +50,33 @@ $L = New-Object System.Collections.Generic.List[string]
 function W([string]$s) { $script:L.Add($s) }
 function Flush() { [IO.File]::WriteAllText($script:latest, (($script:L -join "`r`n") + "`r`n"), $script:utf8) }
 function Sec([string]$t) { W ''; W "## $t"; Flush }
-# Scrub runs on every line of external content (command output, file dumps, the verdict JSON): bearer and other
-# Authorization values, values after token/key/secret/password/auth switches and NAME=/Header:/"json_key": pairs,
-# secret-looking URL query values, URL passwords and token-shaped strings are masked. Quotes, \" and \u0027 end a
-# value and a value that opens an object or array is left alone, so scrubbed JSON stays JSON. Not secrets:
-# `passed=` (run-remote.sh's TRIMURTI_SUMMARY line) and claude auth status's authMethod / apiKeySource, which name
-# the kind of sign-in (they show when a PC bills an API key). The same function is in dc-diagnose.ps1, dc-fix.ps1
-# and dc-gemini-review.ps1; test/dc-scrub.ps1 keeps them identical.
+# Scrub runs on every line of external content (command output, file dumps) and on each string of the verdict
+# object. It masks: JSON strings and numbers under key-like names (counts excepted); Bearer and other
+# Authorization values; values after token/key/secret/password/auth switches and in NAME=, Header: and
+# "json_key": pairs; secret-looking URL query values and URL passwords; curl -u, smbclient -U, sshpass -p and
+# net use passwords; ConvertTo-SecureString strings; token-shaped strings. A quote or an escaped quote inside a
+# value continues it only when another value character follows, so a closing quote still ends it, and a value
+# that opens an object or array is left alone: scrubbed JSON stays JSON. Not secrets: `passed=` (run-remote.sh's
+# TRIMURTI_SUMMARY line) and claude auth status's authMethod / apiKeySource, which name the kind of sign-in (they
+# show when a PC bills an API key). The same function is in dc-diagnose.ps1, dc-fix.ps1 and dc-gemini-review.ps1;
+# test/dc-scrub.ps1 keeps them identical.
 function Scrub([string]$s) {
-  $s = $s -replace '(?i)\b(Bearer)\s+(?:[^\s"''\\]|\\[^\s"''u])+', '$1 ***'
-  $s = $s -replace '(?i)\b((?:proxy-)?authorization["'']?\s*[:=]\s*["'']?)[A-Za-z]+\s+(?:[^\s"''\\]|\\[^\s"''u])+', '$1***'
-  $s = $s -replace '(?i)(--?[\w-]*(token|key|secret|password|passwd|pass|auth|bearer|credential)[\w-]*)([=\s]+)(\\?["'']|\\u0027)?(?:[^\s"''\\]|\\[^\s"''u])+', '$1$3$4***'
-  $s = $s -replace '(?i)\b(?!(?:passed|authMethod|apiKeySource)\b)([\w-]*(token|key|secret|password|passwd|pass|auth|bearer|credential)[\w-]*)(\\?["'']|\\u0027)?\s*([=:])\s*(?!(?:true|false|yes|no|null|none|\d+)\b)((?:\\?["'']|\\u0027){0,2})(?![{\[])(?:[^\s"''\\]|\\[^\s"''u])+', '$1$3$4$5***'
+  $v = '(?:[^\s"''\\]|\\u(?!0027)[0-9a-fA-F]{4}|\\[^\s"''u]|(?:\\?["'']|\\u0027)(?![\s,;:}\])"''\\]|$))+'
+  $s = $s -replace '(?i)("(?!(?:passed|authMethod|apiKeySource)")[\w-]*(?:token|key|secret|password|passwd|pass|auth|bearer|credential)[\w-]*"\s*:\s*")(?:[^"\\]|\\.)+(")', '$1***$2'
+  $s = $s -replace '(?i)("(?!(?:passed|authMethod|apiKeySource)")[\w-]*(?:token|key|secret|password|passwd|pass|auth|bearer|credential)[\w-]*(?<!count|tokens)"\s*:\s*)-?\d+(?![\w.])', '$1"***"'
+  $s = $s -replace ('(?i)\b(Bearer)\s+' + $v), '$1 ***'
+  $s = $s -replace ('(?i)\b((?:proxy-)?authorization["'']?\s*[:=]\s*["'']?)[A-Za-z]+\s+' + $v), '$1***'
+  $s = $s -replace ('(?i)(--?[\w-]*(token|key|secret|password|passwd|pass|auth|bearer|credential)[\w-]*)([=\s]+)(\\?["'']|\\u0027)?(?![,}\]])' + $v), '$1$3$4***'
+  $s = $s -replace ('(?i)\b(?!(?:passed|authMethod|apiKeySource)\b)([\w-]*(token|key|secret|password|passwd|pass|auth|bearer|credential)[\w-]*)(\\?["'']|\\u0027)?\s*([=:])\s*(?!(?:true|false|yes|no|null|none)(?=[\s,;}\])]|$)|(?<=(?:count|tokens)(?:\\?["'']|\\u0027)?\s*[=:]\s*)\d+(?=[\s,;}\])]|$))(?![{\[])(\\?["'']|\\u0027|"(?:\\u0027|''|\\"))?(?![,;}\])])' + $v), '$1$3$4$5***'
   $s = $s -replace '(?i)([?&][^=&\s"\\]*(token|key|secret|sig|code|auth|pass)[^=&\s"\\]*=)[^&\s"\\]+', '$1***'
   $s = $s -replace '(://[^/@\s:"\\]+:)[^@\s"\\]+@', '$1***@'
-  $s -replace '(?i)\b(sk-[A-Za-z0-9_-]{10,}|ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|gho_[A-Za-z0-9]{20,}|hf_[A-Za-z0-9]{20,}|sbp_[A-Za-z0-9]{20,}|AIza[0-9A-Za-z_-]{30,}|xox[abprs]-[A-Za-z0-9-]+|AKIA[0-9A-Z]{16}|glpat-[\w-]{20,}|npm_[A-Za-z0-9]{30,}|ya29\.[\w.-]+|eyJ[\w-]{10,}\.[\w-]{10,}\.[\w-]{10,})\b', '***'
+  $s = $s -replace '(?i)(\s-u\s+[^\s:]+:)\S+', '$1***'
+  $s = $s -creplace '(\s-U\s+[^\s%]+%)\S+', '$1***'
+  $s = $s -replace '(?i)(\bsshpass\s+-p\s*)\S+', '$1***'
+  $s = $s -replace '(?i)(\bnet\s+use\s+(?:\S+:\s+)?\\\\\S+\s+)(?!/)\S+', '$1***'
+  $s = $s -replace '(?i)(ConvertTo-SecureString\s+(?:-String\s+)?)(["''])[^"'']*(["''])', '$1$2***$3'
+  $s = $s -replace '(\bbot\d+:)[A-Za-z0-9_-]{30,}', '$1***'
+  $s -replace '(?i)\b(sk-[A-Za-z0-9_-]{10,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|hf_[A-Za-z0-9]{20,}|sbp_[A-Za-z0-9]{20,}|AIza[0-9A-Za-z_-]{30,}|xox[abprs]-[A-Za-z0-9-]+|AKIA[0-9A-Z]{16}|glpat-[\w-]{20,}|npm_[A-Za-z0-9]{30,}|ya29\.[\w.-]+|eyJ[\w-]{10,}\.[\w-]{10,}\.[\w-]{10,})\b', '***'
 }
 function Clip([string]$s, [int]$n = 220) { $s = Scrub $s; if ($s.Length -gt $n) { $s.Substring(0, $n) + ' ...' } else { $s } }
 function Lines($text, [int]$max = 14) {
@@ -243,8 +255,8 @@ else {
       $cmp = @(Compare-Object @(Get-Content -LiteralPath $new.Skill) @(Get-Content -LiteralPath $o.Skill))
       $a = @($cmp | Where-Object { $_.SideIndicator -eq '<=' }); $z = @($cmp | Where-Object { $_.SideIndicator -eq '=>' })
       W ("    vs {0} (version {1}, {2}): {3} line(s) only in the newest, {4} only here" -f $o.Path, $o.Ver, $o.Time, $a.Count, $z.Count)
-      foreach ($l in ($a | Select-Object -First 4)) { W ('      + ' + (Clip $l.InputObject 120)) }
-      foreach ($l in ($z | Select-Object -First 4)) { W ('      - ' + (Clip $l.InputObject 120)) }
+      foreach ($cl in ($a | Select-Object -First 4)) { W ('      + ' + (Clip $cl.InputObject 120)) }
+      foreach ($cl in ($z | Select-Object -First 4)) { W ('      - ' + (Clip $cl.InputObject 120)) }
     } catch { W ("    vs {0}: compare failed: {1}" -f $o.Path, (Clip $_.Exception.Message)) }
   }
 }

@@ -22,7 +22,12 @@ ap = argparse.ArgumentParser()
 ap.add_argument('script')
 ap.add_argument('--name', help='file name on the target (default: the script\'s own name)')
 ap.add_argument('--args', default='', help='arguments appended to the -File invocation (letters, digits, space and . _ : = / \\ - only)')
-a = ap.parse_args()
+# '--args -NoRemote' would read the value as an option: join the pair into '--args=-NoRemote' first.
+argv = sys.argv[1:]
+if '--args' in argv[:-1]:
+    i = argv.index('--args')
+    argv[i:i + 2] = ['--args=' + argv[i + 1]]
+a = ap.parse_args(argv)
 if not re.fullmatch(r'[A-Za-z0-9 ._:=/\\-]*', a.args):
     sys.exit('--args may contain only letters, digits, space and . _ : = / \\ -')
 
