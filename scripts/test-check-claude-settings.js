@@ -869,6 +869,7 @@ for (const [name, files, pattern] of [
   ['binary in the root .gitattributes', { '.gitattributes': '*.sh binary\n' }, /x\.sh is marked -diff or binary/],
   ['a root macro that unsets diff', { '.gitattributes': '[attr]quiet -diff\n', '.claude/.gitattributes': 'hooks/x.sh quiet\n' }, /x\.sh is marked -diff or binary/],
   ['working-tree-encoding, as git suggests for a .ps1', { '.claude/hooks/.gitattributes': 'x.sh working-tree-encoding=UTF-16LE\n', '.claude/hooks/x.sh': Buffer.from('exit 0\n', 'utf16le') }, /x\.sh has working-tree-encoding UTF-16LE from a \.gitattributes file/],
+  ['a symlink to a -diff file', { '.claude/hooks/x.sh': { symlink: 'payload.sh' }, '.claude/hooks/payload.sh': 'exit 0\n', '.claude/hooks/.gitattributes': 'payload.sh -diff\n' }, /x\.sh is marked -diff or binary/],
 ]) {
   check(`CLI: a hook script with ${name} exits 1`, () => {
     const r = runCli(SH_HOOK, { '.claude/hooks/x.sh': 'exit 0\n', ...files });
@@ -880,7 +881,11 @@ check('CLI: line-ending attributes and a diff driver on a hook script are accept
   const r = runCli(SH_HOOK, { '.claude/hooks/x.sh': 'exit 0\n', '.gitattributes': '*.sh text eol=lf diff=bash\n' });
   assert.strictEqual(r.status, 0, r.stderr);
 });
-check('CLI: a developer\'s own attributes file does not count', () => {
+check('CLI: -diff on a symlink to a hook script is accepted, since git diffs a symlink as its target path', () => {
+  const r = runCli(SH_HOOK, { '.claude/hooks/x.sh': { symlink: 'payload.sh' }, '.claude/hooks/payload.sh': 'exit 0\n', '.gitattributes': 'x.sh -diff\n' });
+  assert.strictEqual(r.status, 0, r.stderr);
+});
+check('CLI: the global attributes file does not count', () => {
   const home = tmp('claude-settings-xdg-');
   try {
     fs.mkdirSync(path.join(home, 'git'));

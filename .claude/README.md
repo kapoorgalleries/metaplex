@@ -140,7 +140,9 @@ hooks, nothing in the file may run code that no reviewed script holds:
   `.claude` that is a symlink or submodule is rejected too.
 
 Hooks in skill or agent frontmatter, and plugins a developer enables for
-themselves, are outside this check. Its tests are in
+themselves, are outside this check. So is a submodule's own
+`.claude/settings.json`: a submodule is a separate repository, which Claude
+Code does not trust along with this one. The checker's tests are in
 `scripts/test-check-claude-settings.js`. CI runs both from
 `.github/workflows/claude-settings.yml` whenever a `.claude` folder at any
 depth and in any case, a `.gitattributes` file, or the root `.mcp.json`

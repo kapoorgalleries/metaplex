@@ -458,9 +458,14 @@ function checkPathToken(token, root, at, fail) {
   // "-diff" or "binary" makes git show "Binary files differ", and
   // working-tree-encoding re-encodes the script on checkout, so the bytes
   // that run, and that the NUL check below reads, are not the ones a pull
-  // request shows. Only attributes the repository commits count; a
-  // developer's own attributes file is ignored. Outside a git repository
-  // there are none, and main() fails there anyway.
+  // request shows. They are read for the file the script resolves to: git
+  // applies none of them to a symlink, which a diff shows as its target
+  // path. The global and system attributes files are turned off, so in
+  // CI's fresh checkout only the committed .gitattributes files count. A
+  // local run also reads uncommitted .gitattributes files and
+  // .git/info/attributes, which overrides them and which git has no switch
+  // to skip, so it can disagree with CI. Outside a git repository check-attr
+  // fails and this check is skipped; main() fails there anyway.
   const attrs = spawnSync('git', ['-c', `core.attributesFile=${os.devNull}`, '-C', path.dirname(real), 'check-attr', '-z', '-a', '--', path.basename(real)], { encoding: 'utf8', env: { ...process.env, GIT_ATTR_NOSYSTEM: '1' } });
   const attr = attrs.status === 0 ? attrs.stdout.split('\0') : [];
   for (let n = 0; n + 2 < attr.length; n += 3) {
