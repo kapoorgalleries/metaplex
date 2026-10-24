@@ -272,6 +272,17 @@ else {
   function VerNum([string]$v) { try { [Version]($v -replace '[^0-9.].*$', '') } catch { [Version]'0.0' } }
   $new = $pg | Sort-Object @{ Expression = { VerNum $_.Ver }; Descending = $true }, @{ Expression = 'Time'; Descending = $true } | Select-Object -First 1
   $stale = @($pg | Where-Object { $_.Path -ne $new.Path -and $_.Hash -ne $new.Hash })
+  # Compared before any sync, which would overwrite the stale copies.
+  foreach ($o in $stale) {
+    if (-not ((Test-Path -LiteralPath $o.Skill) -and (Test-Path -LiteralPath $new.Skill))) { W ("    vs {0}: no SKILL.md to compare" -f $o.Path); continue }
+    try {
+      $cmp = @(Compare-Object @(Get-Content -LiteralPath $new.Skill) @(Get-Content -LiteralPath $o.Skill))
+      $a = @($cmp | Where-Object { $_.SideIndicator -eq '<=' }); $z = @($cmp | Where-Object { $_.SideIndicator -eq '=>' })
+      W ("    vs {0} (version {1}, {2}): {3} line(s) only in the newest, {4} only here" -f $o.Path, $o.Ver, $o.Time, $a.Count, $z.Count)
+      foreach ($cl in ($a | Select-Object -First 4)) { W ('      + ' + (Clip $cl.InputObject 120)) }
+      foreach ($cl in ($z | Select-Object -First 4)) { W ('      - ' + (Clip $cl.InputObject 120)) }
+    } catch { W ("    vs {0}: compare failed: {1}" -f $o.Path, (Clip $_.Exception.Message)) }
+  }
   if ($SyncPermissionGates) {
     $bk = Join-Path $script:dir "backup-$stamp"
     W ("- COPIES DIFFER; syncing from {0} (version {1}, {2}) to {3} stale cop(y/ies); originals backed up under {4}" -f $new.Path, $new.Ver, $new.Time, $stale.Count, $bk)
@@ -292,16 +303,6 @@ else {
   } else {
     W ("- COPIES DIFFER, nothing overwritten (no -SyncPermissionGates); highest version: {0} (version {1}, {2})" -f $new.Path, $new.Ver, $new.Time)
     Note ("kg-permission-gates: {0} copies differ, highest version at {1}; rerun with -SyncPermissionGates to sync" -f $pg.Count, $new.Path)
-  }
-  foreach ($o in $stale) {
-    if (-not ((Test-Path -LiteralPath $o.Skill) -and (Test-Path -LiteralPath $new.Skill))) { W ("    vs {0}: no SKILL.md to compare" -f $o.Path); continue }
-    try {
-      $cmp = @(Compare-Object @(Get-Content -LiteralPath $new.Skill) @(Get-Content -LiteralPath $o.Skill))
-      $a = @($cmp | Where-Object { $_.SideIndicator -eq '<=' }); $z = @($cmp | Where-Object { $_.SideIndicator -eq '=>' })
-      W ("    vs {0} (version {1}, {2}): {3} line(s) only in the newest, {4} only here" -f $o.Path, $o.Ver, $o.Time, $a.Count, $z.Count)
-      foreach ($cl in ($a | Select-Object -First 4)) { W ('      + ' + (Clip $cl.InputObject 120)) }
-      foreach ($cl in ($z | Select-Object -First 4)) { W ('      - ' + (Clip $cl.InputObject 120)) }
-    } catch { W ("    vs {0}: compare failed: {1}" -f $o.Path, (Clip $_.Exception.Message)) }
   }
 }
 

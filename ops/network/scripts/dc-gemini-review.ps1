@@ -257,11 +257,12 @@ function AgyModes($cfg, [string]$ws = '') {
       $nm = ($it[2] + '.' + $q.Name).TrimStart('.')
       foreach ($x in @($q.Value)) {
         if ($x -is [System.Management.Automation.PSCustomObject]) { if ($it[1] -lt 6) { $todo.Enqueue(@($x, ($it[1] + 1), $nm)) } }
-        elseif ($nm -match '(?i)trust') {
-          $tp = ([string]$x).TrimEnd('\', '/')
-          if ($tp -and $ws -and ($ws -ieq $tp -or $ws.StartsWith($tp + '\', [StringComparison]::OrdinalIgnoreCase) -or $ws.StartsWith($tp + '/', [StringComparison]::OrdinalIgnoreCase))) { $modes.Add($nm + '=' + (Clip $tp 60) + ' (holds the review folder)') }
+        elseif ($nm -match '(?i)trust' -and $x -is [string] -and $x -match '[\\/]' -and $x -notmatch '(?i)always|proceed|yolo|accept|bypass|skip|dangerous') {
+          # A folder: / and \ compared alike. Any other value under a trust key (true, a mode) falls to the next test.
+          $tp = ($x -replace '/', '\').TrimEnd('\'); $wn = $ws -replace '/', '\'
+          if ($tp -and $wn -and ($wn -ieq $tp -or $wn.StartsWith($tp + '\', [StringComparison]::OrdinalIgnoreCase))) { $modes.Add($nm + '=' + (Clip $tp 60) + ' (holds the review folder)') }
         }
-        elseif ([string]$x -match '(?i)always|proceed|yolo|accept|bypass|skip|dangerous' -or ($nm -match '(?i)workspace|outside|auto.?exec|approv|bypass|skip|dangerous' -and $x -ne $false -and [string]$x -notmatch '(?i)^(?:false|off|never|none|default|request-review|ask|)$')) { $modes.Add($nm + '=' + (Clip ([string]$x) 40)) }
+        elseif ([string]$x -match '(?i)always|proceed|yolo|accept|bypass|skip|dangerous' -or ($nm -match '(?i)trust|workspace|outside|auto.?exec|approv|bypass|skip|dangerous' -and $x -ne $false -and [string]$x -notmatch '(?i)^(?:false|off|never|none|default|request-review|ask|)$')) { $modes.Add($nm + '=' + (Clip ([string]$x) 40)) }
       }
     }
   }
@@ -535,7 +536,11 @@ if ($route -eq 'cli') {
   $r1 = Run 'gemini -p -o json' ('(type "{0}" | gemini.cmd -p "{1}" -o json)' -f $pkt, $cliPrompt) 600 6 '' $gErr
   $e1 = ScrubFile $gErr
   if ($e1.Trim()) { W '- gemini stderr:'; Lines $e1 6 }
-  if ($r1.Code -ne 0 -and ($e1 + [string]$r1.Out) -match 'Unknown argument|output-format') { $isJson = $false; $r1 = Run 'gemini -p' ('(type "{0}" | gemini.cmd -p "{1}")' -f $pkt, $cliPrompt) 600 6 }
+  if ($r1.Code -ne 0 -and ($e1 + [string]$r1.Out) -match 'Unknown argument|output-format') {
+    $isJson = $false; $r1 = Run 'gemini -p' ('(type "{0}" | gemini.cmd -p "{1}")' -f $pkt, $cliPrompt) 600 6 '' $gErr
+    $e1 = ScrubFile $gErr
+    if ($e1.Trim()) { W '- gemini stderr (no -o json):'; Lines $e1 6 }
+  }
   Remove-Item -LiteralPath $pkt -Force -ErrorAction SilentlyContinue
   $raw = [string]$r1.Out
   if ($r1.Code -ne 0 -or [string]::IsNullOrWhiteSpace($raw)) { Fail 'gemini CLI failed' @{ route = 'cli'; exit = $r1.Code; timeout = $r1.Timeout; output = (Clip $raw 700); head = $sha; credential_scan = $scan } }

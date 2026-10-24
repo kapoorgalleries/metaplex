@@ -67,6 +67,23 @@ Check (@(AgyModes (Cfg $real) $ws).Count -eq 0) 'the desktop /config does not bl
 Check (@(AgyModes (Cfg ($real -replace 'request-review', 'always-proceed')) $ws).Count -eq 1) 'toolPermission always-proceed blocks'
 Check (@(AgyModes (Cfg ($real -replace '"allowNonWorkspaceAccess":false', '"allowNonWorkspaceAccess":true')) $ws).Count -eq 1) 'allowNonWorkspaceAccess true blocks'
 Check (@(AgyModes (Cfg ($real -replace 'AppData\\\\Local\\\\Temp\\\\Kapoor', 'trimurti-dc')) $ws).Count -eq 1) 'a trusted parent of the review folder blocks'
+Check (@(AgyModes (Cfg ($real -replace '"C:\\\\Users\\\\u\\\\AppData\\\\Local\\\\Temp\\\\Kapoor"', '"C:/Users/u/trimurti-dc/"')) $ws).Count -eq 1) 'a trusted parent written with / blocks'
+Check (@(AgyModes (Cfg ($real -replace '"C:\\\\Users\\\\u\\\\AppData\\\\Local\\\\Temp\\\\Kapoor"', '"C:/Users/u/Temp"')) $ws).Count -eq 0) 'a trusted folder written with / elsewhere does not block'
+# A trust key whose value is not a folder is a setting: true or an auto-approving mode blocks, false does not.
+foreach ($c in '{"trustAllWorkspaces":true}', '{"workspaceTrust":"always-proceed"}', '{"trust":{"mode":"bypass"}}', '{"trustedWorkspaces":["*"]}') {
+  Check (@(AgyModes (Cfg ('{"command":{"data":{"config":' + $c + '}}}')) $ws).Count -ge 1) "blocks the trust setting: $c"
+}
+Check (@(AgyModes (Cfg '{"command":{"data":{"config":{"trustAllWorkspaces":false,"trustedWorkspaces":[]}}}}') $ws).Count -eq 0) 'trust settings that are off do not block'
+
+# The -Via cli fallback without -o json sends gemini's stderr to its own file too, like the first call.
+$gr = @($ast.FindAll({ param($a) $a -is [System.Management.Automation.Language.CommandAst] -and $a.GetCommandName() -eq 'Run' -and $a.Extent.Text -match "gemini\.cmd" }, $true))
+Check ($gr.Count -ge 2) 'two gemini CLI Run calls found'
+foreach ($c in $gr) { Check ($c.Extent.Text -match '\$gErr\s*$') ("gemini CLI Run call ends with `$gErr: " + $c.Extent.Text.Substring(0, 30)) }
+
+# dc-fix step 5 compares each stale kg-permission-gates copy before -SyncPermissionGates overwrites it.
+$fx = [IO.File]::ReadAllText((Join-Path (Split-Path -Parent $PSScriptRoot) 'scripts/dc-fix.ps1'))
+$ic = $fx.IndexOf('Compare-Object @(Get-Content -LiteralPath $new.Skill)'); $is = $fx.IndexOf('Get-ChildItem -LiteralPath $new.Path -Force | Copy-Item')
+Check ($ic -gt 0 -and $is -gt 0 -and $ic -lt $is) 'dc-fix compares the stale SKILL.md before syncing over it'
 
 # The verdict object: ScrubObj masks strings anywhere in it and the JSON always parses.
 foreach ($n in 'ScrubObj') { $f = @($ast.FindAll({ param($a) $a -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $a.Name -eq $n }, $true)); Check ($f.Count -eq 1) "defines $n once"; if ($f.Count) { . ([ScriptBlock]::Create($f[0].Extent.Text)) } }
