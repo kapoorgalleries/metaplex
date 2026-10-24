@@ -9,9 +9,13 @@ Python 3.10+, so Python 3.13 is installed when no 3.10+ is present. Idempotent:
 rerun to upgrade.
 
 winget (App Installer; present on Windows 10 1809+ and 11) is needed only to
-install Node.js, Python or Git. Node's MSI needs elevation: run from an elevated
-PowerShell, or over SSH as a member of Administrators (those SSH sessions are
-already elevated).
+install Node.js, Python or Git. Node's MSI and Git need elevation: run from an
+elevated PowerShell, or over SSH as a member of Administrators (those SSH
+sessions are already elevated). In an unattended run that is not elevated
+(-NonInteractive, over SSH, or with no interactive desktop) they are reported as
+failures instead of waiting on a UAC prompt nobody can answer; in a PowerShell
+window their installers ask for elevation as before. Not elevated, Python is
+installed for this user only (without the all-users py launcher).
 
 Usage: powershell -ExecutionPolicy Bypass -File scripts\bootstrap-ai-clis.ps1 [-SkipClaude] [-SkipCodex] [-SkipGemini] [-SkipAgy] [-SkipNode] [-WithNode] [-SkipHf] [-WithClaudeHfMcp] [-WithGit]
   -SkipClaude, -SkipCodex, -SkipGemini, -SkipAgy   leave that CLI alone
@@ -25,6 +29,7 @@ Usage: powershell -ExecutionPolicy Bypass -File scripts\bootstrap-ai-clis.ps1 [-
 Exit: 0 every requested CLI is installed, 1 something failed (the last line says what), 2 bad arguments.
 #>
 $ErrorActionPreference = 'Stop'
+if (-not $env:COMPUTERNAME) { $env:COMPUTERNAME = [Environment]::MachineName }   # empty in some agent shells (Desktop Commander)
 
 function Show-Usage([int]$Code, [string]$Why) {
   $text = (((Get-Content -LiteralPath $PSCommandPath -Raw) -split '#>')[0] -replace '^\s*<#\r?\n', '').TrimEnd()
@@ -94,12 +99,23 @@ function Find-Winget {
   return $null
 }
 $Winget = Find-Winget
-function Winget-Install($id) {
+$Elevated = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+# Nobody can answer a UAC prompt in a -NonInteractive run (Desktop Commander, the MCP tools), over SSH, or in a
+# service session; a PowerShell window can (start-codex.ps1 runs this with -WithNode from one).
+$Unattended = [bool](@([Environment]::GetCommandLineArgs()) -match '^-noni') -or [bool]$env:SSH_CONNECTION -or -not [Environment]::UserInteractive
+# -UserScope asks winget for the per-user installer: without elevation a machine-wide one waits on a UAC
+# prompt that nobody answers in a non-interactive session. Only for packages that ship one (Python does).
+# -Custom adds installer arguments to winget's silent defaults (Python's per-user install still installs the
+# py launcher for all users, which elevates, unless told InstallLauncherAllUsers=0).
+function Winget-Install($id, [switch]$UserScope, [string]$Custom = '') {
   if (-not $Winget) {
     Write-Warning "winget not found, so $id cannot be installed. Install 'App Installer' from the Microsoft Store (or run: Add-AppxPackage -RegisterByFamilyName -MainPackage Microsoft.DesktopAppInstaller_8wekyb3d8bbwe), log in to the desktop once, then rerun."
     return $false
   }
-  $rc = Invoke-Native $Winget @('install', '--id', $id, '-e', '--silent', '--disable-interactivity', '--accept-source-agreements', '--accept-package-agreements')
+  $wa = @('install', '--id', $id, '-e', '--silent', '--disable-interactivity', '--accept-source-agreements', '--accept-package-agreements')
+  if ($UserScope) { $wa += @('--scope', 'user') }
+  if ($Custom) { $wa += @('--custom', $Custom) }
+  $rc = Invoke-Native $Winget $wa
   if ($rc -eq -1978334967) { Write-Warning "$id is installed; restart this PC to finish (winget 0x8A150109)"; return $true }
   # benign: 0x8A15002B no applicable update, 0x8A150061 package already installed, 0x8A15010D another version
   # is already installed, 0x8A15010E a higher version is already installed, 0x8A15004F upgrade version not newer
@@ -352,6 +368,8 @@ function Install-Node {
   if ($null -ne $script:NodeOk) { return $script:NodeOk }
   $script:NodeOk = $false
   if ((Get-NodeMajor) -ge 20) { Log "node $(Get-CliVersion 'node') present"; $script:NodeOk = $true; return $true }
+  # Node's MSI is machine-wide: not elevated, it would wait on a UAC prompt that nobody answers unattended.
+  if (-not $Elevated -and $Unattended) { Add-Failure 'node' 'Node.js 20+ needs an elevated run (its installer is machine-wide): rerun this from an elevated PowerShell, or pass -SkipNode'; return $false }
   Log 'installing Node.js LTS (Gemini CLI and the trimurti-ops MCP server need 20+)'
   if (-not (Winget-Install 'OpenJS.NodeJS.LTS')) { Add-Failure 'node' 'Node.js install FAILED'; return $false }
   Refresh-Path
@@ -367,9 +385,12 @@ function Install-Node {
 if (-not $SkipNode -and (-not $SkipGemini -or $WithNode)) { [void](Install-Node) }
 
 if ($WithGit -and -not (Have 'git')) {
-  Log 'installing Git for Windows (Bash tool for Claude Code)'
-  if (Winget-Install 'Git.Git') { Refresh-Path }
-  if (-not (Have 'git')) { Add-Failure 'git' 'Git for Windows install FAILED' }
+  if (-not $Elevated -and $Unattended) { Add-Failure 'git' 'Git for Windows needs an elevated run (machine-wide installer): rerun -WithGit from an elevated PowerShell' }
+  else {
+    Log 'installing Git for Windows (Bash tool for Claude Code)'
+    if (Winget-Install 'Git.Git') { Refresh-Path }
+    if (-not (Have 'git')) { Add-Failure 'git' 'Git for Windows install FAILED' }
+  }
 }
 
 if (-not $SkipClaude) {
@@ -448,8 +469,9 @@ if (-not $SkipHf) {
     if (-not (Test-Path (Join-Path $env:USERPROFILE '.agents\skills\hf-cli'))) { Write-Warning 'the hf-cli agent skill is not installed; add it with: hf skills add --global' }
   } else {
     if (-not (Test-Python)) {
-      Log 'installing Python 3.13 (the hf installer needs 3.10+)'
-      if (Winget-Install 'Python.Python.3.13') { Refresh-Path }
+      if ($Elevated) { Log 'installing Python 3.13 (the hf installer needs 3.10+)'; $pyOk = Winget-Install 'Python.Python.3.13' }
+      else { Log 'installing Python 3.13 for this user (the hf installer needs 3.10+; not elevated, so the per-user installer)'; $pyOk = Winget-Install 'Python.Python.3.13' -UserScope -Custom 'InstallLauncherAllUsers=0' }
+      if ($pyOk) { Refresh-Path }
     }
     if (-not (Test-Python)) { Add-Failure 'hf' 'hf needs Python 3.10+ (py -3 or python on PATH): install it and rerun' }
     else {
