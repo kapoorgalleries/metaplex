@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 r"""Pack a PowerShell script into one Desktop Commander start_process command.
 
-Usage: dc-pack.py <script.ps1> [--name dc-diagnose.ps1] [--args "..."] > command.txt
+Usage: dc-pack.py <script.ps1> [--name dc-bootstrap.ps1] [--args "..."] > command.txt
 
 Desktop Commander's remote start_process takes one command line, so the script travels inside
 the command, one call with no separate file write: gzip + base64, wrapped in a short

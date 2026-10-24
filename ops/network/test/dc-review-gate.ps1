@@ -1,6 +1,7 @@
 # The agy gate in dc-gemini-review.ps1: AgyRules and AgyModes decide from agy's saved settings whether a headless
 # review can stay read-only. The rule shapes below are the ones agy 1.3.3 printed for -p "/permissions" on the
 # gallery's desktop (rule text replaced). Every saved allow rule blocks, and so does a shape the gate does not know.
+# AgyErrLines is checked too: of agy's stderr only its failure lines reach the report and the 'agy failed' verdict.
 # Run: pwsh -NoProfile -File ops/network/test/dc-review-gate.ps1 (or powershell.exe -File on Windows PowerShell 5.1).
 # Exits non-zero on any failure.
 $ErrorActionPreference = 'Stop'
@@ -76,6 +77,35 @@ $ok = $true; try { $back = ConvertFrom-Json -InputObject $j -ErrorAction Stop } 
 Check $ok 'ScrubObj: the verdict JSON parses'
 Check ($j -notmatch [regex]::Escape($k)) 'ScrubObj: secrets in nested strings are masked'
 Check ($ok -and @($back.findings).Count -eq 2 -and $back.usage.input_tokens -eq 5 -and $back.exit_code -eq 0) 'ScrubObj: structure and numbers are kept'
+# A model's finding with extra fields under key-like names (the cli route keeps any field, and agy's schema does
+# not forbid them): their values are masked, counts and the scan result are kept.
+$m = ConvertFrom-Json ('{"verdict":"comment","summary":"s","findings":[{"severity":"low","file":"a","line":1,"message":"m","password":"' + $k + '","api_key":"' + $k + '","pin_token":4821937,"key_ok":true}]}')
+$u = ConvertFrom-Json '{"promptTokenCount":5,"candidatesTokenCount":3,"totalTokenCount":8,"promptTokensDetails":[{"modality":"TEXT","tokenCount":5}],"cache_read_tokens":2}'
+$o = [ordered]@{ verdict = 'comment'; findings = @($m.findings); credential_scan = [ordered]@{ clean = $false; details = @('diff:12', 'meta:3') }; usage = $u; exit_code = 0 }
+$j = ConvertTo-Json -InputObject (ScrubObj $o) -Depth 10
+$back = ConvertFrom-Json -InputObject $j; $f0 = @($back.findings)[0]
+Check ($j -notmatch [regex]::Escape($k) -and $f0.password -eq '***' -and $f0.api_key -eq '***') 'ScrubObj: a string under a key-like name is masked'
+Check ($f0.pin_token -eq '***' -and $f0.key_ok -eq $true) 'ScrubObj: a number under a key-like name is masked, true/false kept'
+Check ($f0.message -eq 'm' -and $f0.line -eq 1 -and $f0.severity -eq 'low' -and $f0.file -eq 'a') 'ScrubObj: the finding''s own fields are kept'
+$d0 = @($back.usage.promptTokensDetails)[0]
+Check ($back.usage.promptTokenCount -eq 5 -and $back.usage.candidatesTokenCount -eq 3 -and $back.usage.totalTokenCount -eq 8 -and $back.usage.cache_read_tokens -eq 2 -and $d0.modality -eq 'TEXT' -and $d0.tokenCount -eq 5) 'ScrubObj: token counts and promptTokensDetails are kept'
+Check ((@($back.credential_scan.details) -join ',') -eq 'diff:12,meta:3' -and $back.credential_scan.clean -eq $false) 'ScrubObj: credential_scan is kept'
+
+# agy's stderr in the report and the 'agy failed' verdict: only its failure lines (AGY_ERROR, error:), never the
+# startup warnings, which can quote saved rules.
+foreach ($n in 'AgyErrLines') { $f = @($ast.FindAll({ param($a) $a -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $a.Name -eq $n }, $true)); Check ($f.Count -eq 1) "defines $n once"; if ($f.Count) { . ([ScriptBlock]::Create($f[0].Extent.Text)) } }
+$wr = 'warning: C:\Users\u\.gemini\antigravity\settings.json: deprecated unsandboxed rules: unsandboxed(python C:\Users\u\Clients\x.py)'
+$ae = @(AgyErrLines ($wr + "`r`n" + 'AGY_ERROR: {"status":"RESOURCE_EXHAUSTED","code":429,"retryable":true,"error_id":"e-1"}' + "`r`n  unsandboxed(net use \\nas\x)`n" + 'error: you have reached your individual quota; it resets at 2026-10-15T00:00:00Z' + "`n"))
+Check ($ae.Count -eq 2 -and $ae[0] -like 'AGY_ERROR: {"status":"RESOURCE_EXHAUSTED"*' -and $ae[1] -like 'error: you have reached*') 'AgyErrLines: keeps the AGY_ERROR and error: lines, in order'
+Check (($ae -join "`n") -notmatch 'unsandboxed|Clients') 'AgyErrLines: leaves out warnings and the rules they quote'
+Check (@(AgyErrLines ($wr + "`n  - command(git)`n")).Count -eq 0 -and @(AgyErrLines '').Count -eq 0) 'AgyErrLines: nothing from warnings alone or an empty stderr'
+Check (@(AgyErrLines 'warning: rule x failed with error: y').Count -eq 0) 'AgyErrLines: an error: inside a warning line is not a failure line'
+$many = @(AgyErrLines ((1..5 | ForEach-Object { "error: e$_" }) -join "`n"))
+Check ($many.Count -eq 3 -and $many[2] -eq 'error: e3') 'AgyErrLines: at most 3 lines'
+$long = @(AgyErrLines ('Error: ' + ('y' * 400)))
+Check ($long.Count -eq 1 -and $long[0].Length -eq 304 -and $long[0].EndsWith(' ...')) 'AgyErrLines: each line is clipped, any case of error:'
+$sl = @(AgyErrLines "error: request failed: token=$k")
+Check ($sl.Count -eq 1 -and $sl[0] -notmatch [regex]::Escape($k)) 'AgyErrLines: each line is scrubbed'
 
 Write-Output "$cases cases, $fails failures"
 if ($fails) { exit 1 }

@@ -60,30 +60,74 @@ function W([string]$s) { $script:L.Add($s) }
 function Flush() { [IO.File]::WriteAllText($script:latest, (($script:L -join "`r`n") + "`r`n"), $script:u8) }
 function Sec([string]$t) { W ''; W "## $t"; Flush }
 # Scrub runs on every line of external content (command output, file dumps) and on each string of the verdict
-# object. It masks: JSON strings and numbers under key-like names (counts excepted); Bearer and other
-# Authorization values; values after token/key/secret/password/auth switches and in NAME=, Header: and
-# "json_key": pairs; secret-looking URL query values and URL passwords; curl -u, smbclient -U, sshpass -p and
-# net use passwords; ConvertTo-SecureString strings; token-shaped strings. A quote or an escaped quote inside a
-# value continues it only when another value character follows, so a closing quote still ends it, and a value
-# that opens an object or array is left alone: scrubbed JSON stays JSON. Not secrets: `passed=` (run-remote.sh's
-# TRIMURTI_SUMMARY line) and claude auth status's authMethod / apiKeySource, which name the kind of sign-in (they
-# show when a PC bills an API key). The same function is in dc-diagnose.ps1, dc-fix.ps1 and dc-gemini-review.ps1;
-# test/dc-scrub.ps1 keeps them identical.
+# object (ScrubObj masks a value under a key-like property name itself). It masks: JSON strings and numbers under
+# key-like names (counts excepted); Bearer and other Authorization values; values after token/key/secret/password/
+# auth switches and in NAME=, Header: and "json_key": pairs, whatever their first character; secret-looking URL
+# query values and URL passwords; curl/smbclient -u/-U/--user, sshpass -p and net use passwords (net use: after
+# any /switches, with a * drive or a quoted share too); ConvertTo-SecureString strings, after its switches or piped
+# in; token-shaped strings. A quote or an escaped quote inside a value continues it only when another value
+# character follows, so a closing quote still ends it; a value that opens an object or array is left alone, and
+# so is a quote followed by JSON punctuation and then a delimiter, a space or the end, unless a closing quote ends
+# the value. The command-line passwords and the ConvertTo-SecureString strings run to their closing quote instead
+# ($w, $q and $sb below). So scrubbed JSON stays JSON in the shapes test/dc-scrub.ps1 checks, but not always when
+# a string ends just where a value would start (["set api key:",5]): masking wins there, and nothing reads
+# scrubbed JSON text back. Not secrets: `passed=`
+# (run-remote.sh's TRIMURTI_SUMMARY line) and claude auth status's authMethod / apiKeySource, which name the kind of
+# sign-in (they show when a PC bills an API key). The same function is in dc-diagnose.ps1, dc-fix.ps1 and
+# dc-gemini-review.ps1; test/dc-scrub.ps1 keeps them identical.
 function Scrub([string]$s) {
   $v = '(?:[^\s"''\\]|\\u(?!0027)[0-9a-fA-F]{4}|\\[^\s"''u]|(?:\\?["'']|\\u0027)(?![\s,;:}\])"''\\]|$))+'
   $s = $s -replace '(?i)("(?!(?:passed|authMethod|apiKeySource)")[\w-]*(?:token|key|secret|password|passwd|pass|auth|bearer|credential)[\w-]*"\s*:\s*")(?:[^"\\]|\\.)+(")', '$1***$2'
   $s = $s -replace '(?i)("(?!(?:passed|authMethod|apiKeySource)")[\w-]*(?:token|key|secret|password|passwd|pass|auth|bearer|credential)[\w-]*(?<!count|tokens)"\s*:\s*)-?\d+(?![\w.])', '$1"***"'
   $s = $s -replace ('(?i)\b(Bearer)\s+' + $v), '$1 ***'
   $s = $s -replace ('(?i)\b((?:proxy-)?authorization["'']?\s*[:=]\s*["'']?)[A-Za-z]+\s+' + $v), '$1***'
-  $s = $s -replace ('(?i)(--?[\w-]*(token|key|secret|password|passwd|pass|auth|bearer|credential)[\w-]*)([=\s]+)(\\?["'']|\\u0027)?(?![,}\]])' + $v), '$1$3$4***'
-  $s = $s -replace ('(?i)\b(?!(?:passed|authMethod|apiKeySource)\b)([\w-]*(token|key|secret|password|passwd|pass|auth|bearer|credential)[\w-]*)(\\?["'']|\\u0027)?\s*([=:])\s*(?!(?:true|false|yes|no|null|none)(?=[\s,;}\])]|$)|(?<=(?:count|tokens)(?:\\?["'']|\\u0027)?\s*[=:]\s*)\d+(?=[\s,;}\])]|$))(?![{\[])(\\?["'']|\\u0027|"(?:\\u0027|''|\\"))?(?![,;}\])])' + $v), '$1$3$4$5***'
+  $s = $s -replace ('(?i)(--?[\w-]*(token|key|secret|password|passwd|pass|auth|bearer|credential)[\w-]*)([=\s]+)(?:(\\?["'']|\\u0027)(?!(?=[,}\]](?:[\s"'',;:}\])\\]|$))(?![^\s"'']*["''](?:[\s,;:}\])]|$)))|)' + $v), '$1$3$4***'
+  $s = $s -replace ('(?i)\b(?!(?:passed|authMethod|apiKeySource)\b)([\w-]*(token|key|secret|password|passwd|pass|auth|bearer|credential)[\w-]*)(\\?["'']|\\u0027)?\s*([=:])\s*(?!(?:true|false|yes|no|null|none)(?=[\s,;}\])]|$)|(?<=(?:count|tokens)(?:\\?["'']|\\u0027)?\s*[=:]\s*)\d+(?=[\s,;}\])]|$))(?![{\[])(?:(\\?["'']|\\u0027|"(?:\\u0027|''|\\"))(?!(?=[,;}\])](?:[\s"'',;:}\])\\]|$))(?![^\s"'']*["''](?:[\s,;:}\])]|$)))|)' + $v), '$1$3$4$5***'
   $s = $s -replace '(?i)([?&][^=&\s"\\]*(token|key|secret|sig|code|auth|pass)[^=&\s"\\]*=)[^&\s"\\]+', '$1***'
   $s = $s -replace '(://[^/@\s:"\\]+:)[^@\s"\\]+@', '$1***@'
-  $s = $s -replace '(?i)(\s-u\s+[^\s:]+:)\S+', '$1***'
-  $s = $s -creplace '(\s-U\s+[^\s%]+%)\S+', '$1***'
-  $s = $s -replace '(?i)(\bsshpass\s+-p\s*)\S+', '$1***'
-  $s = $s -replace '(?i)(\bnet\s+use\s+(?:\S+:\s+)?\\\\\S+\s+)(?!/)\S+', '$1***'
-  $s = $s -replace '(?i)(ConvertTo-SecureString\s+(?:-String\s+)?)(["''])[^"'']*(["''])', '$1$2***$3'
+  # $w: a password after sshpass -p or net use, or after user: (curl -u/--user) or user% (smbclient -U/--user).
+  # Like \S+, but a bare " ends it where a JSON string can end (before a space, , : } ] or the end; \" and "" never
+  # do), and a quoted part ('...' or "..." with \ or ` escapes) runs to its closing quote, spaces included. Each
+  # character of a quoted part can be read only one way, so an unclosed quote cannot make the regex backtrack for
+  # minutes. $q: after a quote opened before user: or user%, the password runs to its closing quote ('\'' and ''
+  # kept).
+  # A "..." part closes before a space, " ' \ ) , ; | & < >, the end, or up to 8 other punctuation characters and
+  # then a space or the end (a backtick, a period, a colon or ** after it in prose), never before a letter or
+  # digit, so it cannot run on into the command word of the next string. Nor does a "..." part that holds only
+  # spaces and , ; + ( ) [ ] { } | & < > = and whose closing quote runs straight into more text: that is the gap
+  # between two strings ("," " + " "),(" and the like), and reading it would carry the mask into the next string's
+  # command word and past its password. Before a space, a quote ("}""... is "}" doubled) or the end it is read.
+  # JSON text ($j) starts with { or [, ends with } or ], and holds only strings, numbers, true, false, null and
+  # JSON punctuation ([12:00:01] ... [exit 0] is not JSON). In it a raw " is a string delimiter: a quoted part may
+  # not hold one (\" is fine) and a raw " never opens one, so a quoted part cannot run from one string into the next.
+  $c = '[^''\r\n]'; $d = '"(?![\s,;+()\[\]{}|&<>=]*"(?![\s"]|$))(?:[^"\\`\r\n]|\\[^`]|\\(?=`)|`.)*[\\`]?"(?=[\s"''\\),;|&<>]|$|[^\w\s]{1,8}(?:\s|$))|'
+  $j = $s -match '^\s*[\[{](?>(?:"(?:[^"\\]|\\.)*"|[\s{}\[\],:]|-?\d[\d.eE+-]*|true|false|null)*)(?<=[\]}]\s*)$'; if ($j) { $c = '(?:\\.|[^''"\\\r\n])'; $d = '' }
+  $w = '(?:''(?:''''|' + $c + ')*''(?=[\s"''\\),;|&<>]|$)|' + $d + '[^\s"\\]|\\\S?|""|"(?![\s,:}\]]|$))+'
+  $q = '(?:(?(sq)(?:''\\''''|''''|' + $c + ')+(?=''(?:[\s"''),;|&<>]|$))|(?(dq)(?:[^"\\`\r\n]|\\[^`]|\\(?=`)|`.)*[\\`]?(?="(?:[\s"''),;|&<>]|$))|(?!)))|' + $w + ')'
+  $s = $s -replace ('(?i)(\s(?:-u\s+|--(?:proxy-)?user[=\s]+)(?:\\u0027|\\["'']|(?<sq>'')|(?<dq>"))?[^\s:"'']+:)' + $q), '$1***'
+  $s = $s -creplace ('(\s(?:-U\s+|--user[=\s]+)(?:\\u0027|\\["'']|(?<sq>'')|(?<dq>"))?[^\s%"'']+%)' + $q), '$1***'
+  $s = $s -replace ('(?i)(\bsshpass\s+-p\s*)' + $w), '$1***'
+  # net use [X: or *] <share, quoted (spaces too) or not> [/switches] <password>; a bare * (prompt for it) is kept.
+  $s = $s -replace ('(?i)(\bnet\s+use(?:\s+(?:[^\s"'']+:|\*))?\s+(?:(\\?["'']|\\u0027)\\\\(?:(?!\2)[^"''])+\2|\\\\[^\s"'']+)(?:\s+/[^\s"'']+)*\s+)(?!/|\*(?:\s|$|"(?:[\s,:}\]]|$)))' + $w), '$1***'
+  # A ConvertTo-SecureString string, after its switches or piped in, runs to its closing quote, whatever follows
+  # it (a backtick, . : ] and so on): '' inside '...', "" and `" inside "...", the same written as JSON (\u0027,
+  # \") or as \'...\', and a `"...`" inside a "..." command line (as JSON `\"...`\"). One that never closes ends at
+  # the next quote of another kind: a '...' or \u0027 at the next raw ", a \" at the next raw " or `", a "..." at
+  # the next '. In JSON text a '...' cannot run past a raw " into the next string, and a raw "..." ends only before
+  # a space, ) ; | , } or the end, so a JSON string that ends right after the cmdlet stays JSON. Both rules run only
+  # on text that names the cmdlet, and each character of $sb can be read only one way. A piped string is looked for
+  # from every quote, so in a long run of escaped quotes ('' "" `" \"\" `\" \u0027\u0027, or a \\u0027 or \` read
+  # from its second character) each quote would start a read to the end of the run: there $sb reads at most 16 of
+  # them (its @ is {0,16}; after the cmdlet it is *), so a piped password holding more is masked only from its
+  # 16th-last on.
+  $so = '(?:(?<sq>'')|(?<xs>\\u0027)|(?<xd>\\")|(?<xb>`")|(?<xj>`\\")|(?<xa>\\'')|(?<dq>"))'
+  $ss = '[^'']*(?:''''[^'']*)@(?='')|[^''"]*(?=")'; $sd = '(?=")|[^"''`]*(?='')'
+  if ($j) { $ss = '(?:\\[^''\n]|[^''"\\])*(?:(?:''''|\\'')(?:\\[^''\n]|[^''"\\])*)@(?=[''"])'; $sd = '(?="(?:[\s);|,}]|$))' }
+  $sb = '(?(sq)(?:' + $ss + ')|(?(xs)(?:(?!\\u0027)(?:[^"\\]|\\[^\\\n]|\\\\(?!u0027)))*(?:(?:\\u0027\\u0027|\\\\u0027)(?:(?!\\u0027)(?:[^"\\]|\\[^\\\n]|\\\\(?!u0027)))*)@(?=\\u0027|")|(?(xd)(?:[^"\\`]|\\[^"\n]|`(?:\\[^"\n]|[^"\\]))*(?:(?:\\"\\"|`\\")(?:[^"\\`]|\\[^"\n]|`(?:\\[^"\n]|[^"\\]))*)@(?=\\"|`?")|(?(xb)(?:`[^"]|[^"`])*(?=`")|(?(xj)(?:(?!`\\")(?:[^"\\]|\\[^`\n]))*(?:\\`(?:(?!`\\")(?:[^"\\]|\\[^`\n]))*)@(?=`\\")|(?(xa)(?:[^\\'']|\\[^''])*(?=\\'')|(?:(?:[^"`]|`[^"\n])*(?:(?:""|`")(?:[^"`]|`[^"\n])*)@' + $sd + ')))))))'
+  if ($s -match 'ConvertTo-SecureString') {
+    $s = $s -replace ('(?i)(ConvertTo-SecureString(?:\s+-\w+)*\s+' + $so + ')' + $sb.Replace('@', '*')), '$1***'
+    $s = $s -replace ('(?i)(' + $so + ')' + $sb.Replace('@', '{0,16}') + '(?=(?:''|\\u0027|\\''|`?\\?")\s*\|\s*ConvertTo-SecureString\b)'), '$1***'
+  }
   $s = $s -replace '(\bbot\d+:)[A-Za-z0-9_-]{30,}', '$1***'
   $s -replace '(?i)\b(sk-[A-Za-z0-9_-]{10,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|hf_[A-Za-z0-9]{20,}|sbp_[A-Za-z0-9]{20,}|AIza[0-9A-Za-z_-]{30,}|xox[abprs]-[A-Za-z0-9-]+|AKIA[0-9A-Z]{16}|glpat-[\w-]{20,}|npm_[A-Za-z0-9]{30,}|ya29\.[\w.-]+|eyJ[\w-]{10,}\.[\w-]{10,}\.[\w-]{10,})\b', '***'
 }
@@ -224,13 +268,17 @@ function AgyModes($cfg, [string]$ws = '') {
   $modes.ToArray()
 }
 # A copy of an object with every string scrubbed: the verdict file is built from it, so Scrub never runs on JSON
-# text and the file always parses.
-function ScrubObj($o) {
+# text and the file always parses. $n is the property name (an array item takes its array's). Under a key-like
+# name (Scrub's "json_key" words and exceptions) a non-empty string is '***', and so is a number unless the name
+# ends in count or tokens; true/false are kept, objects and arrays are walked.
+function ScrubObj($o, [string]$n = '') {
   if ($null -eq $o) { return $null }
-  if ($o -is [string]) { return (Scrub $o) }
-  if ($o -is [System.Collections.IDictionary]) { $r = [ordered]@{}; foreach ($k in @($o.Keys)) { $r[$k] = ScrubObj $o[$k] }; return $r }
-  if ($o -is [System.Management.Automation.PSCustomObject]) { $r = [ordered]@{}; foreach ($q in @($o.PSObject.Properties)) { $r[$q.Name] = ScrubObj $q.Value }; return $r }
-  if ($o -is [System.Collections.IEnumerable]) { return , @(foreach ($x in $o) { ScrubObj $x }) }
+  $kn = $n -match '(?i)token|key|secret|password|passwd|pass|auth|bearer|credential' -and $n -notmatch '(?i)^(?:passed|authMethod|apiKeySource)$'
+  if ($o -is [string]) { if ($kn -and $o) { return '***' }; return (Scrub $o) }
+  if ($o -is [System.Collections.IDictionary]) { $r = [ordered]@{}; foreach ($k in @($o.Keys)) { $r[$k] = ScrubObj $o[$k] ([string]$k) }; return $r }
+  if ($o -is [System.Management.Automation.PSCustomObject]) { $r = [ordered]@{}; foreach ($q in @($o.PSObject.Properties)) { $r[$q.Name] = ScrubObj $q.Value $q.Name }; return $r }
+  if ($o -is [System.Collections.IEnumerable]) { return , @(foreach ($x in $o) { ScrubObj $x $n }) }
+  if ($kn -and $o -is [ValueType] -and -not ($o -is [bool]) -and $n -notmatch '(?i)(?:count|tokens)$') { return '***' }
   $o
 }
 # Reads a stderr file and rewrites it scrubbed; returns the text as read ('' when there is none).
@@ -238,6 +286,12 @@ function ScrubFile([string]$p) {
   $t = ''; try { $t = [IO.File]::ReadAllText($p, [Text.Encoding]::UTF8) } catch { }
   if ($t) { try { [IO.File]::WriteAllText($p, (Scrub $t), $script:u8) } catch { } }
   $t
+}
+# agy's own failure lines in a stderr text: AGY_ERROR (agy 1.2.6: status, error code, retryability, error id) and
+# error: (agy 1.1.28: fatal errors). They say why a run failed, not what the settings hold; every other line, the
+# startup warnings that can quote saved rules among them, is left out. At most 3, each scrubbed and clipped.
+function AgyErrLines([string]$t) {
+  @(($t -split "`r?`n") | Where-Object { $_ -match '^\s*(?:agy:\s*)?(?:AGY_ERROR|error):' } | Select-Object -First 3 | ForEach-Object { Clip $_.Trim() 300 })
 }
 
 W "# DC-REVIEW BEGIN $me $stamp"
@@ -349,19 +403,32 @@ Sec 'Credential scan (every line that would be sent)'
 # Every line of the diff (file headers too; for a hunk header, the line of code git appends after the second @@)
 # and of the commit messages. Caught: prefixed tokens, private keys and JWTs; quoted, YAML, JSON and dotenv values
 # of key/secret/token/password names (unquoted lower-case ones when they hold a digit and 16+ characters);
-# Bearer values; --token/--password/-Password switch values; URL passwords; curl -u, smbclient -U, sshpass -p and
-# net use passwords; ConvertTo-SecureString strings. ${VAR}, $VAR, $env:VAR, %VAR%, <placeholder> and YOUR_...
-# references do not count. Only line numbers are reported, never the line.
+# Bearer values; --token/--password/-Password switch values; URL passwords; curl/smbclient -u/-U/--user, sshpass -p
+# and net use passwords (net use: after any /switches, with a * drive or a quoted share too); ConvertTo-SecureString
+# strings, after its switches, or piped in with -AsPlainText, a splat or a line continuation (a string piped in
+# without one is an encrypted one, as Get-Content <file> | ConvertTo-SecureString reads). A "..." string with a $
+# inside counts too, as PowerShell keeps "Ab$!..." as it is, unless it starts with a space, + or ' or holds a
+# backtick (in its first 6 characters; piped, anywhere): "ConvertTo-SecureString " + $pw and "' + $k + '" are code.
+# So "nas-$env:X" counts. ${VAR}, $VAR, $env:VAR, %VAR%, <placeholder> and YOUR_... references do not count, nor
+# does a URL or a C:\ path after -u or --user (pip install --user git+https://...), nor do values after = or : of
+# public-key names (publicKey, pubkey, PUBLIC_KEY), nor an unquoted file name (ending .pub .pem .crt .cer .der .p12
+# .pfx .ppk .key .json .yaml .yml or .txt) after an UPPER_CASE name ending in KEY, SECRET, TOKEN, PASSWORD or
+# PASSWD. A piped string is looked for only on a line that names the cmdlet, from every quote, reading at most 16
+# '', "" or `" after its first 6 characters, so a long run of them costs one pass, not one per quote. Only line
+# numbers are reported, never the line.
 $CRED = [regex]('AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{35}|hf_[A-Za-z0-9]{30,}|\bsk-(?:ant-)?[A-Za-z0-9_-]{20,}|gh[pousr]_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{22,}|glpat-[A-Za-z0-9_-]{20,}|npm_[A-Za-z0-9]{36}|ya29\.[A-Za-z0-9_-]{20,}|sbp_[A-Za-z0-9]{40}|xox[baprs]-[A-Za-z0-9-]{10,}|-----BEGIN [A-Z ]*PRIVATE KEY|eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}' +
   '|(?i:api[_-]?key|(?:secret|access)[_-]?key|secret|token|password)["'']?\s*[:=]\s*["''](?!\$\{|\$env:|%\w+%|<|YOUR_)[^"''\s]{12,}' +
-  '|^[+ -]?\s*(?:-\s+)?(?:export\s+|set\s+)?[A-Z0-9_]*(?:KEY|SECRET|TOKEN|PASSWORD|PASSWD)\s*[=:]\s*(?![$%{<]|(?i:your)[_-])[^\s"''#]{12,}' +
-  '|(?i:\b[\w-]*(?:key|secret|token|passw(?:or)?d)["'']?\s*[:=]\s*["'']?(?![$%{(\[<])(?=[^\s"''.]*\d)[A-Za-z0-9_/+=~-]{16,}(?![\w.(/+=~-]))' +
+  '|^[+ -]?\s*(?:-\s+)?(?:export\s+|set\s+)?[A-Z0-9_]*(?:KEY(?<!PUB(?:LIC)?_?KEY)|SECRET|TOKEN|PASSWORD|PASSWD)\s*[=:]\s*(?![$%{<]|(?i:your)[_-]|[^\s"''#]*\.(?i:pub|pem|crt|cer|der|p12|pfx|ppk|key|json|ya?ml|txt)(?![^\s"''#]))[^\s"''#]{12,}' +
+  '|(?i:\b[\w-]*(?:key|secret|token|passw(?:or)?d)(?<!pub(?:lic)?[_-]?key)["'']?\s*[:=]\s*["'']?(?![$%{(\[<])(?=[^\s"''.]*\d)[A-Za-z0-9_/+=~-]{16,}(?![\w.(/+=~-]))' +
   '|(?i:\bBearer\s+(?![$%{<])[A-Za-z0-9._~+/=-]{20,})' +
   '|(?i:\s--?[\w-]*(?:token|key|secret|password)\s+["'']?(?![$%{(<-])(?=[^\s"'']*\d)[A-Za-z0-9_./+=-]{16,})' +
   '|(?i:(?:^|\s)-{1,2}(?:password|passwd|secret|token|auth|api-?key)(?![\w-])(?:\s+|[:=]))(?!["'']?(?:[$%{<(*]|(?i:your[-_])|[A-Z][A-Z0-9_]*(?:["'']|\s|$)))["'']?[^\s"'']{8,}' +
   '|://[^/@\s:"'']+:(?![${<(]|%[A-Za-z_]\w*%)[^@\s"''/]{6,}@' +
-  '|(?i:ConvertTo-SecureString\s+(?:-String\s+)?["''](?![$%{<(])[^"'']{6,})|(?i:\bnet\s+use\s+(?:\S+:\s+)?\\\\\S+\s+(?!["'']?[/*$%])\S{6,})' +
-  '|\s-u\s+[^\s:$%]+:(?![$%{<])[^\s@]{6,}|(?i:\bsshpass\s+-p\s*(?!["'']?[$%{<])\S{6,})|\s-U\s+[^\s%$]+%(?![$%{<])[^\s%]{6,}')
+  '|(?i:ConvertTo-SecureString(?:\s+-\w+)*\s+(?:''(?![$%{<(])(?:''''|[^'']){6,}|`?"(?![$%{<(])(?:""|`.|[^"`$]){6,}|"(?![\s+$%{<(''])[^"`]{6,}))' +
+  '|(?i:^(?=.*?ConvertTo-SecureString).*?(?:''(?![$%{<(])(?:''''|[^'']){6}[^'']*(?:''''[^'']*){0,16}''|`?"(?![$%{<(])(?:""|`.|[^"`$]){6}(?:[^"`$]|`[^"\n])*(?:(?:""|`")(?:[^"`$]|`[^"\n])*){0,16}`?"|"(?![\s+$%{<(''])[^"`]{6,}")' +
+  '\s*\|\s*ConvertTo-SecureString\b(?=[^|;]*(?:\s-a|\s@\w|\s`\s*$)))' +
+  '|(?i:\bnet\s+use(?:\s+(?:\S+:|\*))?\s+(?:"\\\\[^"]+"|''\\\\[^'']+''|\\\\\S+)(?:\s+/\S+)*\s+(?!["'']?(?:[/*$%<(]|your[_-]))\S{6,})' +
+  '|\s(?:-u\s+|--(?:proxy-)?user[\s=]+)(?!["'']?[A-Za-z]:[\\/])[^\s:$%]+:(?!//|["'']?[$%{<])[^\s@]{6,}|(?i:\bsshpass\s+-p\s*(?!["'']?[$%{<])\S{6,})|\s(?:-U\s+|--user[\s=]+)[^\s%$:]+%(?!["'']?[$%{<])[^\s%]{6,}')
 $hits = New-Object System.Collections.Generic.List[string]
 $checked = 0
 for ($i = 0; $i -lt $dl.Count; $i++) {
@@ -400,18 +467,22 @@ if ($route -eq 'agy') {
   W "- workspace: $ws"
   # -p "/permissions", "/config" and "/model" answer from the CLI's settings without starting an agent turn. An
   # answer in another shape, any allow rule (AgyRules) or a setting that skips approval (AgyModes) stops the
-  # review here. Only counts and setting names go into the report, never the rules.
-  # In the review folder, as the review runs; stderr to its own file outside it, so a warning cannot break the JSON.
+  # review here. Only rule counts and the blocking settings go into the report, never the rules: agy's stderr for
+  # every agy call (its startup warning can quote saved rules, deny and ask ones too, which the check lets through)
+  # is reported by its size and the path of its scrubbed copy, never in the report or the verdict file. Only the
+  # review call's failure lines (AgyErrLines) are shown, in the report and the 'agy failed' verdict, as agy_error.
+  # In the review folder, as the review runs; stderr to its own file outside it, so a warning cannot break the JSON
+  # or the /model answer, and the model, which reads the files in the review folder, never sees it.
   $permErr = Join-Path $dir ("pr{0}-agy-permissions-stderr.txt" -f $Pr)
   $permR = Run 'agy permissions' ('"{0}" --output-format json -p "/permissions"' -f $agyExe) 180 0 $ws $permErr
-  $pe = ScrubFile $permErr; if ($pe.Trim()) { W '- agy /permissions stderr:'; Lines $pe 4 }
+  $pe = ScrubFile $permErr; if ($pe.Trim()) { W ('- agy /permissions wrote {0} chars to stderr (not shown; scrubbed copy: {1})' -f $pe.Length, $permErr) }
   $scopes = $null; try { $scopes = (ConvertFrom-Json -InputObject ([string]$permR.Out) -ErrorAction Stop).command.data.permissions } catch { }
   if ($permR.Code -ne 0 -or $null -eq $scopes) { Fail 'agy /permissions did not answer in the expected JSON shape; agy not run' @{ route = 'agy'; exit = $permR.Code; timeout = $permR.Timeout; head = $sha; credential_scan = $scan; workspace = $ws } }
   $ag = AgyRules $scopes; $counts = $ag.counts; $blocked = @($ag.blocked)
   W ("- agy allow rules: {0}" -f $(if ($counts.Count) { (@($counts.Keys | ForEach-Object { $_ + ' ' + $counts[$_] }) -join ', ') } else { 'none' }))
   $cfgErr = Join-Path $dir ("pr{0}-agy-config-stderr.txt" -f $Pr)
   $cr = Run 'agy config' ('"{0}" --output-format json -p "/config"' -f $agyExe) 180 0 $ws $cfgErr
-  $ce = ScrubFile $cfgErr; if ($ce.Trim()) { W '- agy /config stderr:'; Lines $ce 4 }
+  $ce = ScrubFile $cfgErr; if ($ce.Trim()) { W ('- agy /config wrote {0} chars to stderr (not shown; scrubbed copy: {1})' -f $ce.Length, $cfgErr) }
   $cfg = $null; try { $cfg = (ConvertFrom-Json -InputObject ([string]$cr.Out) -ErrorAction Stop).command.data.config } catch { }
   if ($cr.Code -ne 0 -or $null -eq $cfg) { Fail 'agy /config did not answer in the expected JSON shape; agy not run' @{ route = 'agy'; exit = $cr.Code; timeout = $cr.Timeout; head = $sha; credential_scan = $scan; workspace = $ws } }
   $modes = @(AgyModes $cfg $ws)
@@ -419,17 +490,19 @@ if ($route -eq 'agy') {
     W ("- refused: saved agy settings would let it act without a prompt ({0})" -f ((@($blocked) + @($modes)) -join ', '))
     Fail 'saved agy permissions or settings would let it act without a prompt; agy not run' @{ route = 'agy'; allow_rule_counts = $counts; blocking = @($blocked) + @($modes); fix = 'remove agy''s saved allow rules (agy /permissions) and turn those settings off, or review with -Via api'; head = $sha; credential_scan = $scan; workspace = $ws }
   }
-  $mr = Run 'agy model' ('"{0}" -p "/model"' -f $agyExe) 60 2 $ws
+  $modErr = Join-Path $dir ("pr{0}-agy-model-stderr.txt" -f $Pr)
+  $mr = Run 'agy model' ('"{0}" -p "/model"' -f $agyExe) 60 2 $ws $modErr
+  $mde = ScrubFile $modErr; if ($mde.Trim()) { W ('- agy /model wrote {0} chars to stderr (not shown; scrubbed copy: {1})' -f $mde.Length, $modErr) }
   $model = 'agy: ' + $(if ($mr.Code -eq 0 -and $mr.Out) { ([string]$mr.Out -split "`t|`r?`n")[0].Trim() } else { 'account default' })
   $agyPrompt = 'Read REVIEW.md in the current folder and do exactly what it asks. Work read-only. Reply with the JSON only.'
-  $errTxt = Join-Path $ws 'err.txt'
+  $errTxt = Join-Path $dir ("pr{0}-agy-review-stderr.txt" -f $Pr)
   # --sandbox fences any command agy might still run; it does not fence file reads or URL fetches (the check above).
   $ar = Run 'agy -p' ('"{0}" --output-format json --json-schema schema.json --print-timeout 25m --sandbox -p "{1}"' -f $agyExe, $agyPrompt) 1800 0 $ws $errTxt
   $raw = [string]$ar.Out
-  $et = ScrubFile $errTxt
-  if ($et.Trim()) { W '- agy stderr:'; Lines $et 6 }
+  $et = ScrubFile $errTxt; $ae = @(AgyErrLines $et)
+  if ($et.Trim()) { W ('- agy -p wrote {0} chars to stderr (only its AGY_ERROR and error: lines shown; scrubbed copy: {1})' -f $et.Length, $errTxt); foreach ($x in $ae) { W ('    ' + $x) } }
   [IO.File]::WriteAllText((Join-Path $ws 'out.json'), (Scrub $raw), $u8)
-  if ($ar.Timeout -or $ar.Code -ne 0 -or [string]::IsNullOrWhiteSpace($raw)) { Fail 'agy failed' @{ route = 'agy'; exit = $ar.Code; timeout = $ar.Timeout; output = (Clip $raw 600); stderr = (Clip $et 600); head = $sha; credential_scan = $scan; workspace = $ws } }
+  if ($ar.Timeout -or $ar.Code -ne 0 -or [string]::IsNullOrWhiteSpace($raw)) { Fail 'agy failed' @{ route = 'agy'; exit = $ar.Code; timeout = $ar.Timeout; output = (Clip $raw 600); stderr_chars = $et.Length; stderr_file = $errTxt; agy_error = $ae; head = $sha; credential_scan = $scan; workspace = $ws } }
   $envl = $null; try { $envl = ConvertFrom-Json -InputObject $raw -ErrorAction Stop } catch { Fail 'agy output is not JSON' @{ route = 'agy'; output = (Clip $raw 600); head = $sha; workspace = $ws } }
   # A refused action means the model tried to do more than read (what an injected instruction in the diff would
   # ask for), so its verdict is not trusted (agy 1.2.2 lists refusals as denied_actions).

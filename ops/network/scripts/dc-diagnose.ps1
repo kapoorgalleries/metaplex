@@ -1,5 +1,6 @@
 # dc-diagnose.ps1: read-only snapshot of one Windows machine for the Trimurti job, run through Desktop
-# Commander (no terminal; start_process returns after 3 s, so the result is the report file). One run writes
+# Commander (no terminal; start_process returns after 3 s, so the result is the report file) by dc-bootstrap.ps1:
+# packed on its own it is over dc-pack.py's limit. One run writes
 # everything an agent needs into %USERPROFILE%\trimurti-dc\<host>-diag-latest.md (and a stamped copy).
 # The file is rewritten after every section: a run that dies leaves a report without its END line, never
 # a stale complete one. Installs, updates, reboots and settings are never touched; the only writes are the
@@ -35,30 +36,74 @@ function W([string]$s) { $script:L.Add($s) }
 function Flush() { [IO.File]::WriteAllText($script:latest, (($script:L -join "`r`n") + "`r`n"), $script:utf8) }
 function Sec([string]$t) { W ''; W "## $t"; Flush }
 # Scrub runs on every line of external content (command output, file dumps) and on each string of the verdict
-# object. It masks: JSON strings and numbers under key-like names (counts excepted); Bearer and other
-# Authorization values; values after token/key/secret/password/auth switches and in NAME=, Header: and
-# "json_key": pairs; secret-looking URL query values and URL passwords; curl -u, smbclient -U, sshpass -p and
-# net use passwords; ConvertTo-SecureString strings; token-shaped strings. A quote or an escaped quote inside a
-# value continues it only when another value character follows, so a closing quote still ends it, and a value
-# that opens an object or array is left alone: scrubbed JSON stays JSON. Not secrets: `passed=` (run-remote.sh's
-# TRIMURTI_SUMMARY line) and claude auth status's authMethod / apiKeySource, which name the kind of sign-in (they
-# show when a PC bills an API key). The same function is in dc-diagnose.ps1, dc-fix.ps1 and dc-gemini-review.ps1;
-# test/dc-scrub.ps1 keeps them identical.
+# object (ScrubObj masks a value under a key-like property name itself). It masks: JSON strings and numbers under
+# key-like names (counts excepted); Bearer and other Authorization values; values after token/key/secret/password/
+# auth switches and in NAME=, Header: and "json_key": pairs, whatever their first character; secret-looking URL
+# query values and URL passwords; curl/smbclient -u/-U/--user, sshpass -p and net use passwords (net use: after
+# any /switches, with a * drive or a quoted share too); ConvertTo-SecureString strings, after its switches or piped
+# in; token-shaped strings. A quote or an escaped quote inside a value continues it only when another value
+# character follows, so a closing quote still ends it; a value that opens an object or array is left alone, and
+# so is a quote followed by JSON punctuation and then a delimiter, a space or the end, unless a closing quote ends
+# the value. The command-line passwords and the ConvertTo-SecureString strings run to their closing quote instead
+# ($w, $q and $sb below). So scrubbed JSON stays JSON in the shapes test/dc-scrub.ps1 checks, but not always when
+# a string ends just where a value would start (["set api key:",5]): masking wins there, and nothing reads
+# scrubbed JSON text back. Not secrets: `passed=`
+# (run-remote.sh's TRIMURTI_SUMMARY line) and claude auth status's authMethod / apiKeySource, which name the kind of
+# sign-in (they show when a PC bills an API key). The same function is in dc-diagnose.ps1, dc-fix.ps1 and
+# dc-gemini-review.ps1; test/dc-scrub.ps1 keeps them identical.
 function Scrub([string]$s) {
   $v = '(?:[^\s"''\\]|\\u(?!0027)[0-9a-fA-F]{4}|\\[^\s"''u]|(?:\\?["'']|\\u0027)(?![\s,;:}\])"''\\]|$))+'
   $s = $s -replace '(?i)("(?!(?:passed|authMethod|apiKeySource)")[\w-]*(?:token|key|secret|password|passwd|pass|auth|bearer|credential)[\w-]*"\s*:\s*")(?:[^"\\]|\\.)+(")', '$1***$2'
   $s = $s -replace '(?i)("(?!(?:passed|authMethod|apiKeySource)")[\w-]*(?:token|key|secret|password|passwd|pass|auth|bearer|credential)[\w-]*(?<!count|tokens)"\s*:\s*)-?\d+(?![\w.])', '$1"***"'
   $s = $s -replace ('(?i)\b(Bearer)\s+' + $v), '$1 ***'
   $s = $s -replace ('(?i)\b((?:proxy-)?authorization["'']?\s*[:=]\s*["'']?)[A-Za-z]+\s+' + $v), '$1***'
-  $s = $s -replace ('(?i)(--?[\w-]*(token|key|secret|password|passwd|pass|auth|bearer|credential)[\w-]*)([=\s]+)(\\?["'']|\\u0027)?(?![,}\]])' + $v), '$1$3$4***'
-  $s = $s -replace ('(?i)\b(?!(?:passed|authMethod|apiKeySource)\b)([\w-]*(token|key|secret|password|passwd|pass|auth|bearer|credential)[\w-]*)(\\?["'']|\\u0027)?\s*([=:])\s*(?!(?:true|false|yes|no|null|none)(?=[\s,;}\])]|$)|(?<=(?:count|tokens)(?:\\?["'']|\\u0027)?\s*[=:]\s*)\d+(?=[\s,;}\])]|$))(?![{\[])(\\?["'']|\\u0027|"(?:\\u0027|''|\\"))?(?![,;}\])])' + $v), '$1$3$4$5***'
+  $s = $s -replace ('(?i)(--?[\w-]*(token|key|secret|password|passwd|pass|auth|bearer|credential)[\w-]*)([=\s]+)(?:(\\?["'']|\\u0027)(?!(?=[,}\]](?:[\s"'',;:}\])\\]|$))(?![^\s"'']*["''](?:[\s,;:}\])]|$)))|)' + $v), '$1$3$4***'
+  $s = $s -replace ('(?i)\b(?!(?:passed|authMethod|apiKeySource)\b)([\w-]*(token|key|secret|password|passwd|pass|auth|bearer|credential)[\w-]*)(\\?["'']|\\u0027)?\s*([=:])\s*(?!(?:true|false|yes|no|null|none)(?=[\s,;}\])]|$)|(?<=(?:count|tokens)(?:\\?["'']|\\u0027)?\s*[=:]\s*)\d+(?=[\s,;}\])]|$))(?![{\[])(?:(\\?["'']|\\u0027|"(?:\\u0027|''|\\"))(?!(?=[,;}\])](?:[\s"'',;:}\])\\]|$))(?![^\s"'']*["''](?:[\s,;:}\])]|$)))|)' + $v), '$1$3$4$5***'
   $s = $s -replace '(?i)([?&][^=&\s"\\]*(token|key|secret|sig|code|auth|pass)[^=&\s"\\]*=)[^&\s"\\]+', '$1***'
   $s = $s -replace '(://[^/@\s:"\\]+:)[^@\s"\\]+@', '$1***@'
-  $s = $s -replace '(?i)(\s-u\s+[^\s:]+:)\S+', '$1***'
-  $s = $s -creplace '(\s-U\s+[^\s%]+%)\S+', '$1***'
-  $s = $s -replace '(?i)(\bsshpass\s+-p\s*)\S+', '$1***'
-  $s = $s -replace '(?i)(\bnet\s+use\s+(?:\S+:\s+)?\\\\\S+\s+)(?!/)\S+', '$1***'
-  $s = $s -replace '(?i)(ConvertTo-SecureString\s+(?:-String\s+)?)(["''])[^"'']*(["''])', '$1$2***$3'
+  # $w: a password after sshpass -p or net use, or after user: (curl -u/--user) or user% (smbclient -U/--user).
+  # Like \S+, but a bare " ends it where a JSON string can end (before a space, , : } ] or the end; \" and "" never
+  # do), and a quoted part ('...' or "..." with \ or ` escapes) runs to its closing quote, spaces included. Each
+  # character of a quoted part can be read only one way, so an unclosed quote cannot make the regex backtrack for
+  # minutes. $q: after a quote opened before user: or user%, the password runs to its closing quote ('\'' and ''
+  # kept).
+  # A "..." part closes before a space, " ' \ ) , ; | & < >, the end, or up to 8 other punctuation characters and
+  # then a space or the end (a backtick, a period, a colon or ** after it in prose), never before a letter or
+  # digit, so it cannot run on into the command word of the next string. Nor does a "..." part that holds only
+  # spaces and , ; + ( ) [ ] { } | & < > = and whose closing quote runs straight into more text: that is the gap
+  # between two strings ("," " + " "),(" and the like), and reading it would carry the mask into the next string's
+  # command word and past its password. Before a space, a quote ("}""... is "}" doubled) or the end it is read.
+  # JSON text ($j) starts with { or [, ends with } or ], and holds only strings, numbers, true, false, null and
+  # JSON punctuation ([12:00:01] ... [exit 0] is not JSON). In it a raw " is a string delimiter: a quoted part may
+  # not hold one (\" is fine) and a raw " never opens one, so a quoted part cannot run from one string into the next.
+  $c = '[^''\r\n]'; $d = '"(?![\s,;+()\[\]{}|&<>=]*"(?![\s"]|$))(?:[^"\\`\r\n]|\\[^`]|\\(?=`)|`.)*[\\`]?"(?=[\s"''\\),;|&<>]|$|[^\w\s]{1,8}(?:\s|$))|'
+  $j = $s -match '^\s*[\[{](?>(?:"(?:[^"\\]|\\.)*"|[\s{}\[\],:]|-?\d[\d.eE+-]*|true|false|null)*)(?<=[\]}]\s*)$'; if ($j) { $c = '(?:\\.|[^''"\\\r\n])'; $d = '' }
+  $w = '(?:''(?:''''|' + $c + ')*''(?=[\s"''\\),;|&<>]|$)|' + $d + '[^\s"\\]|\\\S?|""|"(?![\s,:}\]]|$))+'
+  $q = '(?:(?(sq)(?:''\\''''|''''|' + $c + ')+(?=''(?:[\s"''),;|&<>]|$))|(?(dq)(?:[^"\\`\r\n]|\\[^`]|\\(?=`)|`.)*[\\`]?(?="(?:[\s"''),;|&<>]|$))|(?!)))|' + $w + ')'
+  $s = $s -replace ('(?i)(\s(?:-u\s+|--(?:proxy-)?user[=\s]+)(?:\\u0027|\\["'']|(?<sq>'')|(?<dq>"))?[^\s:"'']+:)' + $q), '$1***'
+  $s = $s -creplace ('(\s(?:-U\s+|--user[=\s]+)(?:\\u0027|\\["'']|(?<sq>'')|(?<dq>"))?[^\s%"'']+%)' + $q), '$1***'
+  $s = $s -replace ('(?i)(\bsshpass\s+-p\s*)' + $w), '$1***'
+  # net use [X: or *] <share, quoted (spaces too) or not> [/switches] <password>; a bare * (prompt for it) is kept.
+  $s = $s -replace ('(?i)(\bnet\s+use(?:\s+(?:[^\s"'']+:|\*))?\s+(?:(\\?["'']|\\u0027)\\\\(?:(?!\2)[^"''])+\2|\\\\[^\s"'']+)(?:\s+/[^\s"'']+)*\s+)(?!/|\*(?:\s|$|"(?:[\s,:}\]]|$)))' + $w), '$1***'
+  # A ConvertTo-SecureString string, after its switches or piped in, runs to its closing quote, whatever follows
+  # it (a backtick, . : ] and so on): '' inside '...', "" and `" inside "...", the same written as JSON (\u0027,
+  # \") or as \'...\', and a `"...`" inside a "..." command line (as JSON `\"...`\"). One that never closes ends at
+  # the next quote of another kind: a '...' or \u0027 at the next raw ", a \" at the next raw " or `", a "..." at
+  # the next '. In JSON text a '...' cannot run past a raw " into the next string, and a raw "..." ends only before
+  # a space, ) ; | , } or the end, so a JSON string that ends right after the cmdlet stays JSON. Both rules run only
+  # on text that names the cmdlet, and each character of $sb can be read only one way. A piped string is looked for
+  # from every quote, so in a long run of escaped quotes ('' "" `" \"\" `\" \u0027\u0027, or a \\u0027 or \` read
+  # from its second character) each quote would start a read to the end of the run: there $sb reads at most 16 of
+  # them (its @ is {0,16}; after the cmdlet it is *), so a piped password holding more is masked only from its
+  # 16th-last on.
+  $so = '(?:(?<sq>'')|(?<xs>\\u0027)|(?<xd>\\")|(?<xb>`")|(?<xj>`\\")|(?<xa>\\'')|(?<dq>"))'
+  $ss = '[^'']*(?:''''[^'']*)@(?='')|[^''"]*(?=")'; $sd = '(?=")|[^"''`]*(?='')'
+  if ($j) { $ss = '(?:\\[^''\n]|[^''"\\])*(?:(?:''''|\\'')(?:\\[^''\n]|[^''"\\])*)@(?=[''"])'; $sd = '(?="(?:[\s);|,}]|$))' }
+  $sb = '(?(sq)(?:' + $ss + ')|(?(xs)(?:(?!\\u0027)(?:[^"\\]|\\[^\\\n]|\\\\(?!u0027)))*(?:(?:\\u0027\\u0027|\\\\u0027)(?:(?!\\u0027)(?:[^"\\]|\\[^\\\n]|\\\\(?!u0027)))*)@(?=\\u0027|")|(?(xd)(?:[^"\\`]|\\[^"\n]|`(?:\\[^"\n]|[^"\\]))*(?:(?:\\"\\"|`\\")(?:[^"\\`]|\\[^"\n]|`(?:\\[^"\n]|[^"\\]))*)@(?=\\"|`?")|(?(xb)(?:`[^"]|[^"`])*(?=`")|(?(xj)(?:(?!`\\")(?:[^"\\]|\\[^`\n]))*(?:\\`(?:(?!`\\")(?:[^"\\]|\\[^`\n]))*)@(?=`\\")|(?(xa)(?:[^\\'']|\\[^''])*(?=\\'')|(?:(?:[^"`]|`[^"\n])*(?:(?:""|`")(?:[^"`]|`[^"\n])*)@' + $sd + ')))))))'
+  if ($s -match 'ConvertTo-SecureString') {
+    $s = $s -replace ('(?i)(ConvertTo-SecureString(?:\s+-\w+)*\s+' + $so + ')' + $sb.Replace('@', '*')), '$1***'
+    $s = $s -replace ('(?i)(' + $so + ')' + $sb.Replace('@', '{0,16}') + '(?=(?:''|\\u0027|\\''|`?\\?")\s*\|\s*ConvertTo-SecureString\b)'), '$1***'
+  }
   $s = $s -replace '(\bbot\d+:)[A-Za-z0-9_-]{30,}', '$1***'
   $s -replace '(?i)\b(sk-[A-Za-z0-9_-]{10,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|hf_[A-Za-z0-9]{20,}|sbp_[A-Za-z0-9]{20,}|AIza[0-9A-Za-z_-]{30,}|xox[abprs]-[A-Za-z0-9-]+|AKIA[0-9A-Z]{16}|glpat-[\w-]{20,}|npm_[A-Za-z0-9]{30,}|ya29\.[\w.-]+|eyJ[\w-]{10,}\.[\w-]{10,}\.[\w-]{10,})\b', '***'
 }

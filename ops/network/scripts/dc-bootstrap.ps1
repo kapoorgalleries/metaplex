@@ -10,8 +10,10 @@
 #   every other argument goes to that script as it is, e.g. dc-pack.py --args
 #   "-Script dc-gemini-review.ps1 -Pr 31 -Branch claude/x -Head 2c9a38a -Via agy" (the target script rejects a
 #   misspelt switch). -ScriptArgs:-X still works for a single argument.
-param([string]$Script = 'dc-fix.ps1', [string]$ScriptArgs = '', [string]$FromBranch = 'claude/eloquent-wright-woxv2e')
-$Branch = $FromBranch
+# No param block: PowerShell refuses a bad switch before line 1 runs, and the last run's log would then read as
+# this run's. The same param block binds below, after the log exists: a refused -Script, -ScriptArgs or -FromBranch
+# (ambiguous, repeated, no value) is logged with PowerShell's own message and is exit 2. A passed-on -Name:value
+# reaches it as -Name value, so a bare word after either binds alike; -FromBranch must be named, never a bare word.
 $ErrorActionPreference = 'Continue'
 $env:GIT_TERMINAL_PROMPT = '0'; $env:GCM_INTERACTIVE = 'never'
 $H = $env:USERPROFILE
@@ -20,7 +22,17 @@ New-Item -ItemType Directory -Force -Path $dir | Out-Null
 $log = Join-Path $dir 'bootstrap-latest.md'
 $L = New-Object System.Collections.Generic.List[string]
 function W([string]$s) { $script:L.Add($s); [IO.File]::WriteAllText($script:log, (($script:L -join "`r`n") + "`r`n"), (New-Object Text.UTF8Encoding $false)) }
-$argv = @(@($ScriptArgs -split '\s+' | Where-Object { $_ }) + @($args | ForEach-Object { [string]$_ }))
+try {
+  $bound = & { param([string]$Script = 'dc-fix.ps1', [string]$ScriptArgs = '', [string]$FromBranch = 'claude/eloquent-wright-woxv2e')
+    @{ Script = $Script; Branch = $FromBranch; HasBranch = $PSBoundParameters.ContainsKey('FromBranch'); Argv = @(@($ScriptArgs -split '\s+' | Where-Object { $_ }) + @($args | ForEach-Object { [string]$_ })) } } @args
+  if ($bound.HasBranch -and -not @(@($args | ForEach-Object { [string]$_ }) -match '^[-\u2013-\u2015]f(r(o(m(b(r(a(n(ch?)?)?)?)?)?)?)?)?:?$').Count) {
+    throw ("'{0}' was read as -FromBranch by its position (a bare word); name the branch with -FromBranch" -f $bound.Branch)
+  }
+} catch {
+  W ("# DC-BOOT BEGIN {0} {1} args={2}" -f [Environment]::MachineName, (Get-Date -Format o), (@($args | ForEach-Object { [string]$_ }) -join ' '))
+  W ('- refused: ' + $_.Exception.Message); W '# DC-BOOT END failed'; exit 2
+}
+$Script = $bound.Script; $Branch = $bound.Branch; $argv = @($bound.Argv)
 W ("# DC-BOOT BEGIN {0} {1} script={2} args={3} branch={4}" -f [Environment]::MachineName, (Get-Date -Format o), $Script, ($argv -join ' '), $Branch)
 $env:Path = (@([Environment]::GetEnvironmentVariable('Path', 'Machine'), [Environment]::GetEnvironmentVariable('Path', 'User'), $env:Path, (Join-Path $env:ProgramFiles 'Git\cmd')) -join ';')
 if (-not (Get-Command git -ErrorAction SilentlyContinue)) { W '- git not found on PATH'; W '# DC-BOOT END failed'; exit 2 }
@@ -54,11 +66,16 @@ W '# DC-BOOT END handing over'
 # lines above stay as they are.
 $u8 = New-Object Text.UTF8Encoding $false
 # A refused argument stops the target before it writes anything, so its report and verdict files are an earlier
-# run's: that is exit 2 (error) here, never the 1 a review would mean as request_changes.
+# run's: that is exit 2 (error) here, never the 1 a review would mean as request_changes. Only the target's own
+# binding errors count, colour codes removed: 5.1's error ID line (+ FullyQualifiedErrorId : <id>,<script>) or a
+# message line that starts with the script's name or path (pwsh 7: <script>: <message>). A cmdlet's error inside
+# the target, or a report line that quotes one, does not.
+$sn = [regex]::Escape($Script)
+$bindRe = '^\s*\+\s*FullyQualifiedErrorId\s*:\s*(?:NamedParameterNotFound|AmbiguousParameter|ParameterAlreadyBound|MissingArgument|PositionalParameterNotFound|ParameterArgumentValidationError|ParameterArgumentTransformationError|CannotConvertArgument|CannotConvertArgumentNoMessage|ParameterBindingFailed),' + $sn + '\s*$|^(?:(?:[A-Za-z]:|[\\/])[^:]*[\\/])?' + $sn + ' ?: (?:A parameter cannot be found|Parameter cannot be processed because the parameter name|Cannot bind parameter|Cannot validate argument on parameter|Cannot process argument transformation on parameter|Cannot convert ''[^'']*'' to the type ''[^'']*'' required by parameter|Missing an argument for parameter|A positional parameter cannot be found)'
 $bindErr = $false
 & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $target @argv 2>&1 | ForEach-Object {
   $s = [string]$_
-  if ($s -match 'NamedParameterNotFound|ParameterArgument(Validation|Transformation)Error|MissingArgument|PositionalParameterNotFound|A parameter cannot be found that matches|Cannot validate argument on parameter|Cannot process argument transformation on parameter|Missing an argument for parameter|A positional parameter cannot be found') { $bindErr = $true }
+  if (($s -replace '\x1b\[[0-9;]*m', '') -match $bindRe) { $bindErr = $true }
   [IO.File]::AppendAllText($log, ('    ' + $s + "`r`n"), $u8); $_
 }
 $rc = $LASTEXITCODE
