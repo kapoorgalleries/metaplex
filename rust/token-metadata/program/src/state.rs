@@ -329,3 +329,297 @@ pub struct ReservationV1 {
     pub spots_remaining: u8,
     pub total_spots: u8,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use borsh::{BorshDeserialize, BorshSerialize};
+
+    fn test_pubkey(seed: u8) -> Pubkey {
+        let mut bytes = [0u8; 32];
+        bytes[0] = seed;
+        Pubkey::new_from_array(bytes)
+    }
+
+    // ── Key enum ──
+
+    #[test]
+    fn key_enum_discriminants() {
+        assert_eq!(Key::Uninitialized.try_to_vec().unwrap()[0], 0);
+        assert_eq!(Key::EditionV1.try_to_vec().unwrap()[0], 1);
+        assert_eq!(Key::MasterEditionV1.try_to_vec().unwrap()[0], 2);
+        assert_eq!(Key::ReservationListV1.try_to_vec().unwrap()[0], 3);
+        assert_eq!(Key::MetadataV1.try_to_vec().unwrap()[0], 4);
+        assert_eq!(Key::ReservationListV2.try_to_vec().unwrap()[0], 5);
+    }
+
+    // ── Data ──
+
+    #[test]
+    fn data_borsh_round_trip() {
+        let original = Data {
+            name: "Test NFT".to_string(),
+            symbol: "TNFT".to_string(),
+            uri: "https://example.com/meta.json".to_string(),
+            seller_fee_basis_points: 500,
+            creators: Some(vec![Creator {
+                address: test_pubkey(1),
+                verified: true,
+                share: 100,
+            }]),
+        };
+
+        let bytes = original.try_to_vec().unwrap();
+        let decoded = Data::try_from_slice(&bytes).unwrap();
+        assert_eq!(original, decoded);
+    }
+
+    #[test]
+    fn data_round_trip_with_no_creators() {
+        let original = Data {
+            name: "Minimal".to_string(),
+            symbol: "M".to_string(),
+            uri: "https://x.com".to_string(),
+            seller_fee_basis_points: 0,
+            creators: None,
+        };
+
+        let bytes = original.try_to_vec().unwrap();
+        let decoded = Data::try_from_slice(&bytes).unwrap();
+        assert_eq!(decoded.creators, None);
+    }
+
+    #[test]
+    fn data_round_trip_with_multiple_creators() {
+        let creators: Vec<Creator> = (0..5)
+            .map(|i| Creator {
+                address: test_pubkey(i),
+                verified: i == 0,
+                share: if i == 0 { 60 } else { 10 },
+            })
+            .collect();
+
+        let original = Data {
+            name: "Multi".to_string(),
+            symbol: "ML".to_string(),
+            uri: "https://example.com".to_string(),
+            seller_fee_basis_points: 250,
+            creators: Some(creators),
+        };
+
+        let bytes = original.try_to_vec().unwrap();
+        let decoded = Data::try_from_slice(&bytes).unwrap();
+        assert_eq!(decoded.creators.as_ref().unwrap().len(), 5);
+        assert_eq!(decoded.creators.as_ref().unwrap()[0].share, 60);
+    }
+
+    // ── Creator ──
+
+    #[test]
+    fn creator_borsh_round_trip() {
+        let creator = Creator {
+            address: test_pubkey(42),
+            verified: false,
+            share: 50,
+        };
+
+        let bytes = creator.try_to_vec().unwrap();
+        let decoded = Creator::try_from_slice(&bytes).unwrap();
+        assert_eq!(creator, decoded);
+    }
+
+    #[test]
+    fn creator_serialized_size_matches_constant() {
+        let creator = Creator {
+            address: test_pubkey(0),
+            verified: true,
+            share: 100,
+        };
+
+        assert_eq!(creator.try_to_vec().unwrap().len(), MAX_CREATOR_LEN);
+    }
+
+    // ── Edition ──
+
+    #[test]
+    fn edition_borsh_round_trip() {
+        let edition = Edition {
+            key: Key::EditionV1,
+            parent: test_pubkey(1),
+            edition: 42,
+        };
+
+        let bytes = edition.try_to_vec().unwrap();
+        let decoded = Edition::try_from_slice(&bytes).unwrap();
+        assert_eq!(edition, decoded);
+    }
+
+    #[test]
+    fn edition_zero_is_master() {
+        let edition = Edition {
+            key: Key::EditionV1,
+            parent: test_pubkey(1),
+            edition: 0,
+        };
+
+        let bytes = edition.try_to_vec().unwrap();
+        let decoded = Edition::try_from_slice(&bytes).unwrap();
+        assert_eq!(decoded.edition, 0);
+    }
+
+    // ── MasterEdition ──
+
+    #[test]
+    fn master_edition_borsh_round_trip_with_max_supply() {
+        let me = MasterEdition {
+            key: Key::MasterEditionV1,
+            supply: 5,
+            max_supply: Some(100),
+            printing_mint: test_pubkey(10),
+            one_time_printing_authorization_mint: test_pubkey(20),
+        };
+
+        let bytes = me.try_to_vec().unwrap();
+        let decoded = MasterEdition::try_from_slice(&bytes).unwrap();
+        assert_eq!(me, decoded);
+    }
+
+    #[test]
+    fn master_edition_borsh_round_trip_unlimited() {
+        let me = MasterEdition {
+            key: Key::MasterEditionV1,
+            supply: 0,
+            max_supply: None,
+            printing_mint: test_pubkey(10),
+            one_time_printing_authorization_mint: test_pubkey(20),
+        };
+
+        let bytes = me.try_to_vec().unwrap();
+        let decoded = MasterEdition::try_from_slice(&bytes).unwrap();
+        assert_eq!(decoded.max_supply, None);
+    }
+
+    // ── ReservationV1 / ReservationListV1 ──
+
+    #[test]
+    fn reservation_v1_borsh_round_trip() {
+        let r = ReservationV1 {
+            address: test_pubkey(1),
+            spots_remaining: 5,
+            total_spots: 10,
+        };
+
+        let bytes = r.try_to_vec().unwrap();
+        let decoded = ReservationV1::try_from_slice(&bytes).unwrap();
+        assert_eq!(r, decoded);
+    }
+
+    #[test]
+    fn reservation_list_v1_borsh_round_trip() {
+        let list = ReservationListV1 {
+            key: Key::ReservationListV1,
+            master_edition: test_pubkey(1),
+            supply_snapshot: Some(50),
+            reservations: vec![ReservationV1 {
+                address: test_pubkey(2),
+                spots_remaining: 3,
+                total_spots: 5,
+            }],
+        };
+
+        let bytes = list.try_to_vec().unwrap();
+        let decoded = ReservationListV1::try_from_slice(&bytes).unwrap();
+        assert_eq!(list, decoded);
+    }
+
+    // ── Reservation / ReservationListV2 ──
+
+    #[test]
+    fn reservation_borsh_round_trip() {
+        let r = Reservation {
+            address: test_pubkey(1),
+            spots_remaining: 1000,
+            total_spots: 5000,
+        };
+
+        let bytes = r.try_to_vec().unwrap();
+        let decoded = Reservation::try_from_slice(&bytes).unwrap();
+        assert_eq!(r, decoded);
+    }
+
+    #[test]
+    fn reservation_list_v2_borsh_round_trip() {
+        let list = ReservationListV2 {
+            key: Key::ReservationListV2,
+            master_edition: test_pubkey(10),
+            supply_snapshot: None,
+            reservations: vec![
+                Reservation {
+                    address: test_pubkey(1),
+                    spots_remaining: 10,
+                    total_spots: 10,
+                },
+                Reservation {
+                    address: test_pubkey(2),
+                    spots_remaining: 0,
+                    total_spots: 5,
+                },
+            ],
+        };
+
+        let bytes = list.try_to_vec().unwrap();
+        let decoded = ReservationListV2::try_from_slice(&bytes).unwrap();
+        assert_eq!(list, decoded);
+    }
+
+    // ── ReservationList trait on V1 ──
+
+    #[test]
+    fn reservation_list_v1_trait_converts_to_v2_format() {
+        let mut list = ReservationListV1 {
+            key: Key::ReservationListV1,
+            master_edition: test_pubkey(1),
+            supply_snapshot: Some(100),
+            reservations: vec![ReservationV1 {
+                address: test_pubkey(2),
+                spots_remaining: 3,
+                total_spots: 5,
+            }],
+        };
+
+        let reservations = list.reservations();
+        assert_eq!(reservations[0].spots_remaining, 3);
+        assert_eq!(reservations[0].total_spots, 5);
+
+        list.set_supply_snapshot(Some(200));
+        assert_eq!(list.supply_snapshot(), Some(200));
+
+        list.set_master_edition(test_pubkey(99));
+        assert_eq!(list.master_edition(), test_pubkey(99));
+    }
+
+    // ── Constants sanity ──
+
+    #[test]
+    fn max_creator_len_is_pubkey_plus_two() {
+        assert_eq!(MAX_CREATOR_LEN, 32 + 1 + 1);
+    }
+
+    #[test]
+    fn max_edition_len_has_room_for_padding() {
+        assert_eq!(MAX_EDITION_LEN, 1 + 32 + 8 + 200);
+    }
+
+    #[test]
+    fn max_master_edition_len_has_room_for_padding() {
+        assert_eq!(MAX_MASTER_EDITION_LEN, 1 + 9 + 8 + 32 + 32 + 200);
+    }
+
+    #[test]
+    fn max_reservation_list_size_accounts_for_48_byte_reservations() {
+        assert_eq!(
+            MAX_RESERVATION_LIST_SIZE,
+            1 + 32 + 8 + 8 + MAX_RESERVATIONS * 48 + 100
+        );
+    }
+}
