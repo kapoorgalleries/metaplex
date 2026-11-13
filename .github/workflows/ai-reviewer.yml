@@ -1,0 +1,248 @@
+name: AI Reviewer Pipeline
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ai-reviewer-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  report_verdict:
+    name: Run AI Reviewer
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      verdict: ${{ steps.record_verdict.outputs.verdict }}
+      summary: ${{ steps.record_verdict.outputs.summary }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version-file: .node-version
+
+      - name: Test AI reviewer script
+        run: node scripts/test-reviewer.js
+
+      - name: Generate pull request diff
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+          DIFF_PATH="$RUNNER_TEMP/pr.diff"
+          if [ -n "${BASE_SHA:-}" ] && [ -n "${HEAD_SHA:-}" ] && \
+             git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null && \
+             git cat-file -e "${HEAD_SHA}^{commit}" 2>/dev/null; then
+            git diff --no-ext-diff --no-color "${BASE_SHA}...${HEAD_SHA}" > "$DIFF_PATH"
+          else
+            git diff --no-ext-diff --no-color "origin/${BASE_REF}...HEAD" > "$DIFF_PATH"
+          fi
+          echo "Generated PR diff at $DIFF_PATH ($(wc -c < "$DIFF_PATH") bytes)"
+
+      - name: Run Trimurti AI Reviewer
+        run: node scripts/reviewer.js "$RUNNER_TEMP/pr.diff" "$RUNNER_TEMP/review_result.json"
+
+      - name: Record review summary
+        id: record_verdict
+        if: always()
+        run: |
+          RESULT_PATH="$RUNNER_TEMP/review_result.json"
+          if [ ! -f "$RESULT_PATH" ]; then
+            exit 0
+          fi
+          RESULT_PATH="$RESULT_PATH" node -e '
+            const fs = require("fs");
+            const data = JSON.parse(fs.readFileSync(process.env.RESULT_PATH, "utf8"));
+            const verdict = String(data.verdict || "UNKNOWN").replace(/[\r\n]+/g, " ").trim();
+            const summary = String(data.summary || "").replace(/[\r\n]+/g, " ").trim().slice(0, 500);
+            if (process.env.GITHUB_OUTPUT) {
+              fs.appendFileSync(process.env.GITHUB_OUTPUT, `verdict=${verdict}\nsummary=${summary}\n`);
+            }
+            if (process.env.GITHUB_STEP_SUMMARY) {
+              const lines = [
+                `### Trimurti AI Review: ${verdict}`,
+                "",
+                summary || "No summary provided.",
+              ];
+              if (Array.isArray(data.issues) && data.issues.length > 0) {
+                lines.push("", "#### Issues", "");
+                for (const issue of data.issues) {
+                  const loc = issue.line ? `${issue.file}:${issue.line}` : String(issue.file || "unknown");
+                  lines.push(`- \`${loc}\`: ${issue.message}`);
+                }
+              }
+              fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, lines.join("\n") + "\n");
+            }
+          '
+
+      - name: Upload review verdict artifact
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: ai-review-verdict
+          path: ${{ runner.temp }}/review_result.json
+          if-no-files-found: ignore
+
+  notify_failure:
+    name: Notify on Review Failure
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # Only execute when report_verdict finishes with an actual failure (not cancellation)
+    needs: [report_verdict]
+    if: failure() && needs.report_verdict.result == 'failure'
+    steps:
+      - name: Send Notifications
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          EMAIL_API_KEY: ${{ secrets.EMAIL_API_KEY }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO || vars.EMAIL_TO || 'sanjay@kapoors.com' }}
+          EMAIL_FROM: ${{ secrets.EMAIL_FROM || vars.EMAIL_FROM || 'info@kapoors.com' }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          REPO_FULL_NAME: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          REVIEW_SUMMARY: ${{ needs.report_verdict.outputs.summary }}
+        run: |
+          set -euo pipefail
+          echo "Pipeline failed. Sending notifications..."
+
+          umask 077
+          TMP_CURL_DIR="$(mktemp -d)"
+          trap 'rm -rf "$TMP_CURL_DIR"' EXIT
+
+          SLACK_URL_CLEAN="$(printf '%s' "${SLACK_WEBHOOK_URL:-}" | tr -d '\r\n' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+          EMAIL_KEY_CLEAN="$(printf '%s' "${EMAIL_API_KEY:-}" | tr -d '\r\n' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+          SENDGRID_API_URL="${SENDGRID_API_URL:-https://api.sendgrid.com/v3/mail/send}"
+
+          notify_rc=0
+          configured_count=0
+
+          # --- Slack Notification ---
+          if [ -n "$SLACK_URL_CLEAN" ]; then
+            configured_count=$((configured_count + 1))
+            SLACK_CFG="$TMP_CURL_DIR/slack.cfg"
+            SLACK_BODY="$TMP_CURL_DIR/slack.json"
+            SLACK_URL_CLEAN="$SLACK_URL_CLEAN" SLACK_CFG="$SLACK_CFG" SLACK_BODY="$SLACK_BODY" node -e '
+              const fs = require("fs");
+              const num = process.env.PR_NUMBER || "?";
+              const title = (process.env.PR_TITLE || "").trim();
+              const repo = process.env.REPO_FULL_NAME || "kapoorgalleries/metaplex";
+              const prUrl = process.env.PR_URL || "";
+              const runUrl = process.env.RUN_URL || "";
+              const summary = (process.env.REVIEW_SUMMARY || "The AI Reviewer requested changes.").trim();
+              const lines = [
+                `🚨 *AI PR Review Failed!* (${repo} #${num})`,
+                title ? `PR: ${title}` : null,
+                `Summary: ${summary}`,
+                prUrl ? `View details here: ${prUrl}` : null,
+                runUrl ? `Workflow run: ${runUrl}` : null,
+              ].filter(Boolean);
+              fs.writeFileSync(process.env.SLACK_BODY, JSON.stringify({ text: lines.join("\n") }), "utf8");
+              fs.writeFileSync(
+                process.env.SLACK_CFG,
+                `url = ${JSON.stringify(process.env.SLACK_URL_CLEAN)}\nheader = "Content-Type: application/json"\n`,
+                "utf8"
+              );
+            '
+            if ! curl --proto '=https' --tlsv1.2 -fsS --max-time 30 \
+              --request POST \
+              --config "$SLACK_CFG" \
+              --data-binary "@$SLACK_BODY" >/dev/null; then
+              echo "::error::Failed to send Slack notification."
+              notify_rc=1
+            else
+              echo "Slack notification sent."
+            fi
+          else
+            echo "::warning::SLACK_WEBHOOK_URL secret is not configured; skipping Slack notification."
+          fi
+
+          # --- Email Notification (SendGrid v3 API) ---
+          if [ -n "$EMAIL_KEY_CLEAN" ]; then
+            configured_count=$((configured_count + 1))
+            EMAIL_CFG="$TMP_CURL_DIR/email.cfg"
+            EMAIL_BODY="$TMP_CURL_DIR/email.json"
+            EMAIL_KEY_CLEAN="$EMAIL_KEY_CLEAN" SENDGRID_API_URL="$SENDGRID_API_URL" EMAIL_CFG="$EMAIL_CFG" EMAIL_BODY="$EMAIL_BODY" node -e '
+              const fs = require("fs");
+              const num = process.env.PR_NUMBER || "?";
+              const title = (process.env.PR_TITLE || "").trim();
+              const repo = process.env.REPO_FULL_NAME || "kapoorgalleries/metaplex";
+              const prUrl = process.env.PR_URL || "";
+              const runUrl = process.env.RUN_URL || "";
+              const summary = (process.env.REVIEW_SUMMARY || "The AI Reviewer requested changes.").trim();
+              const seen = new Set();
+              const toList = (process.env.EMAIL_TO || "sanjay@kapoors.com")
+                .split(",")
+                .map((s) => s.trim())
+                .filter((s) => {
+                  if (!s) return false;
+                  const low = s.toLowerCase();
+                  if (seen.has(low)) return false;
+                  seen.add(low);
+                  return true;
+                })
+                .map((email) => ({ email }));
+              if (toList.length === 0) {
+                toList.push({ email: "sanjay@kapoors.com" });
+              }
+              const fromEmail = (process.env.EMAIL_FROM || "info@kapoors.com").trim() || "info@kapoors.com";
+              const bodyLines = [
+                `The Trimurti AI Reviewer requested changes on ${repo} Pull Request #${num}.`,
+                title ? `Title: ${title}` : null,
+                "",
+                `Summary: ${summary}`,
+                "",
+                prUrl ? `Pull Request: ${prUrl}` : null,
+                runUrl ? `Workflow Run: ${runUrl}` : null,
+              ].filter((v) => v !== null);
+              fs.writeFileSync(
+                process.env.EMAIL_BODY,
+                JSON.stringify({
+                  personalizations: [{ to: toList }],
+                  from: { email: fromEmail, name: "Kapoor Galleries CI" },
+                  subject: `Build Failed: PR #${num}${title ? " - " + title.slice(0, 80) : ""}`,
+                  content: [{ type: "text/plain", value: bodyLines.join("\n") }],
+                }),
+                "utf8"
+              );
+              fs.writeFileSync(
+                process.env.EMAIL_CFG,
+                [
+                  `url = ${JSON.stringify(process.env.SENDGRID_API_URL)}`,
+                  `header = ${JSON.stringify("Authorization: Bearer " + process.env.EMAIL_KEY_CLEAN)}`,
+                  `header = "Content-Type: application/json"`,
+                  "",
+                ].join("\n"),
+                "utf8"
+              );
+            '
+            if ! curl --proto '=https' --tlsv1.2 -fsS --max-time 30 \
+              --request POST \
+              --config "$EMAIL_CFG" \
+              --data-binary "@$EMAIL_BODY" >/dev/null; then
+              echo "::error::Failed to send SendGrid email notification."
+              notify_rc=1
+            else
+              echo "Email notification sent."
+            fi
+          else
+            echo "::warning::EMAIL_API_KEY secret is not configured; skipping email notification."
+          fi
+
+          if [ "$configured_count" -eq 0 ]; then
+            echo "::warning::Neither SLACK_WEBHOOK_URL nor EMAIL_API_KEY is configured; no external notifications were sent."
+          fi
+
+          exit "$notify_rc"
