@@ -14,12 +14,26 @@ concurrency:
 jobs:
   report_verdict:
     name: Run AI Reviewer
-    runs-on: ubuntu-latest
+    # Local workstation inspection (2026-11-16) confirmed no self-hosted GitHub
+    # Actions runner is installed (and service changes are held per user_rules).
+    # Full included-allowance `agy` LLM review runs as a fail-closed local
+    # pre-push gate (`scripts/pre-push-review.js` / `.git/hooks/pre-push`), while
+    # GitHub-hosted `ubuntu-latest` runs `scripts/test-reviewer.js` + deterministic
+    # full-diff static security review (`--static-only`).
+    # If a self-hosted runner with `agy` and included-allowance OAuth is later
+    # authorized, setting repository variable `AI_REVIEWER_RUNNER=self-hosted`
+    # restricts execution to same-repo PRs and enforces full fail-closed `agy` review.
+    if: (vars.AI_REVIEWER_RUNNER || 'ubuntu-latest') == 'ubuntu-latest' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ${{ vars.AI_REVIEWER_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 10
+    env:
+      REVIEW_DIR: /tmp/gemini
     outputs:
       verdict: ${{ steps.record_verdict.outputs.verdict }}
       summary: ${{ steps.record_verdict.outputs.summary }}
+      issues_json: ${{ steps.record_verdict.outputs.issues_json }}
     steps:
+      # --- Stage 1: checkout & Component 1: Environment & Prerequisites ---
       - name: Checkout code
         uses: actions/checkout@v5
         with:
@@ -30,9 +44,56 @@ jobs:
         with:
           node-version-file: .node-version
 
+      - name: Prepare environment and prerequisites
+        env:
+          AI_REVIEWER_REQUIRE_AGY: ${{ vars.AI_REVIEWER_REQUIRE_AGY }}
+        run: |
+          set -euo pipefail
+          node --version
+          git --version
+
+          WORK_DIR="${REVIEW_DIR:-/tmp/gemini}"
+          if [ -L "$WORK_DIR" ]; then
+            echo "::error::Refusing symlinked REVIEW_DIR: $WORK_DIR"
+            exit 1
+          fi
+          mkdir -p "$WORK_DIR"
+          if [ -L "$WORK_DIR" ] || [ ! -d "$WORK_DIR" ]; then
+            echo "::error::Invalid REVIEW_DIR directory: $WORK_DIR"
+            exit 1
+          fi
+          chmod 700 "$WORK_DIR"
+          for target_file in "$WORK_DIR/pr26.diff" "$WORK_DIR/review_result.json"; do
+            if [ -L "$target_file" ]; then
+              echo "::error::Refusing symlinked review artifact path: $target_file"
+              exit 1
+            fi
+            rm -f "$target_file"
+          done
+
+          for cand_dir in "$HOME/.local/bin" "$HOME/.local/share/agy-native"; do
+            if [ -d "$cand_dir" ]; then
+              export PATH="$cand_dir:$PATH"
+              if [ -n "${GITHUB_PATH:-}" ]; then
+                printf '%s\n' "$cand_dir" >> "$GITHUB_PATH"
+              fi
+            fi
+          done
+
+          if command -v agy >/dev/null 2>&1; then
+            echo "Found agy CLI binary at $(command -v agy)"
+          elif [ "${GITHUB_ACTIONS:-}" = "true" ] && \
+               [ "${RUNNER_ENVIRONMENT:-}" = "github-hosted" ] && \
+               [ "${AI_REVIEWER_REQUIRE_AGY:-}" != "1" ]; then
+            echo "::notice::agy CLI binary is not installed on this GitHub-hosted runner; CI will enforce deterministic static security checks (--static-only) while full included-allowance agy LLM review runs in the local pre-push gate (scripts/pre-push-review.js)."
+          else
+            echo "::warning::agy CLI binary is not in PATH; non-empty diffs will fail closed per kg-trimurti-review."
+          fi
+
       - name: Test AI reviewer script
         run: node scripts/test-reviewer.js
 
+      # --- Stage 2: prepare_diff ---
       - name: Generate pull request diff
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
@@ -40,60 +101,244 @@ jobs:
           BASE_REF: ${{ github.base_ref }}
         run: |
           set -euo pipefail
-          DIFF_PATH="$RUNNER_TEMP/pr.diff"
+          WORK_DIR="${REVIEW_DIR:-/tmp/gemini}"
+          if [ -L "$WORK_DIR" ]; then
+            echo "::error::Refusing symlinked REVIEW_DIR: $WORK_DIR"
+            exit 1
+          fi
+          mkdir -p "$WORK_DIR"
+          if [ -L "$WORK_DIR" ] || [ ! -d "$WORK_DIR" ]; then
+            echo "::error::Invalid REVIEW_DIR directory: $WORK_DIR"
+            exit 1
+          fi
+          chmod 700 "$WORK_DIR"
+          DIFF_PATH="$WORK_DIR/pr26.diff"
+          RESULT_PATH="$WORK_DIR/review_result.json"
+          for target_file in "$DIFF_PATH" "$RESULT_PATH"; do
+            if [ -L "$target_file" ]; then
+              echo "::error::Refusing symlinked review artifact path: $target_file"
+              exit 1
+            fi
+            rm -f "$target_file"
+          done
+
           if [ -n "${BASE_SHA:-}" ] && [ -n "${HEAD_SHA:-}" ] && \
              git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null && \
              git cat-file -e "${HEAD_SHA}^{commit}" 2>/dev/null; then
             git diff --no-ext-diff --no-color "${BASE_SHA}...${HEAD_SHA}" > "$DIFF_PATH"
           else
-            git diff --no-ext-diff --no-color "origin/${BASE_REF}...HEAD" > "$DIFF_PATH"
+            REF_TARGET="${BASE_REF:-}"
+            if [ -z "$REF_TARGET" ]; then
+              if git rev-parse --verify --quiet origin/main >/dev/null 2>&1; then
+                REF_TARGET="main"
+              else
+                REF_TARGET="master"
+              fi
+            fi
+            git diff --no-ext-diff --no-color "origin/${REF_TARGET}...HEAD" > "$DIFF_PATH"
           fi
           echo "Generated PR diff at $DIFF_PATH ($(wc -c < "$DIFF_PATH") bytes)"
 
+      # --- Stage 3: run_reviewer (allow_failure; gate enforced in report_verdict) ---
       - name: Run Trimurti AI Reviewer
-        run: node scripts/reviewer.js "$RUNNER_TEMP/pr.diff" "$RUNNER_TEMP/review_result.json"
+        id: run_reviewer
+        continue-on-error: true
+        env:
+          AI_REVIEWER_REQUIRE_AGY: ${{ vars.AI_REVIEWER_REQUIRE_AGY }}
+        run: |
+          set -euo pipefail
+          WORK_DIR="${REVIEW_DIR:-/tmp/gemini}"
+          HAS_AGY=0
+          if command -v agy >/dev/null 2>&1 || \
+             [ -x "$HOME/.local/bin/agy" ] || \
+             [ -x "$HOME/.local/share/agy-native/agy" ]; then
+            HAS_AGY=1
+          fi
+          if [ "$HAS_AGY" -eq 1 ] || \
+             [ "${GITHUB_ACTIONS:-}" != "true" ] || \
+             [ "${RUNNER_ENVIRONMENT:-}" != "github-hosted" ] || \
+             [ "${AI_REVIEWER_REQUIRE_AGY:-}" = "1" ]; then
+            node scripts/reviewer.js "$WORK_DIR/pr26.diff" "$WORK_DIR/review_result.json"
+          else
+            echo "Running deterministic static security review (--static-only) on GitHub-hosted runner..."
+            node scripts/reviewer.js --static-only "$WORK_DIR/pr26.diff" "$WORK_DIR/review_result.json"
+          fi
 
+      # --- Component 4: Artifact Retention ---
+      - name: Upload review verdict artifact
+        if: always() && !cancelled()
+        uses: actions/upload-artifact@v6
+        with:
+          name: ai-review-verdict
+          path: /tmp/gemini/review_result.json
+          retention-days: 30
+          if-no-files-found: ignore
+
+      # --- Stage 4: report_verdict & Component 3: Exit Code Rules & Pass/Fail Gates ---
       - name: Record review summary
         id: record_verdict
-        if: always()
+        if: always() && !cancelled()
+        env:
+          REVIEWER_OUTCOME: ${{ steps.run_reviewer.outcome }}
         run: |
-          RESULT_PATH="$RUNNER_TEMP/review_result.json"
-          if [ ! -f "$RESULT_PATH" ]; then
-            exit 0
-          fi
-          RESULT_PATH="$RESULT_PATH" node -e '
+          set -euo pipefail
+          WORK_DIR="${REVIEW_DIR:-/tmp/gemini}"
+          RESULT_PATH="${REVIEW_OUTPUT_PATH:-$WORK_DIR/review_result.json}"
+
+          RESULT_PATH="$RESULT_PATH" REVIEWER_OUTCOME="${REVIEWER_OUTCOME:-}" node -e '
             const fs = require("fs");
-            const data = JSON.parse(fs.readFileSync(process.env.RESULT_PATH, "utf8"));
-            const verdict = String(data.verdict || "UNKNOWN").replace(/[\r\n]+/g, " ").trim();
-            const summary = String(data.summary || "").replace(/[\r\n]+/g, " ").trim().slice(0, 500);
-            if (process.env.GITHUB_OUTPUT) {
-              fs.appendFileSync(process.env.GITHUB_OUTPUT, `verdict=${verdict}\nsummary=${summary}\n`);
+
+            function escCommandData(val) {
+              return String(val ?? "")
+                .replace(/%/g, "%25")
+                .replace(/\r/g, "%0D")
+                .replace(/\n/g, "%0A");
             }
+
+            function escCommandProp(val) {
+              return escCommandData(val)
+                .replace(/:/g, "%3A")
+                .replace(/,/g, "%2C");
+            }
+
+            function singleLine(val) {
+              return String(val ?? "").replace(/[\r\n]+/g, " ").trim();
+            }
+
+            const resultPath = process.env.RESULT_PATH;
+            const outcome = singleLine(process.env.REVIEWER_OUTCOME);
+
+            let data = null;
+            let parseErr = null;
+            if (resultPath && fs.existsSync(resultPath)) {
+              try {
+                if (fs.lstatSync(resultPath).isSymbolicLink()) {
+                  throw new Error("Refusing symlinked review_result.json");
+                }
+                data = JSON.parse(fs.readFileSync(resultPath, "utf8"));
+              } catch (err) {
+                parseErr = err;
+              }
+            }
+
+            let verdict = "ERROR";
+            let summary = "";
+            let cleanIssues = [];
+            let totalIssuesCount = 0;
+
+            if (data && typeof data === "object" && !Array.isArray(data)) {
+              const rawVerdict = singleLine(data.verdict || "");
+              const rawSummary = typeof data.summary === "string" ? singleLine(data.summary).slice(0, 500) : "";
+              const hasIssuesArray = Array.isArray(data.issues);
+
+              if (hasIssuesArray) {
+                totalIssuesCount = data.issues.length;
+                for (const item of data.issues.slice(0, 25)) {
+                  if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+                  const file = typeof item.file === "string" ? singleLine(item.file) : "";
+                  const message = typeof item.message === "string" ? singleLine(item.message).slice(0, 300) : "";
+                  if (!file || !message) continue;
+                  const entry = { file, message };
+                  if (typeof item.line === "number" && Number.isInteger(item.line) && item.line >= 1) {
+                    entry.line = item.line;
+                  }
+                  cleanIssues.push(entry);
+                }
+              }
+
+              if (
+                (rawVerdict !== "APPROVE" && rawVerdict !== "REQUEST_CHANGES") ||
+                !rawSummary ||
+                !hasIssuesArray
+              ) {
+                verdict = "ERROR";
+                summary = rawSummary
+                  ? `Invalid review_result.json schema (verdict="${rawVerdict || "missing"}"): ${rawSummary}`.slice(0, 500)
+                  : `Invalid review_result.json schema (verdict="${rawVerdict || "missing"}", missing summary or issues array).`;
+              } else {
+                verdict = rawVerdict;
+                summary = rawSummary;
+                if (verdict === "APPROVE" && (totalIssuesCount > 0 || cleanIssues.length > 0)) {
+                  verdict = "REQUEST_CHANGES";
+                }
+                if (verdict === "REQUEST_CHANGES" && cleanIssues.length === 0) {
+                  verdict = "ERROR";
+                  summary = `Invalid REQUEST_CHANGES payload without valid issues: ${summary}`.slice(0, 500);
+                }
+                if (verdict === "APPROVE" && outcome !== "success") {
+                  verdict = "ERROR";
+                  const shownOutcome = outcome || "missing";
+                  summary = `${summary} (reviewer step outcome was "${shownOutcome}", expected "success")`.slice(0, 500);
+                }
+              }
+            } else if (parseErr) {
+              verdict = "ERROR";
+              summary = `Invalid JSON in ${resultPath}: ${singleLine(parseErr.message)}`.slice(0, 500);
+            } else {
+              verdict = "ERROR";
+              summary =
+                outcome === "skipped"
+                  ? "Trimurti AI Reviewer pipeline failed in an earlier prerequisite/diff step before review execution."
+                  : "Trimurti AI Reviewer failed closed before writing review_result.json (ensure agy CLI and included-allowance OAuth are available on the runner).";
+            }
+
+            const issuesJson = JSON.stringify(cleanIssues).replace(/[\r\n]+/g, " ");
+
+            if (process.env.GITHUB_OUTPUT) {
+              fs.appendFileSync(
+                process.env.GITHUB_OUTPUT,
+                `verdict=${verdict}\nsummary=${summary}\nissues_json=${issuesJson}\n`,
+                "utf8"
+              );
+            }
+
             if (process.env.GITHUB_STEP_SUMMARY) {
               const lines = [
                 `### Trimurti AI Review: ${verdict}`,
                 "",
                 summary || "No summary provided.",
               ];
-              if (Array.isArray(data.issues) && data.issues.length > 0) {
+              if (cleanIssues.length > 0) {
                 lines.push("", "#### Issues", "");
-                for (const issue of data.issues) {
-                  const loc = issue.line ? `${issue.file}:${issue.line}` : String(issue.file || "unknown");
+                for (const issue of cleanIssues) {
+                  const loc = issue.line ? `${issue.file}:${issue.line}` : issue.file;
                   lines.push(`- \`${loc}\`: ${issue.message}`);
                 }
+                if (totalIssuesCount > cleanIssues.length) {
+                  lines.push("", `_Showing first ${cleanIssues.length} of ${totalIssuesCount} issues._`);
+                }
               }
-              fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, lines.join("\n") + "\n");
+              fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, lines.join("\n") + "\n", "utf8");
             }
+
+            if (verdict === "APPROVE" && cleanIssues.length === 0 && outcome === "success") {
+              console.log(
+                `::notice title=Trimurti AI Review (APPROVE)::${escCommandData(summary || "Approved.")}`
+              );
+              process.exit(0);
+            }
+
+            for (const issue of cleanIssues) {
+              const props = [`file=${escCommandProp(issue.file)}`];
+              if (issue.line) {
+                props.push(`line=${issue.line}`);
+              }
+              props.push("title=Trimurti AI Reviewer");
+              console.log(`::error ${props.join(",")}::${escCommandData(issue.message)}`);
+            }
+
+            if (cleanIssues.length === 0) {
+              console.log(
+                `::error title=Trimurti AI Review (${escCommandProp(verdict)})::${escCommandData(
+                  summary || "AI review failed closed."
+                )}`
+              );
+            }
+
+            process.exit(1);
           '
 
-      - name: Upload review verdict artifact
-        if: always()
-        uses: actions/upload-artifact@v6
-        with:
-          name: ai-review-verdict
-          path: ${{ runner.temp }}/review_result.json
-          if-no-files-found: ignore
-
+  # --- Component 4: Schema Mapping & Native Webhook / Alert Delivery ---
   notify_failure:
     name: Notify on Review Failure
     runs-on: ubuntu-latest
@@ -105,6 +350,7 @@ jobs:
       - name: Send Notifications
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          TRIMURTI_WEBHOOK_URL: ${{ secrets.TRIMURTI_WEBHOOK_URL }}
           EMAIL_API_KEY: ${{ secrets.EMAIL_API_KEY }}
           EMAIL_TO: ${{ secrets.EMAIL_TO || vars.EMAIL_TO || 'sanjay@kapoors.com' }}
           EMAIL_FROM: ${{ secrets.EMAIL_FROM || vars.EMAIL_FROM || 'info@kapoors.com' }}
@@ -113,7 +359,9 @@ jobs:
           PR_TITLE: ${{ github.event.pull_request.title }}
           REPO_FULL_NAME: ${{ github.repository }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          REVIEW_VERDICT: ${{ needs.report_verdict.outputs.verdict }}
           REVIEW_SUMMARY: ${{ needs.report_verdict.outputs.summary }}
+          REVIEW_ISSUES_JSON: ${{ needs.report_verdict.outputs.issues_json }}
         run: |
           set -euo pipefail
           echo "Pipeline failed. Sending notifications..."
@@ -123,11 +371,61 @@ jobs:
           trap 'rm -rf "$TMP_CURL_DIR"' EXIT
 
           SLACK_URL_CLEAN="$(printf '%s' "${SLACK_WEBHOOK_URL:-}" | tr -d '\r\n' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+          TRIMURTI_URL_CLEAN="$(printf '%s' "${TRIMURTI_WEBHOOK_URL:-}" | tr -d '\r\n' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
           EMAIL_KEY_CLEAN="$(printf '%s' "${EMAIL_API_KEY:-}" | tr -d '\r\n' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
           SENDGRID_API_URL="${SENDGRID_API_URL:-https://api.sendgrid.com/v3/mail/send}"
 
           notify_rc=0
           configured_count=0
+
+          # --- Trimurti Native Webhook Schema Mapping (optional) ---
+          if [ -n "$TRIMURTI_URL_CLEAN" ]; then
+            configured_count=$((configured_count + 1))
+            TRIMURTI_CFG="$TMP_CURL_DIR/trimurti.cfg"
+            TRIMURTI_BODY="$TMP_CURL_DIR/trimurti.json"
+            TRIMURTI_URL_CLEAN="$TRIMURTI_URL_CLEAN" TRIMURTI_CFG="$TRIMURTI_CFG" TRIMURTI_BODY="$TRIMURTI_BODY" node -e '
+              const fs = require("fs");
+              let issues = [];
+              try {
+                const parsed = JSON.parse(process.env.REVIEW_ISSUES_JSON || "[]");
+                if (Array.isArray(parsed)) issues = parsed;
+              } catch (_) {}
+              const rawVerdict = (process.env.REVIEW_VERDICT || "").trim();
+              const verdict = rawVerdict === "REQUEST_CHANGES" || rawVerdict === "ERROR" ? rawVerdict : "ERROR";
+              const defaultSummary =
+                verdict === "REQUEST_CHANGES"
+                  ? "The AI Reviewer requested changes."
+                  : "The Trimurti AI Reviewer pipeline failed closed before producing a review verdict.";
+              const payload = {
+                schema: "trimurti.ai_review.v1",
+                verdict,
+                summary: (process.env.REVIEW_SUMMARY || "").trim() || defaultSummary,
+                issues,
+                repository: process.env.REPO_FULL_NAME || "kapoorgalleries/metaplex",
+                pull_request: {
+                  number: Number(process.env.PR_NUMBER) || process.env.PR_NUMBER || null,
+                  title: (process.env.PR_TITLE || "").trim(),
+                  url: process.env.PR_URL || "",
+                },
+                workflow_run_url: process.env.RUN_URL || "",
+              };
+              fs.writeFileSync(process.env.TRIMURTI_BODY, JSON.stringify(payload), "utf8");
+              fs.writeFileSync(
+                process.env.TRIMURTI_CFG,
+                `url = ${JSON.stringify(process.env.TRIMURTI_URL_CLEAN)}\nheader = "Content-Type: application/json"\n`,
+                "utf8"
+              );
+            '
+            if ! curl --proto '=https' --tlsv1.2 -fsS --max-time 30 \
+              --request POST \
+              --config "$TRIMURTI_CFG" \
+              --data-binary "@$TRIMURTI_BODY" >/dev/null; then
+              echo "::error::Failed to send Trimurti webhook notification."
+              notify_rc=1
+            else
+              echo "Trimurti webhook notification sent."
+            fi
+          fi
 
           # --- Slack Notification ---
           if [ -n "$SLACK_URL_CLEAN" ]; then
@@ -141,11 +439,31 @@ jobs:
               const repo = process.env.REPO_FULL_NAME || "kapoorgalleries/metaplex";
               const prUrl = process.env.PR_URL || "";
               const runUrl = process.env.RUN_URL || "";
-              const summary = (process.env.REVIEW_SUMMARY || "The AI Reviewer requested changes.").trim();
+              const rawVerdict = (process.env.REVIEW_VERDICT || "").trim();
+              const verdict = rawVerdict === "REQUEST_CHANGES" || rawVerdict === "ERROR" ? rawVerdict : "ERROR";
+              const defaultSummary =
+                verdict === "REQUEST_CHANGES"
+                  ? "The AI Reviewer requested changes."
+                  : "The Trimurti AI Reviewer pipeline failed closed before producing a review verdict.";
+              const summary = (process.env.REVIEW_SUMMARY || "").trim() || defaultSummary;
+              let issues = [];
+              try {
+                const parsed = JSON.parse(process.env.REVIEW_ISSUES_JSON || "[]");
+                if (Array.isArray(parsed)) issues = parsed;
+              } catch (_) {}
+              const issueLines = issues.slice(0, 10).map((issue) => {
+                const loc = issue.line ? `${issue.file}:${issue.line}` : String(issue.file || "unknown");
+                return `• \`${loc}\`: ${issue.message}`;
+              });
+              if (issues.length > 10) {
+                issueLines.push(`• ...and ${issues.length - 10} additional issue(s)`);
+              }
               const lines = [
                 `🚨 *AI PR Review Failed!* (${repo} #${num})`,
                 title ? `PR: ${title}` : null,
+                `Verdict: \`${verdict}\``,
                 `Summary: ${summary}`,
+                issueLines.length > 0 ? `Issues:\n${issueLines.join("\n")}` : null,
                 prUrl ? `View details here: ${prUrl}` : null,
                 runUrl ? `Workflow run: ${runUrl}` : null,
               ].filter(Boolean);
@@ -181,7 +499,18 @@ jobs:
               const repo = process.env.REPO_FULL_NAME || "kapoorgalleries/metaplex";
               const prUrl = process.env.PR_URL || "";
               const runUrl = process.env.RUN_URL || "";
-              const summary = (process.env.REVIEW_SUMMARY || "The AI Reviewer requested changes.").trim();
+              const rawVerdict = (process.env.REVIEW_VERDICT || "").trim();
+              const verdict = rawVerdict === "REQUEST_CHANGES" || rawVerdict === "ERROR" ? rawVerdict : "ERROR";
+              const defaultSummary =
+                verdict === "REQUEST_CHANGES"
+                  ? "The AI Reviewer requested changes."
+                  : "The Trimurti AI Reviewer pipeline failed closed before producing a review verdict.";
+              const summary = (process.env.REVIEW_SUMMARY || "").trim() || defaultSummary;
+              let issues = [];
+              try {
+                const parsed = JSON.parse(process.env.REVIEW_ISSUES_JSON || "[]");
+                if (Array.isArray(parsed)) issues = parsed;
+              } catch (_) {}
               const seen = new Set();
               const toList = (process.env.EMAIL_TO || "sanjay@kapoors.com")
                 .split(",")
@@ -199,21 +528,31 @@ jobs:
               }
               const fromEmail = (process.env.EMAIL_FROM || "info@kapoors.com").trim() || "info@kapoors.com";
               const bodyLines = [
-                `The Trimurti AI Reviewer requested changes on ${repo} Pull Request #${num}.`,
+                `The Trimurti AI Reviewer failed on ${repo} Pull Request #${num}.`,
                 title ? `Title: ${title}` : null,
+                `Verdict: ${verdict}`,
                 "",
                 `Summary: ${summary}`,
+              ];
+              if (issues.length > 0) {
+                bodyLines.push("", "Issues:");
+                for (const issue of issues) {
+                  const loc = issue.line ? `${issue.file}:${issue.line}` : String(issue.file || "unknown");
+                  bodyLines.push(`- ${loc}: ${issue.message}`);
+                }
+              }
+              bodyLines.push(
                 "",
                 prUrl ? `Pull Request: ${prUrl}` : null,
-                runUrl ? `Workflow Run: ${runUrl}` : null,
-              ].filter((v) => v !== null);
+                runUrl ? `Workflow Run: ${runUrl}` : null
+              );
               fs.writeFileSync(
                 process.env.EMAIL_BODY,
                 JSON.stringify({
                   personalizations: [{ to: toList }],
                   from: { email: fromEmail, name: "Kapoor Galleries CI" },
                   subject: `Build Failed: PR #${num}${title ? " - " + title.slice(0, 80) : ""}`,
-                  content: [{ type: "text/plain", value: bodyLines.join("\n") }],
+                  content: [{ type: "text/plain", value: bodyLines.filter((v) => v !== null).join("\n") }],
                 }),
                 "utf8"
               );
@@ -242,7 +581,7 @@ jobs:
           fi
 
           if [ "$configured_count" -eq 0 ]; then
-            echo "::warning::Neither SLACK_WEBHOOK_URL nor EMAIL_API_KEY is configured; no external notifications were sent."
+            echo "::warning::Neither SLACK_WEBHOOK_URL, TRIMURTI_WEBHOOK_URL, nor EMAIL_API_KEY is configured; no external notifications were sent."
           fi
 
           exit "$notify_rc"
