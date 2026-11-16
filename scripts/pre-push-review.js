@@ -2,17 +2,17 @@
 // Local pre-push AI review gate for kapoorgalleries/metaplex.
 //
 // Enforces genuine included-allowance Antigravity CLI (`agy`) diff review
-// locally before `git push` transmits commits to a remote, pairing with
-// `.github/workflows/ai-reviewer.yml` (which runs deterministic `--static-only`
-// checks on GitHub-hosted `ubuntu-latest` runners where `agy` is unavailable).
+// locally before `git push` transmits commits to a remote (with zero mock
+// fallback and zero paid API fallback).
 //
 // Modes:
 //   1. Git `pre-push` hook mode (invoked by `.git/hooks/pre-push <remote> <url>`
 //      with `<local-ref> <local-oid> <remote-ref> <remote-oid>` lines on stdin):
-//      computes the unified diff for all pushed refs into `/tmp/gemini/pr26.diff`
-//      and runs `scripts/reviewer.js` -> `/tmp/gemini/review_result.json`.
+//      computes the unified diff for all pushed refs into `$REVIEW_DIR/pre-push.diff`
+//      and runs `scripts/reviewer.js` -> `$REVIEW_DIR/pre-push-review_result.json`
+//      (never clobbering `/tmp/gemini/pr26.diff` unless `REVIEW_DIFF_PATH` is set).
 //      Exits 0 on `APPROVE`; exits 1 (blocking push) on `REQUEST_CHANGES` or
-//      any fail-closed `agy` / OAuth / 5%-quota-reserve / schema error.
+//      any fail-closed `agy` / OAuth / 5%-quota-reserve / permission / schema error.
 //   2. Manual CLI check (when stdin is a TTY or `--range <rev-range>` is given):
 //      diffs the current branch against `origin/master` (or `origin/main`) and
 //      runs the same review pipeline.
@@ -28,7 +28,12 @@ const os = require('os');
 const path = require('path');
 const { spawnSync } = require('child_process');
 
-const { runReview, withOutputLock } = require('./reviewer');
+const {
+  assertAllowedReviewerModel,
+  assertSafeOutputTarget,
+  runReview,
+  withOutputLock,
+} = require('./reviewer');
 
 const MANAGED_HOOK_MARKER = '# Managed by scripts/pre-push-review.js';
 const GIT_MAX_BUFFER = 64 * 1024 * 1024;
@@ -49,7 +54,6 @@ function parsePrePushArgs(argv = process.argv.slice(2)) {
   let help = false;
   let installHook = false;
   let force = false;
-  let staticOnly = false;
   let range = null;
   let outputOverride = null;
   const models = [];
@@ -76,10 +80,6 @@ function parsePrePushArgs(argv = process.argv.slice(2)) {
       force = true;
       continue;
     }
-    if (!endOfOptions && arg === '--static-only') {
-      staticOnly = true;
-      continue;
-    }
     if (!endOfOptions && (arg === '--range' || arg.startsWith('--range='))) {
       const val = arg === '--range' ? argv[++i] : arg.slice('--range='.length);
       if (!val || val.startsWith('-')) {
@@ -102,7 +102,7 @@ function parsePrePushArgs(argv = process.argv.slice(2)) {
       if (!val || (arg === '--model' && val.startsWith('-'))) {
         throw new Error('Missing value for --model');
       }
-      models.push(val);
+      models.push(assertAllowedReviewerModel(val));
       continue;
     }
     if (!endOfOptions && (arg === '--timeout-ms' || arg.startsWith('--timeout-ms='))) {
@@ -139,20 +139,39 @@ function parsePrePushArgs(argv = process.argv.slice(2)) {
     help,
     installHook,
     force,
-    staticOnly,
     range,
     outputPath: outputOverride,
     models: models.length > 0 ? models : undefined,
     timeoutMs,
     maxDiffChars,
+    positionalCount: positional.length,
     remoteName: positional[0] || 'origin',
     remoteUrl: positional[1] || '',
   };
 }
 
+const GIT_SCOPED_ENV_VARS = [
+  'GIT_DIR',
+  'GIT_WORK_TREE',
+  'GIT_INDEX_FILE',
+  'GIT_COMMON_DIR',
+  'GIT_OBJECT_DIRECTORY',
+  'GIT_ALTERNATE_OBJECT_DIRECTORIES',
+  'GIT_PREFIX',
+];
+
+function buildGitSubprocessEnv(baseEnv = process.env) {
+  const envCopy = Object.assign({}, baseEnv);
+  for (const key of GIT_SCOPED_ENV_VARS) {
+    delete envCopy[key];
+  }
+  return envCopy;
+}
+
 function runGit(repoRoot, args, options = {}) {
   const res = spawnSync('git', args, {
     cwd: repoRoot,
+    env: buildGitSubprocessEnv(options.env || process.env),
     encoding: 'utf8',
     input: options.input ?? '',
     maxBuffer: GIT_MAX_BUFFER,
@@ -164,12 +183,20 @@ function runGit(repoRoot, args, options = {}) {
   return res;
 }
 
-function resolveRepoRoot(cwd = process.cwd()) {
-  const res = runGit(cwd, ['rev-parse', '--show-toplevel']);
-  if (res.status !== 0 || !res.stdout.trim()) {
-    throw new Error(`Not inside a git repository: ${cwd}`);
+function resolveRepoRoot(cwd = process.cwd(), fallbackDir = null) {
+  if (cwd && fs.existsSync(cwd)) {
+    const res = runGit(cwd, ['rev-parse', '--show-toplevel']);
+    if (res.status === 0 && res.stdout.trim()) {
+      return res.stdout.trim();
+    }
   }
-  return res.stdout.trim();
+  if (fallbackDir && fs.existsSync(fallbackDir)) {
+    const fbRes = runGit(fallbackDir, ['rev-parse', '--show-toplevel']);
+    if (fbRes.status === 0 && fbRes.stdout.trim()) {
+      return fbRes.stdout.trim();
+    }
+  }
+  throw new Error(`Not inside a git repository: ${cwd}`);
 }
 
 function resolveCommitOid(repoRoot, rev) {
@@ -187,6 +214,18 @@ function getMergeBase(repoRoot, oidA, oidB) {
   return HEX_OID_RE.test(oid) ? oid : null;
 }
 
+function isAncestor(repoRoot, ancestorOid, descendantOid) {
+  if (!ancestorOid || !descendantOid) return false;
+  if (ancestorOid === descendantOid) return true;
+  const res = runGit(repoRoot, ['merge-base', '--is-ancestor', ancestorOid, descendantOid]);
+  return res.status === 0;
+}
+
+function isShallowRepository(repoRoot) {
+  const res = runGit(repoRoot, ['rev-parse', '--is-shallow-repository']);
+  return res.status === 0 && res.stdout.trim() === 'true';
+}
+
 function getEmptyTreeOid(repoRoot) {
   const res = runGit(repoRoot, ['hash-object', '-t', 'tree', '--stdin'], { input: '' });
   if (res.status !== 0 || !res.stdout.trim()) {
@@ -195,7 +234,14 @@ function getEmptyTreeOid(repoRoot) {
   return res.stdout.trim();
 }
 
-function resolveDefaultBaseCommit(repoRoot, remoteName = 'origin', localRef = '') {
+function resolveDefaultBaseCommit(repoRoot, remoteName = 'origin', refOptions = {}) {
+  const localRef =
+    typeof refOptions === 'string' ? refOptions : (refOptions && refOptions.localRef) || '';
+  const remoteRef =
+    refOptions && typeof refOptions === 'object' ? refOptions.remoteRef || '' : '';
+  const allowLocalHeads =
+    refOptions && typeof refOptions === 'object' ? Boolean(refOptions.allowLocalHeads) : false;
+
   const safeRemote =
     /^[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*$/.test(remoteName) &&
     !remoteName.includes('..')
@@ -218,10 +264,12 @@ function resolveDefaultBaseCommit(repoRoot, remoteName = 'origin', localRef = ''
     if (oid) return oid;
   }
 
-  for (const localCand of ['refs/heads/main', 'refs/heads/master']) {
-    if (localCand === localRef) continue;
-    const oid = resolveCommitOid(repoRoot, localCand);
-    if (oid) return oid;
+  if (allowLocalHeads) {
+    for (const localCand of ['refs/heads/main', 'refs/heads/master']) {
+      if (localCand === localRef || localCand === remoteRef) continue;
+      const oid = resolveCommitOid(repoRoot, localCand);
+      if (oid) return oid;
+    }
   }
   return null;
 }
@@ -270,8 +318,9 @@ function computePrePushDiff(repoRoot, options = {}) {
     return diffRes.stdout;
   }
 
+  const isHookStdinMode = typeof options.stdinText === 'string';
   let updates;
-  if (typeof options.stdinText === 'string') {
+  if (isHookStdinMode) {
     updates = parsePrePushStdin(options.stdinText);
     if (updates.length === 0) {
       return '';
@@ -294,38 +343,74 @@ function computePrePushDiff(repoRoot, options = {}) {
   }
 
   let emptyTreeOid = null;
+  let shallowChecked = null;
   const seenPairs = new Set();
   const chunks = [];
 
   for (const update of updates) {
     if (ZERO_OID_RE.test(update.localOid)) {
-      // Remote ref deletion: no local code is being pushed.
       continue;
     }
     const localCommit = resolveCommitOid(repoRoot, update.localOid);
     if (!localCommit) {
-      // Non-commit object (e.g. tag pointing directly to a blob/tree).
       continue;
     }
 
+    const remoteCommit = !ZERO_OID_RE.test(update.remoteOid)
+      ? resolveCommitOid(repoRoot, update.remoteOid)
+      : null;
+
     let fromOid = null;
-    if (!ZERO_OID_RE.test(update.remoteOid)) {
-      const remoteCommit = resolveCommitOid(repoRoot, update.remoteOid);
-      if (remoteCommit) {
-        fromOid = getMergeBase(repoRoot, remoteCommit, localCommit);
-        if (!fromOid) {
-          emptyTreeOid = emptyTreeOid || getEmptyTreeOid(repoRoot);
-          fromOid = emptyTreeOid;
+    if (remoteCommit) {
+      if (remoteCommit === localCommit) {
+        continue;
+      }
+      if (isAncestor(repoRoot, remoteCommit, localCommit)) {
+        // Fast-forward push: review strictly the newly pushed commits.
+        fromOid = remoteCommit;
+      } else {
+        // Non-fast-forward force-push (rebase, amend, ancestor rewind, or orphan rewrite):
+        // prefer merge-base against the remote's default branch so rebased PR branches
+        // exclude upstream master commits and ancestor rewinds still scan remaining PR commits;
+        // otherwise diff directly from the overwritten remoteCommit tree.
+        const defaultBase = resolveDefaultBaseCommit(repoRoot, remoteName, {
+          localRef: update.localRef,
+          remoteRef: update.remoteRef,
+          allowLocalHeads: !isHookStdinMode,
+        });
+        const mbDefault = defaultBase
+          ? getMergeBase(repoRoot, defaultBase, localCommit)
+          : null;
+        if (mbDefault && mbDefault !== localCommit) {
+          fromOid = mbDefault;
+        } else if (defaultBase && defaultBase !== remoteCommit && localCommit === defaultBase) {
+          continue;
+        } else {
+          fromOid = remoteCommit;
         }
       }
-    }
-
-    if (!fromOid) {
-      const defaultBase = resolveDefaultBaseCommit(repoRoot, remoteName, update.localRef);
+    } else {
+      const defaultBase = resolveDefaultBaseCommit(repoRoot, remoteName, {
+        localRef: update.localRef,
+        remoteRef: update.remoteRef,
+        allowLocalHeads: !isHookStdinMode,
+      });
       if (defaultBase) {
-        fromOid = getMergeBase(repoRoot, defaultBase, localCommit);
-      }
-      if (!fromOid) {
+        const mb = getMergeBase(repoRoot, defaultBase, localCommit);
+        if (mb) {
+          fromOid = mb;
+        } else {
+          if (shallowChecked === null) {
+            shallowChecked = isShallowRepository(repoRoot);
+          }
+          if (shallowChecked) {
+            fromOid = defaultBase;
+          } else {
+            emptyTreeOid = emptyTreeOid || getEmptyTreeOid(repoRoot);
+            fromOid = emptyTreeOid;
+          }
+        }
+      } else {
         emptyTreeOid = emptyTreeOid || getEmptyTreeOid(repoRoot);
         fromOid = emptyTreeOid;
       }
@@ -345,7 +430,9 @@ function computePrePushDiff(repoRoot, options = {}) {
       'diff',
       '--no-ext-diff',
       '--no-color',
-      `${fromOid}..${localCommit}`,
+      fromOid,
+      localCommit,
+      '--',
     ]);
     if (diffRes.status !== 0) {
       throw new Error(
@@ -361,6 +448,7 @@ function computePrePushDiff(repoRoot, options = {}) {
 }
 
 function prepareSecureReviewDir(workDir) {
+  assertSafeOutputTarget(path.join(workDir, '.dir-probe'));
   if (fs.existsSync(workDir) && fs.lstatSync(workDir).isSymbolicLink()) {
     throw new Error(`Refusing symlinked REVIEW_DIR: ${workDir}`);
   }
@@ -398,14 +486,20 @@ function buildHookScript() {
     '  if [ -d "$NVM_BASE" ]; then',
     '    if [ -f "$REPO_ROOT/.node-version" ]; then',
     '      WANT_VER="$(tr -d \'[:space:]\' < "$REPO_ROOT/.node-version")"',
-    '      for cand in "$NVM_BASE/v$WANT_VER"*/bin/node; do',
-    '        if [ -x "$cand" ]; then',
-    '          NODE_BIN="$cand"',
-    '        fi',
-    '      done',
+    '      WANT_VER="${WANT_VER#v}"',
+    '      WANT_VER="${WANT_VER#V}"',
+    '      if [ -n "$WANT_VER" ]; then',
+    '        for ver in $(cd "$NVM_BASE" 2>/dev/null && ls -1d "v$WANT_VER"* 2>/dev/null | sed \'s/^v//\' | sort -t. -k1,1n -k2,2n -k3,3n); do',
+    '          cand="$NVM_BASE/v$ver/bin/node"',
+    '          if [ -x "$cand" ]; then',
+    '            NODE_BIN="$cand"',
+    '          fi',
+    '        done',
+    '      fi',
     '    fi',
     '    if [ -z "$NODE_BIN" ]; then',
-    '      for cand in "$NVM_BASE"/v*/bin/node; do',
+    '      for ver in $(cd "$NVM_BASE" 2>/dev/null && ls -1d v* 2>/dev/null | sed \'s/^v//\' | sort -t. -k1,1n -k2,2n -k3,3n); do',
+    '        cand="$NVM_BASE/v$ver/bin/node"',
     '        if [ -x "$cand" ]; then',
     '          NODE_BIN="$cand"',
     '        fi',
@@ -482,27 +576,52 @@ function installPrePushHook(repoRoot, options = {}) {
   return { hookPath, backupPath };
 }
 
+function writeDiffAtomically(diffPath, diffContent) {
+  const { resolved, dir } = assertSafeOutputTarget(diffPath);
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const rand = crypto.randomBytes(6).toString('hex');
+  const tmpPath = path.join(
+    dir,
+    `.${path.basename(resolved)}.${process.pid}.${Date.now()}.${rand}.tmp`
+  );
+  try {
+    fs.writeFileSync(tmpPath, diffContent, { encoding: 'utf8', mode: 0o600 });
+    if (process.platform !== 'win32') {
+      fs.chmodSync(tmpPath, 0o600);
+    }
+    fs.renameSync(tmpPath, resolved);
+  } catch (err) {
+    try {
+      if (fs.existsSync(tmpPath)) {
+        fs.unlinkSync(tmpPath);
+      }
+    } catch (_) {}
+    throw err;
+  }
+}
+
 async function runPrePushReview(options = {}) {
   const env = options.env || process.env;
-  const repoRoot = resolveRepoRoot(options.repoRoot || process.cwd());
+  const repoRoot = resolveRepoRoot(
+    options.repoRoot || process.cwd(),
+    options.repoRoot ? null : options.fallbackRepoRoot || null
+  );
   const workDir = options.reviewDir || defaultReviewDir(env);
   prepareSecureReviewDir(workDir);
 
   const diffPath =
     options.diffPath ||
     (env && env.REVIEW_DIFF_PATH && env.REVIEW_DIFF_PATH.trim()) ||
-    path.join(workDir, 'pr26.diff');
+    path.join(workDir, 'pre-push.diff');
   const outputPath =
     options.outputPath ||
     (env && env.REVIEW_OUTPUT_PATH && env.REVIEW_OUTPUT_PATH.trim()) ||
-    path.join(workDir, 'review_result.json');
+    path.join(workDir, 'pre-push-review_result.json');
   const pipelineLockTarget = path.join(workDir, '.pre-push-pipeline');
 
   return withOutputLock(pipelineLockTarget, async () => {
     for (const artifactPath of [diffPath, outputPath]) {
-      if (fs.existsSync(artifactPath) && fs.lstatSync(artifactPath).isSymbolicLink()) {
-        throw new Error(`Refusing symlinked review artifact path: ${artifactPath}`);
-      }
+      assertSafeOutputTarget(artifactPath);
     }
 
     const diffContent = computePrePushDiff(repoRoot, {
@@ -511,12 +630,7 @@ async function runPrePushReview(options = {}) {
       range: options.range,
     });
 
-    const diffDir = path.dirname(diffPath);
-    if (fs.existsSync(diffDir) && fs.lstatSync(diffDir).isSymbolicLink()) {
-      throw new Error(`Refusing symlinked diff directory: ${diffDir}`);
-    }
-    fs.mkdirSync(diffDir, { recursive: true, mode: 0o700 });
-    fs.writeFileSync(diffPath, diffContent, { encoding: 'utf8', mode: 0o600 });
+    writeDiffAtomically(diffPath, diffContent);
 
     const result = await runReview({
       diffPath,
@@ -524,7 +638,6 @@ async function runPrePushReview(options = {}) {
       models: options.models,
       timeoutMs: options.timeoutMs,
       maxDiffChars: options.maxDiffChars,
-      staticOnly: Boolean(options.staticOnly),
       agyBin: options.agyBin,
       settingsPaths: options.settingsPaths,
       env,
@@ -561,16 +674,21 @@ async function runCli(argv = process.argv.slice(2), env = process.env, io = {}) 
 
   if (opts.help) {
     console.log(
-      'Usage: node scripts/pre-push-review.js [remote-name] [remote-url] [--install-hook] [--force] [--range <rev-range>] [--static-only]'
+      'Usage: node scripts/pre-push-review.js [remote-name] [remote-url] [--install-hook] [--force] [--range <rev-range>]'
     );
     return 0;
   }
 
-  const repoRoot = io.repoRoot || process.cwd();
+  const explicitRepoRoot = io.repoRoot || undefined;
+  const fallbackRepoRoot = explicitRepoRoot ? null : path.resolve(__dirname, '..');
 
   if (opts.installHook) {
     try {
-      const { hookPath, backupPath } = installPrePushHook(repoRoot, {
+      const targetRoot = resolveRepoRoot(
+        explicitRepoRoot || process.cwd(),
+        fallbackRepoRoot
+      );
+      const { hookPath, backupPath } = installPrePushHook(targetRoot, {
         force: opts.force,
       });
       console.log(`Installed Trimurti pre-push AI review hook at ${hookPath}`);
@@ -585,18 +703,31 @@ async function runCli(argv = process.argv.slice(2), env = process.env, io = {}) 
   }
 
   const isTty = io.isTTY !== undefined ? Boolean(io.isTTY) : Boolean(process.stdin.isTTY);
-  const stdinText =
-    opts.range
-      ? undefined
-      : io.stdinText !== undefined
-      ? io.stdinText
-      : !isTty
-      ? readAllStdinSync()
-      : undefined;
+  let stdinText;
+  if (opts.range) {
+    stdinText = undefined;
+  } else if (io.stdinText !== undefined) {
+    stdinText = io.stdinText;
+  } else if (!isTty) {
+    const rawStdin = readAllStdinSync();
+    if (rawStdin.trim() !== '') {
+      stdinText = rawStdin;
+    } else if (opts.positionalCount === 2) {
+      // Invoked by `git push` as `.git/hooks/pre-push <remote-name> <remote-url>`
+      // with zero ref updates on stdin (up-to-date push).
+      stdinText = '';
+    } else {
+      // Invoked as a manual/script CLI check in a non-TTY subshell without `--range`.
+      stdinText = undefined;
+    }
+  } else {
+    stdinText = undefined;
+  }
 
   try {
     const res = await runPrePushReview({
-      repoRoot,
+      repoRoot: explicitRepoRoot,
+      fallbackRepoRoot,
       remoteName: opts.remoteName,
       stdinText,
       range: opts.range,
@@ -604,7 +735,6 @@ async function runCli(argv = process.argv.slice(2), env = process.env, io = {}) 
       models: opts.models,
       timeoutMs: opts.timeoutMs,
       maxDiffChars: opts.maxDiffChars,
-      staticOnly: opts.staticOnly,
       env,
     });
 

@@ -1,31 +1,47 @@
 name: AI Reviewer Pipeline
 
+# Public repository safety & included-allowance gate:
+# - kapoorgalleries/metaplex is public (`private: false`), so `pull_request` /
+#   `pull_request_target` triggers are intentionally omitted: untrusted fork PRs
+#   must never execute code on a `self-hosted` runner, and GitHub-hosted
+#   `ubuntu-latest` runners do not carry `agy` or personal OAuth credentials
+#   (paid `GEMINI_API_KEY` and mock/static verdict fallbacks are strictly forbidden).
+# - Triggering via `workflow_dispatch` restricts execution to write+ collaborators,
+#   checks out only the trusted workflow branch (`scripts/reviewer.js`), and fetches
+#   `refs/pull/<pr_number>/head` as inert git objects without checking out PR code.
 on:
-  pull_request:
-    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "Pull request number to review (fetches refs/pull/<n>/head diff without checking out untrusted PR code)"
+        required: false
+        type: string
+      base_ref:
+        description: "Base branch or commit SHA"
+        required: false
+        default: "master"
+        type: string
+      head_ref:
+        description: "Head ref or commit SHA when pr_number is omitted"
+        required: false
+        default: "HEAD"
+        type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: ai-reviewer-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: ai-reviewer-${{ github.workflow }}-${{ inputs.pr_number || github.ref }}
   cancel-in-progress: true
 
 jobs:
   report_verdict:
     name: Run AI Reviewer
-    # Local workstation inspection (2026-11-16) confirmed no self-hosted GitHub
-    # Actions runner is installed (and service changes are held per user_rules).
-    # Full included-allowance `agy` LLM review runs as a fail-closed local
-    # pre-push gate (`scripts/pre-push-review.js` / `.git/hooks/pre-push`), while
-    # GitHub-hosted `ubuntu-latest` runs `scripts/test-reviewer.js` + deterministic
-    # full-diff static security review (`--static-only`).
-    # If a self-hosted runner with `agy` and included-allowance OAuth is later
-    # authorized, setting repository variable `AI_REVIEWER_RUNNER=self-hosted`
-    # restricts execution to same-repo PRs and enforces full fail-closed `agy` review.
-    if: (vars.AI_REVIEWER_RUNNER || 'ubuntu-latest') == 'ubuntu-latest' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: ${{ vars.AI_REVIEWER_RUNNER || 'ubuntu-latest' }}
-    timeout-minutes: 10
+    # Defaults to `ubuntu-latest` until a runner with `agy` and included-allowance
+    # OAuth is explicitly authorized via repository variable `AI_REVIEWER_RUNS_ON`
+    # (supports either a JSON array like `["self-hosted","linux","trimurti"]` or a single label).
+    runs-on: ${{ (startsWith(vars.AI_REVIEWER_RUNS_ON, '[') && fromJSON(vars.AI_REVIEWER_RUNS_ON)) || vars.AI_REVIEWER_RUNS_ON || 'ubuntu-latest' }}
+    timeout-minutes: 12
     env:
       REVIEW_DIR: /tmp/gemini
     outputs:
@@ -45,8 +61,6 @@ jobs:
           node-version-file: .node-version
 
       - name: Prepare environment and prerequisites
-        env:
-          AI_REVIEWER_REQUIRE_AGY: ${{ vars.AI_REVIEWER_REQUIRE_AGY }}
         run: |
           set -euo pipefail
           node --version
@@ -71,7 +85,7 @@ jobs:
             rm -f "$target_file"
           done
 
-          for cand_dir in "$HOME/.local/bin" "$HOME/.local/share/agy-native"; do
+          for cand_dir in "$HOME/.local/share/agy-native" "$HOME/.local/bin"; do
             if [ -d "$cand_dir" ]; then
               export PATH="$cand_dir:$PATH"
               if [ -n "${GITHUB_PATH:-}" ]; then
@@ -80,12 +94,12 @@ jobs:
             fi
           done
 
-          if command -v agy >/dev/null 2>&1; then
+          if [ -n "${REVIEWER_AGY_BIN:-}" ] && [ -x "${REVIEWER_AGY_BIN}" ]; then
+            echo "Found configured REVIEWER_AGY_BIN at ${REVIEWER_AGY_BIN}"
+          elif [ -n "${AGY_BIN:-}" ] && [ -x "${AGY_BIN}" ]; then
+            echo "Found configured AGY_BIN at ${AGY_BIN}"
+          elif command -v agy >/dev/null 2>&1; then
             echo "Found agy CLI binary at $(command -v agy)"
-          elif [ "${GITHUB_ACTIONS:-}" = "true" ] && \
-               [ "${RUNNER_ENVIRONMENT:-}" = "github-hosted" ] && \
-               [ "${AI_REVIEWER_REQUIRE_AGY:-}" != "1" ]; then
-            echo "::notice::agy CLI binary is not installed on this GitHub-hosted runner; CI will enforce deterministic static security checks (--static-only) while full included-allowance agy LLM review runs in the local pre-push gate (scripts/pre-push-review.js)."
           else
             echo "::warning::agy CLI binary is not in PATH; non-empty diffs will fail closed per kg-trimurti-review."
           fi
@@ -96,9 +110,11 @@ jobs:
       # --- Stage 2: prepare_diff ---
       - name: Generate pull request diff
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          BASE_REF: ${{ github.base_ref }}
+          PR_NUMBER: ${{ inputs.pr_number || '' }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || '' }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || '' }}
+          BASE_REF: ${{ inputs.base_ref || github.base_ref || '' }}
+          HEAD_REF: ${{ inputs.head_ref || '' }}
         run: |
           set -euo pipefail
           WORK_DIR="${REVIEW_DIR:-/tmp/gemini}"
@@ -112,6 +128,7 @@ jobs:
             exit 1
           fi
           chmod 700 "$WORK_DIR"
+          umask 077
           DIFF_PATH="$WORK_DIR/pr26.diff"
           RESULT_PATH="$WORK_DIR/review_result.json"
           for target_file in "$DIFF_PATH" "$RESULT_PATH"; do
@@ -122,20 +139,64 @@ jobs:
             rm -f "$target_file"
           done
 
-          if [ -n "${BASE_SHA:-}" ] && [ -n "${HEAD_SHA:-}" ] && \
-             git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null && \
-             git cat-file -e "${HEAD_SHA}^{commit}" 2>/dev/null; then
-            git diff --no-ext-diff --no-color "${BASE_SHA}...${HEAD_SHA}" > "$DIFF_PATH"
-          else
-            REF_TARGET="${BASE_REF:-}"
-            if [ -z "$REF_TARGET" ]; then
-              if git rev-parse --verify --quiet origin/main >/dev/null 2>&1; then
-                REF_TARGET="main"
-              else
-                REF_TARGET="master"
+          resolve_base_target() {
+            local candidate="${1:-}"
+            if [ -n "$candidate" ]; then
+              case "$candidate" in
+                -*|*..*|*[[:space:]]*)
+                  echo "::error::Invalid BASE_REF value: $candidate" >&2
+                  exit 1
+                  ;;
+              esac
+              if git rev-parse --verify --quiet "origin/${candidate}^{commit}" >/dev/null 2>&1; then
+                printf 'origin/%s' "$candidate"
+                return
               fi
+              if git rev-parse --verify --quiet "${candidate}^{commit}" >/dev/null 2>&1; then
+                printf '%s' "$candidate"
+                return
+              fi
+              printf 'origin/%s' "$candidate"
+              return
             fi
-            git diff --no-ext-diff --no-color "origin/${REF_TARGET}...HEAD" > "$DIFF_PATH"
+            if git rev-parse --verify --quiet origin/main >/dev/null 2>&1; then
+              printf 'origin/main'
+            else
+              printf 'origin/master'
+            fi
+          }
+
+          if [ -n "${PR_NUMBER:-}" ]; then
+            if ! printf '%s' "$PR_NUMBER" | grep -Eq '^[1-9][0-9]*$'; then
+              echo "::error::Invalid pr_number '${PR_NUMBER}' (expected positive integer)"
+              exit 1
+            fi
+            PR_TRACKING_REF="refs/remotes/origin/pr/${PR_NUMBER}"
+            # Fetch only git objects for refs/pull/<n>/head; never check out untrusted PR files.
+            git fetch --no-tags origin "+refs/pull/${PR_NUMBER}/head:${PR_TRACKING_REF}"
+            START_REF="$(resolve_base_target "${BASE_REF:-}")"
+            git diff --no-ext-diff --no-color "${START_REF}...${PR_TRACKING_REF}" -- > "$DIFF_PATH"
+          elif [ -n "${BASE_SHA:-}" ] && [ -n "${HEAD_SHA:-}" ] && \
+               git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null && \
+               git cat-file -e "${HEAD_SHA}^{commit}" 2>/dev/null; then
+            git diff --no-ext-diff --no-color "${BASE_SHA}...${HEAD_SHA}" -- > "$DIFF_PATH"
+          else
+            START_REF="$(resolve_base_target "${BASE_REF:-}")"
+            END_CANDIDATE="${HEAD_REF:-HEAD}"
+            case "$END_CANDIDATE" in
+              -*|*..*|*[[:space:]]*)
+                echo "::error::Invalid HEAD_REF value: $END_CANDIDATE"
+                exit 1
+                ;;
+            esac
+            if git rev-parse --verify --quiet "${END_CANDIDATE}^{commit}" >/dev/null 2>&1; then
+              END_REF="$END_CANDIDATE"
+            elif git rev-parse --verify --quiet "origin/${END_CANDIDATE}^{commit}" >/dev/null 2>&1; then
+              END_REF="origin/${END_CANDIDATE}"
+            else
+              END_REF="$END_CANDIDATE"
+            fi
+            git diff --no-ext-diff --no-color "${START_REF}...${END_REF}" -- > "$DIFF_PATH"
           fi
           echo "Generated PR diff at $DIFF_PATH ($(wc -c < "$DIFF_PATH") bytes)"
 
@@ -143,26 +204,10 @@ jobs:
       - name: Run Trimurti AI Reviewer
         id: run_reviewer
         continue-on-error: true
-        env:
-          AI_REVIEWER_REQUIRE_AGY: ${{ vars.AI_REVIEWER_REQUIRE_AGY }}
         run: |
           set -euo pipefail
           WORK_DIR="${REVIEW_DIR:-/tmp/gemini}"
-          HAS_AGY=0
-          if command -v agy >/dev/null 2>&1 || \
-             [ -x "$HOME/.local/bin/agy" ] || \
-             [ -x "$HOME/.local/share/agy-native/agy" ]; then
-            HAS_AGY=1
-          fi
-          if [ "$HAS_AGY" -eq 1 ] || \
-             [ "${GITHUB_ACTIONS:-}" != "true" ] || \
-             [ "${RUNNER_ENVIRONMENT:-}" != "github-hosted" ] || \
-             [ "${AI_REVIEWER_REQUIRE_AGY:-}" = "1" ]; then
-            node scripts/reviewer.js "$WORK_DIR/pr26.diff" "$WORK_DIR/review_result.json"
-          else
-            echo "Running deterministic static security review (--static-only) on GitHub-hosted runner..."
-            node scripts/reviewer.js --static-only "$WORK_DIR/pr26.diff" "$WORK_DIR/review_result.json"
-          fi
+          node scripts/reviewer.js "$WORK_DIR/pr26.diff" "$WORK_DIR/review_result.json"
 
       # --- Component 4: Artifact Retention ---
       - name: Upload review verdict artifact
@@ -170,7 +215,7 @@ jobs:
         uses: actions/upload-artifact@v6
         with:
           name: ai-review-verdict
-          path: /tmp/gemini/review_result.json
+          path: ${{ env.REVIEW_DIR }}/review_result.json
           retention-days: 30
           if-no-files-found: ignore
 
@@ -215,7 +260,7 @@ jobs:
                 if (fs.lstatSync(resultPath).isSymbolicLink()) {
                   throw new Error("Refusing symlinked review_result.json");
                 }
-                data = JSON.parse(fs.readFileSync(resultPath, "utf8"));
+                data = JSON.parse(fs.readFileSync(resultPath, "utf8").replace(/^\uFEFF/, ""));
               } catch (err) {
                 parseErr = err;
               }
@@ -354,9 +399,9 @@ jobs:
           EMAIL_API_KEY: ${{ secrets.EMAIL_API_KEY }}
           EMAIL_TO: ${{ secrets.EMAIL_TO || vars.EMAIL_TO || 'sanjay@kapoors.com' }}
           EMAIL_FROM: ${{ secrets.EMAIL_FROM || vars.EMAIL_FROM || 'info@kapoors.com' }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          PR_URL: ${{ github.event.pull_request.html_url }}
-          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number || '' }}
+          PR_URL: ${{ github.event.pull_request.html_url || (inputs.pr_number && format('{0}/{1}/pull/{2}', github.server_url, github.repository, inputs.pr_number)) || '' }}
+          PR_TITLE: ${{ github.event.pull_request.title || '' }}
           REPO_FULL_NAME: ${{ github.repository }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           REVIEW_VERDICT: ${{ needs.report_verdict.outputs.verdict }}
