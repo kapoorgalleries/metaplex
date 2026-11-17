@@ -418,6 +418,8 @@ function runBashAsync(script, env, cwd) {
 }
 
 async function main() {
+  // Workflow steps load scripts/ai-review-sanitize.js relative to the workspace root.
+  process.chdir(REPO_ROOT);
   const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'test-reviewer-'));
   const authHome = createAuthHome(tmpRoot, 'hermetic-home');
 
@@ -519,8 +521,9 @@ async function main() {
       assert.strictEqual(opts.timeoutMs, DEFAULT_TIMEOUT_MS);
       assert.strictEqual(opts.maxDiffChars, DEFAULT_MAX_DIFF_CHARS);
       if (process.platform !== 'win32') {
-        assert.strictEqual(opts.diffPath, '/tmp/gemini/pr26.diff');
-        assert.strictEqual(opts.outputPath, '/tmp/gemini/review_result.json');
+        const perUserDir = `/tmp/gemini-${process.getuid()}`;
+        assert.strictEqual(opts.diffPath, `${perUserDir}/pr26.diff`);
+        assert.strictEqual(opts.outputPath, `${perUserDir}/review_result.json`);
       }
 
       const opts2 = parseArgs(['/tmp/a.diff', '--model', 'gemini-4-argon-high'], {});
@@ -1587,13 +1590,12 @@ async function main() {
       );
       assert.ok(!workflowText.includes('yourcompany.com'));
       assert.ok(!workflowText.includes('example.com'));
-      assert.ok(workflowText.includes('sanjay@kapoors.com'));
-      assert.ok(workflowText.includes('info@kapoors.com'));
-      assert.ok(workflowText.includes('REVIEW_DIR: /tmp/gemini'));
+      assert.ok(!workflowText.includes('kapoors.com'), 'Personal addresses must live in repo vars/secrets');
+      assert.ok(!/^\s+REVIEW_DIR: \/tmp\/gemini\s*$/m.test(workflowText), 'REVIEW_DIR must not be a shared /tmp/gemini');
       assert.ok(workflowText.includes('continue-on-error: true'));
-      assert.ok(workflowText.includes('uses: actions/checkout@v5'));
-      assert.ok(workflowText.includes('uses: actions/setup-node@v7'));
-      assert.ok(workflowText.includes('uses: actions/upload-artifact@v6'));
+      assert.ok(/uses: actions\/checkout@[0-9a-f]{40} # v5/.test(workflowText));
+      assert.ok(/uses: actions\/setup-node@[0-9a-f]{40} # v7/.test(workflowText));
+      assert.ok(/uses: actions\/upload-artifact@[0-9a-f]{40} # v6/.test(workflowText));
       assert.ok(workflowText.includes('node scripts/test-reviewer.js'));
       assert.ok(workflowText.includes('node scripts/reviewer.js'));
       assert.ok(workflowText.includes('needs: [report_verdict]'));
@@ -2034,6 +2036,8 @@ async function main() {
             TRIMURTI_WEBHOOK_URL: `https://127.0.0.1:${port}/trimurti`,
             SLACK_WEBHOOK_URL: `https://127.0.0.1:${port}/slack`,
             EMAIL_API_KEY: 'test-sendgrid-token-value',
+            EMAIL_TO: 'ops@example.test',
+            EMAIL_FROM: 'ci@example.test',
             SENDGRID_API_URL: `https://127.0.0.1:${port}/v3/mail/send`,
             PR_NUMBER: '26',
             PR_URL: 'https://github.com/kapoorgalleries/metaplex/pull/26',

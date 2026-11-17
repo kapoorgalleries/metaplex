@@ -11,14 +11,22 @@
 //      computes the unified diff for all pushed refs into `$REVIEW_DIR/pre-push.diff`
 //      and runs `scripts/reviewer.js` -> `$REVIEW_DIR/pre-push-review_result.json`
 //      (never clobbering `/tmp/gemini/pr26.diff` unless `REVIEW_DIFF_PATH` is set).
-//      Exits 0 on `APPROVE`; exits 1 (blocking push) on `REQUEST_CHANGES` or
-//      any fail-closed `agy` / OAuth / 5%-quota-reserve / permission / schema error.
+//      Exits 0 on `APPROVE`; exits 1 (blocking push) on `REQUEST_CHANGES`, static
+//      security findings, permission / tool-use / schema violations, or any unexpected
+//      internal error. When the reviewer itself is unavailable (missing `agy`, auth,
+//      network, 429/quota, timeout) the hook warns and ALLOWS the push so an outage
+//      cannot lock out every push; set `REVIEWER_FAIL_CLOSED=1` to block instead.
+//      `REVIEWER_SKIP=1` bypasses the gate for one push, and `REVIEWER_OFFLINE=1`
+//      skips the review without contacting `agy`. The advisory gate is never a required check.
 //   2. Manual CLI check (when stdin is a TTY or `--range <rev-range>` is given):
 //      diffs the current branch against `origin/master` (or `origin/main`) and
 //      runs the same review pipeline.
 //   3. Hook installer (`node scripts/pre-push-review.js --install-hook`):
 //      installs `.git/hooks/pre-push` safely (refusing symlinks and backing up
-//      unmanaged hooks before `--force` replacement).
+//      unmanaged hooks before `--force` replacement) and pins a copy of this script and
+//      `reviewer.js` in `<hooks dir>/.trimurti-review/`, outside the working tree, so
+//      the hook never executes a branch's own (possibly modified or absent) copy. Branches
+//      that lack the scripts are warned about and allowed.
 
 'use strict';
 
@@ -30,14 +38,21 @@ const tty = require('tty');
 const { spawnSync } = require('child_process');
 
 const {
+  POSIX_DEFAULT_REVIEW_DIR,
+  REVIEW_LOCK_TIMEOUT_CODE,
   assertAllowedReviewerModel,
   assertSafeOutputTarget,
+  classifyReviewerUnavailable,
   resolveEffectiveTimeoutMs,
   runReview,
+  sanitizeLogText,
+  staticSecurityReview,
   withOutputLock,
 } = require('./reviewer');
 
 const MANAGED_HOOK_MARKER = '# Managed by scripts/pre-push-review.js';
+const PINNED_DIR_NAME = '.trimurti-review';
+const PINNED_SCRIPT_NAMES = Object.freeze(['pre-push-review.js', 'reviewer.js']);
 const GIT_MAX_BUFFER = 64 * 1024 * 1024;
 const HEX_OID_RE = /^[0-9a-f]{40,64}$/i;
 const ZERO_OID_RE = /^0+$/;
@@ -49,7 +64,12 @@ function defaultReviewDir(env = process.env, platform = process.platform) {
   if (platform === 'win32') {
     return path.join(os.tmpdir(), 'gemini');
   }
-  return '/tmp/gemini';
+  return POSIX_DEFAULT_REVIEW_DIR;
+}
+
+function isTruthyEnvFlag(env, name) {
+  const raw = env && typeof env[name] === 'string' ? env[name].trim().toLowerCase() : '';
+  return raw === '1' || raw === 'true' || raw === 'yes' || raw === 'on';
 }
 
 function parsePrePushArgs(argv = process.argv.slice(2)) {
@@ -598,13 +618,30 @@ function prepareSecureReviewDir(workDir) {
 function buildHookScript() {
   return [
     '#!/bin/sh',
-    `${MANAGED_HOOK_MARKER} — Trimurti local pre-push AI review gate.`,
+    `${MANAGED_HOOK_MARKER} - Trimurti local pre-push AI review gate (advisory).`,
     'set -eu',
     '',
+    'warn_allow() {',
+    '  echo "Trimurti pre-push AI review SKIPPED, push allowed: $1" >&2',
+    '  exit 0',
+    '}',
+    '',
+    'case "${REVIEWER_SKIP:-}" in',
+    '  1|true|TRUE|True|yes|YES|Yes|on|ON|On) warn_allow "REVIEWER_SKIP is set." ;;',
+    'esac',
+    '',
+    'HOOK_DIR="$(cd "$(dirname "$0")" && pwd)"',
+    `PINNED_DIR="$HOOK_DIR/${PINNED_DIR_NAME}"`,
     'REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"',
-    'if [ -z "$REPO_ROOT" ] || [ ! -f "$REPO_ROOT/scripts/pre-push-review.js" ]; then',
-    '  echo "Trimurti pre-push AI review failed closed: scripts/pre-push-review.js not found." >&2',
-    '  exit 1',
+    '',
+    'SCRIPT=""',
+    'if [ -f "$PINNED_DIR/pre-push-review.js" ] && [ -f "$PINNED_DIR/reviewer.js" ]; then',
+    '  SCRIPT="$PINNED_DIR/pre-push-review.js"',
+    'elif [ -n "$REPO_ROOT" ] && [ -f "$REPO_ROOT/scripts/pre-push-review.js" ] && [ -f "$REPO_ROOT/scripts/reviewer.js" ]; then',
+    '  echo "Trimurti pre-push AI review: pinned copy missing; using this checkout\'s scripts. Re-run: node scripts/pre-push-review.js --install-hook" >&2',
+    '  SCRIPT="$REPO_ROOT/scripts/pre-push-review.js"',
+    'else',
+    '  warn_allow "reviewer scripts not found (this branch predates them). Re-run node scripts/pre-push-review.js --install-hook from a branch that has them."',
     'fi',
     '',
     'NODE_BIN=""',
@@ -613,7 +650,7 @@ function buildHookScript() {
     'else',
     '  NVM_BASE="${NVM_DIR:-$HOME/.nvm}/versions/node"',
     '  if [ -d "$NVM_BASE" ]; then',
-    '    if [ -f "$REPO_ROOT/.node-version" ]; then',
+    '    if [ -n "$REPO_ROOT" ] && [ -f "$REPO_ROOT/.node-version" ]; then',
     '      WANT_VER="$(tr -d \'[:space:]\' < "$REPO_ROOT/.node-version")"',
     '      WANT_VER="${WANT_VER#v}"',
     '      WANT_VER="${WANT_VER#V}"',
@@ -653,14 +690,58 @@ function buildHookScript() {
     'fi',
     '',
     'if [ -z "$NODE_BIN" ]; then',
-    '  echo "Trimurti pre-push AI review failed closed: node executable not found in PATH or NVM." >&2',
-    '  exit 1',
+    '  warn_allow "node executable not found in PATH or NVM."',
     'fi',
     '',
     'export PATH="$(dirname "$NODE_BIN"):$PATH"',
-    'exec "$NODE_BIN" "$REPO_ROOT/scripts/pre-push-review.js" "$@"',
+    'exec "$NODE_BIN" "$SCRIPT" "$@"',
     '',
   ].join('\n');
+}
+
+function writeFileAtomically(targetPath, content, mode) {
+  const tmpPath = path.join(
+    path.dirname(targetPath),
+    `.${path.basename(targetPath)}.${process.pid}.${crypto.randomBytes(4).toString('hex')}.tmp`
+  );
+  try {
+    fs.writeFileSync(tmpPath, content, { mode });
+    if (process.platform !== 'win32') {
+      fs.chmodSync(tmpPath, mode);
+    }
+    fs.renameSync(tmpPath, targetPath);
+  } catch (err) {
+    try {
+      if (fs.existsSync(tmpPath)) {
+        fs.unlinkSync(tmpPath);
+      }
+    } catch (_) {}
+    throw err;
+  }
+}
+
+function installPinnedScripts(hooksDir, sourceDir) {
+  const pinnedDir = path.join(hooksDir, PINNED_DIR_NAME);
+  if (fs.existsSync(pinnedDir) && fs.lstatSync(pinnedDir).isSymbolicLink()) {
+    throw new Error(`Refusing symlinked pinned reviewer directory: ${pinnedDir}`);
+  }
+  const contents = PINNED_SCRIPT_NAMES.map((name) => {
+    const src = path.join(sourceDir, name);
+    const st = fs.lstatSync(src);
+    if (st.isSymbolicLink() || !st.isFile()) {
+      throw new Error(`Refusing to pin non-regular reviewer script: ${src}`);
+    }
+    return [name, fs.readFileSync(src)];
+  });
+  fs.mkdirSync(pinnedDir, { recursive: true, mode: 0o700 });
+  for (const [name, buf] of contents) {
+    const dst = path.join(pinnedDir, name);
+    if (fs.existsSync(dst) && fs.lstatSync(dst).isSymbolicLink()) {
+      throw new Error(`Refusing symlinked pinned reviewer script: ${dst}`);
+    }
+    writeFileAtomically(dst, buf, 0o444);
+  }
+  return pinnedDir;
 }
 
 function installPrePushHook(repoRoot, options = {}) {
@@ -699,6 +780,8 @@ function installPrePushHook(repoRoot, options = {}) {
     }
   }
 
+  const pinnedDir = installPinnedScripts(hooksDir, options.sourceDir || __dirname);
+
   const tmpHook = path.join(
     hooksDir,
     `.pre-push.${process.pid}.${crypto.randomBytes(4).toString('hex')}.tmp`
@@ -709,7 +792,7 @@ function installPrePushHook(repoRoot, options = {}) {
   }
   fs.renameSync(tmpHook, hookPath);
 
-  return { hookPath, backupPath };
+  return { hookPath, backupPath, pinnedDir };
 }
 
 function writeDiffAtomically(diffPath, diffContent) {
@@ -736,6 +819,35 @@ function writeDiffAtomically(diffPath, diffContent) {
   }
 }
 
+// Result for a push whose AI review could not run (reviewer unavailable, or the review lock
+// was never obtained). The deterministic local secret/conflict-marker floor needs no model
+// or lock, so it still blocks real findings; otherwise the push is allowed with a warning.
+function failOpenResult({ diffContent, reason, err, diffPath, outputPath }) {
+  const floor = staticSecurityReview(diffContent);
+  const diffBytes = Buffer.byteLength(diffContent, 'utf8');
+  if (floor.verdict !== 'APPROVE') {
+    return {
+      exitCode: 1,
+      verdict: floor.verdict,
+      summary: `${floor.summary} (reviewer unavailable: ${reason}; static security floor only)`,
+      issues: floor.issues,
+      diffBytes,
+      diffPath,
+      outputPath,
+    };
+  }
+  return {
+    exitCode: 0,
+    verdict: 'SKIPPED',
+    summary: `reviewer unavailable (${reason}): ${sanitizeLogText(err.message, 400)}`,
+    issues: [],
+    unavailableReason: reason,
+    diffBytes,
+    diffPath,
+    outputPath,
+  };
+}
+
 async function runPrePushReview(options = {}) {
   const env = options.env || process.env;
   const repoRoot = resolveRepoRoot(
@@ -755,47 +867,86 @@ async function runPrePushReview(options = {}) {
     path.join(workDir, 'pre-push-review_result.json');
   const pipelineLockTarget = path.join(workDir, '.pre-push-pipeline');
   const effectiveTimeoutMs = resolveEffectiveTimeoutMs(options.timeoutMs, env);
-  const pipelineLockTimeoutMs = Math.max(420000, effectiveTimeoutMs + 60000);
+  const MAX_HOOK_LOCK_WAIT_MS = 420000;
+  const defaultLockWaitMs = Math.max(MAX_HOOK_LOCK_WAIT_MS, effectiveTimeoutMs + 60000);
+  const pipelineLockTimeoutMs =
+    Number.isFinite(options.lockWaitMs) && options.lockWaitMs > 0
+      ? options.lockWaitMs
+      : options.failOpen
+        ? Math.min(defaultLockWaitMs, MAX_HOOK_LOCK_WAIT_MS)
+        : defaultLockWaitMs;
 
-  return withOutputLock(
-    pipelineLockTarget,
-    async () => {
-      for (const artifactPath of [diffPath, outputPath]) {
-        assertSafeOutputTarget(artifactPath);
-      }
+  const runLocked = () =>
+    withOutputLock(
+      pipelineLockTarget,
+      async () => {
+        for (const artifactPath of [diffPath, outputPath]) {
+          assertSafeOutputTarget(artifactPath);
+        }
 
-      const diffContent = computePrePushDiff(repoRoot, {
-        remoteName: options.remoteName,
-        stdinText: options.stdinText,
-        range: options.range,
-      });
+        const diffContent = computePrePushDiff(repoRoot, {
+          remoteName: options.remoteName,
+          stdinText: options.stdinText,
+          range: options.range,
+        });
 
-      writeDiffAtomically(diffPath, diffContent);
+        writeDiffAtomically(diffPath, diffContent);
 
-      const result = await runReview({
-        diffPath,
-        outputPath,
-        models: options.models,
-        timeoutMs: effectiveTimeoutMs,
-        maxDiffChars: options.maxDiffChars,
-        allowWslInterop: options.allowWslInterop,
-        agyBin: options.agyBin,
-        settingsPaths: options.settingsPaths,
-        env,
-      });
+        let result;
+        try {
+          result = await runReview({
+            diffPath,
+            outputPath,
+            models: options.models,
+            timeoutMs: effectiveTimeoutMs,
+            lockTimeoutMs: options.lockWaitMs,
+            maxDiffChars: options.maxDiffChars,
+            allowWslInterop: options.allowWslInterop,
+            agyBin: options.agyBin,
+            settingsPaths: options.settingsPaths,
+            env,
+          });
+        } catch (err) {
+          const reason = options.failOpen ? classifyReviewerUnavailable(err) : null;
+          if (!reason) {
+            throw err;
+          }
+          return failOpenResult({ diffContent, reason, err, diffPath, outputPath });
+        }
 
-      return {
-        exitCode: result.verdict === 'APPROVE' ? 0 : 1,
-        verdict: result.verdict,
-        summary: result.summary,
-        issues: result.issues,
-        diffBytes: Buffer.byteLength(diffContent, 'utf8'),
-        diffPath,
-        outputPath,
-      };
-    },
-    pipelineLockTimeoutMs
-  );
+        return {
+          exitCode: result.verdict === 'APPROVE' ? 0 : 1,
+          verdict: result.verdict,
+          summary: result.summary,
+          issues: result.issues,
+          diffBytes: Buffer.byteLength(diffContent, 'utf8'),
+          diffPath,
+          outputPath,
+        };
+      },
+      pipelineLockTimeoutMs
+    );
+
+  try {
+    return await runLocked();
+  } catch (err) {
+    if (!options.failOpen || !err || err.code !== REVIEW_LOCK_TIMEOUT_CODE) {
+      throw err;
+    }
+    // Another review held the lock past the wait limit. Never let that block a push.
+    const diffContent = computePrePushDiff(repoRoot, {
+      remoteName: options.remoteName,
+      stdinText: options.stdinText,
+      range: options.range,
+    });
+    return failOpenResult({
+      diffContent,
+      reason: 'lock-timeout',
+      err,
+      diffPath,
+      outputPath,
+    });
+  }
 }
 
 const MAX_STDIN_BYTES = 16 * 1024 * 1024;
@@ -894,10 +1045,11 @@ async function runCli(argv = process.argv.slice(2), env = process.env, io = {}) 
         explicitRepoRoot || process.cwd(),
         fallbackRepoRoot
       );
-      const { hookPath, backupPath } = installPrePushHook(targetRoot, {
+      const { hookPath, backupPath, pinnedDir } = installPrePushHook(targetRoot, {
         force: opts.force,
       });
       console.log(`Installed Trimurti pre-push AI review hook at ${hookPath}`);
+      console.log(`Pinned reviewer scripts at ${pinnedDir} (re-run --install-hook to update them)`);
       if (backupPath) {
         console.log(`Backed up previous pre-push hook to ${backupPath}`);
       }
@@ -906,6 +1058,17 @@ async function runCli(argv = process.argv.slice(2), env = process.env, io = {}) 
       console.error(`Error installing pre-push hook: ${err.message}`);
       return 1;
     }
+  }
+
+  if (isTruthyEnvFlag(env, 'REVIEWER_SKIP')) {
+    console.error('[Trimurti Pre-Push Review] SKIPPED, push allowed: REVIEWER_SKIP is set.');
+    return 0;
+  }
+  if (isTruthyEnvFlag(env, 'REVIEWER_OFFLINE')) {
+    console.error(
+      '[Trimurti Pre-Push Review] SKIPPED, push allowed: REVIEWER_OFFLINE is set (agy not contacted).'
+    );
+    return 0;
   }
 
   const isTty =
@@ -955,23 +1118,31 @@ async function runCli(argv = process.argv.slice(2), env = process.env, io = {}) 
       timeoutMs: opts.timeoutMs,
       maxDiffChars: opts.maxDiffChars,
       allowWslInterop: opts.allowWslInterop,
+      failOpen: !opts.range && stdinText !== undefined && !isTruthyEnvFlag(env, 'REVIEWER_FAIL_CLOSED'),
       env,
     });
+
+    if (res.verdict === 'SKIPPED') {
+      console.error(
+        `[Trimurti Pre-Push Review] WARNING: push allowed without AI review, ${res.summary}. Set REVIEWER_FAIL_CLOSED=1 to block instead.`
+      );
+      return 0;
+    }
 
     if (res.verdict === 'APPROVE') {
       console.error(`[Trimurti Pre-Push Review] APPROVE: ${res.summary}`);
       return 0;
     }
 
-    console.error(`[Trimurti Pre-Push Review] REQUEST_CHANGES: ${res.summary}`);
+    console.error(`[Trimurti Pre-Push Review] REQUEST_CHANGES: ${sanitizeLogText(res.summary)}`);
     for (const issue of res.issues) {
       const loc = issue.line ? `${issue.file}:${issue.line}` : issue.file;
-      console.error(`  - ${loc}: ${issue.message}`);
+      console.error(`  - ${sanitizeLogText(loc)}: ${sanitizeLogText(issue.message)}`);
     }
     console.error(`Saved review verdict artifact: ${res.outputPath}`);
     return 1;
   } catch (err) {
-    console.error(`[Trimurti Pre-Push Review] ERROR (fail-closed): ${err.message}`);
+    console.error(`[Trimurti Pre-Push Review] ERROR (fail-closed): ${sanitizeLogText(err.message)}`);
     return 1;
   }
 }
@@ -989,6 +1160,9 @@ if (require.main === module) {
 module.exports = {
   MANAGED_HOOK_MARKER,
   defaultReviewDir,
+  PINNED_DIR_NAME,
+  buildHookScript,
+  failOpenResult,
   parsePrePushArgs,
   parsePrePushStdin,
   computePrePushDiff,
