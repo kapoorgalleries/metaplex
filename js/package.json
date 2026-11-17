@@ -73,6 +73,15 @@
   },
   "resolutions": {
     "react": "17.0.2",
-    "react-dom": "17.0.2"
+    "react-dom": "17.0.2",
+    "@babel/traverse": "7.23.2",
+    "elliptic": "6.6.1",
+    "shell-quote": "1.11.0",
+    "underscore": "1.12.1",
+    "websocket-driver": "0.7.5",
+    "**/request/form-data": "2.5.4",
+    "**/react-dev-utils/loader-utils": "1.4.2",
+    "**/resolve-url-loader/loader-utils": "1.4.2",
+    "**/adjust-sourcemap-loader/loader-utils": "1.4.2"
   }
 }
