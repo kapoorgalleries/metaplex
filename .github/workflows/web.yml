@@ -17,6 +17,10 @@ on:
       - "js/**"
       - ".github/workflows/web.yml"
 
+# Checkout, install, test and build only; nothing here writes to the repository.
+permissions:
+  contents: read
+
 defaults:
   run:
     working-directory: ./js
