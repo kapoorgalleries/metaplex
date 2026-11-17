@@ -580,19 +580,29 @@ function resolveUserHome(env = process.env, platform = process.platform) {
   return (env && env.HOME) || os.homedir();
 }
 
-function defaultSettingsPaths(env = process.env, platform = process.platform) {
+function joinHomeSegments(homeBase, ...segments) {
+  const pathImpl = /^[A-Za-z]:[\\/]/.test(String(homeBase || '')) ? path.win32 : path;
+  return pathImpl.join(homeBase, ...segments);
+}
+
+function defaultSettingsPaths(env = process.env, platform = process.platform, sourceHome = null) {
+  const useProcessFallback = env === process.env && !sourceHome;
   const realHome = resolveUserHome(env, platform);
-  const candidates = [
-    path.join(os.homedir(), '.gemini', 'antigravity-cli', 'settings.json'),
-    path.join(os.homedir(), '.gemini', 'settings.json'),
-    path.join(os.homedir(), '.gemini', 'config', 'config.json'),
-    realHome ? path.join(realHome, '.gemini', 'antigravity-cli', 'settings.json') : null,
-    realHome ? path.join(realHome, '.gemini', 'settings.json') : null,
-    realHome ? path.join(realHome, '.gemini', 'config', 'config.json') : null,
-    '/mnt/c/Users/sanja/.gemini/antigravity-cli/settings.json',
-    '/mnt/c/Users/sanja/.gemini/settings.json',
-    '/mnt/c/Users/sanja/.gemini/config/config.json',
+  const homesToCheck = [
+    sourceHome,
+    realHome,
+    useProcessFallback ? os.homedir() : null,
+    useProcessFallback && platform !== 'win32' ? '/mnt/c/Users/sanja' : null,
   ].filter(Boolean);
+
+  const candidates = [];
+  for (const h of homesToCheck) {
+    candidates.push(
+      joinHomeSegments(h, '.gemini', 'antigravity-cli', 'settings.json'),
+      joinHomeSegments(h, '.gemini', 'settings.json'),
+      joinHomeSegments(h, '.gemini', 'config', 'config.json')
+    );
+  }
 
   return Array.from(new Set(candidates));
 }
@@ -652,6 +662,7 @@ function parseArgs(argv = process.argv.slice(2), env = process.env) {
   const positional = [];
   let endOfOptions = false;
   let help = false;
+  let allowWslInterop;
 
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -661,6 +672,10 @@ function parseArgs(argv = process.argv.slice(2), env = process.env) {
     }
     if (!endOfOptions && (arg === '--help' || arg === '-h')) {
       help = true;
+      continue;
+    }
+    if (!endOfOptions && arg === '--allow-wsl-interop') {
+      allowWslInterop = true;
       continue;
     }
     if (!endOfOptions && (arg === '--model' || arg.startsWith('--model='))) {
@@ -722,6 +737,7 @@ function parseArgs(argv = process.argv.slice(2), env = process.env) {
     explicitModels,
     timeoutMs,
     maxDiffChars,
+    allowWslInterop,
   };
 }
 
@@ -962,6 +978,7 @@ class AgyEnvelopeStatusError extends Error {
     if (options.toolAttempt) this.toolAttempt = true;
     if (options.authRequired) this.authRequired = true;
     if (options.quotaExhausted) this.quotaExhausted = true;
+    if (options.timedOut) this.timedOut = true;
   }
 }
 
@@ -1034,23 +1051,10 @@ function extractJsonObject(text, allowEnvelope = true) {
       return direct;
     }
     const coercedDirect = coerceLlmVerdictCandidate(direct);
-    if (isValidVerdict(coercedDirect)) {
+    if (isValidVerdict(coercedDirect, { rejectAdditionalKeys: true })) {
       return coercedDirect;
     }
   } catch (_) {}
-
-  if (!allowEnvelope) {
-    const fenceMatches = Array.from(trimmed.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi));
-    for (let idx = fenceMatches.length - 1; idx >= 0; idx--) {
-      try {
-        const parsed = JSON.parse(fenceMatches[idx][1].trim());
-        const coerced = coerceLlmVerdictCandidate(parsed);
-        if (isValidVerdict(coerced)) {
-          return coerced;
-        }
-      } catch (_) {}
-    }
-  }
 
   const topObjects = scanTopLevelJsonObjects(trimmed, {
     failOnTruncatedEnvelope: allowEnvelope,
@@ -1072,25 +1076,6 @@ function extractJsonObject(text, allowEnvelope = true) {
     }
   }
 
-  for (let idx = topObjects.length - 1; idx >= 0; idx--) {
-    const coerced = coerceLlmVerdictCandidate(topObjects[idx]);
-    if (isValidVerdict(coerced)) {
-      return coerced;
-    }
-  }
-
-  if (allowEnvelope) {
-    const fenceMatches = Array.from(trimmed.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi));
-    for (let idx = fenceMatches.length - 1; idx >= 0; idx--) {
-      try {
-        const parsed = coerceLlmVerdictCandidate(JSON.parse(fenceMatches[idx][1].trim()));
-        if (isValidVerdict(parsed)) {
-          return parsed;
-        }
-      } catch (_) {}
-    }
-  }
-
   throw new Error('Response did not contain a valid JSON verdict object');
 }
 
@@ -1103,10 +1088,14 @@ function unwrapAgyEnvelope(envelope) {
     hasNonEmptyEnvelopeError(envelope)
   ) {
     const detail = formatEnvelopeError(envelope);
+    const statusStr = typeof envelope.status === 'string' ? envelope.status.trim() : '';
     const msg = detail || `agy returned non-success status: ${String(envelope.status)}`;
     throw new AgyEnvelopeStatusError(msg, {
       authRequired: EXIT_AUTH_ERROR_PATTERN.test(msg),
       quotaExhausted: QUOTA_EXHAUSTED_ERROR_PATTERN.test(msg),
+      timedOut:
+        /^(?:TIMED_OUT|TIMEOUT)$/i.test(statusStr) ||
+        /\bprint[- ]timeout\b|\btimed?\s*out\b/i.test(msg),
     });
   }
 
@@ -1141,16 +1130,28 @@ function unwrapAgyEnvelope(envelope) {
     );
   }
 
-  if (envelope.structured_output !== undefined && envelope.structured_output !== null) {
+  if (envelope.structured_output !== undefined) {
+    if (envelope.structured_output === null) {
+      throw new Error(
+        'agy structured_output was null; refusing to scrape free-form prose response'
+      );
+    }
     const coercedStructured = coerceLlmVerdictCandidate(envelope.structured_output);
     return normalizeVerdict(coercedStructured, { rejectAdditionalKeys: true });
   }
 
   if (typeof envelope.response === 'string' && envelope.response.trim() !== '') {
-    const inner = coerceLlmVerdictCandidate(extractJsonObject(envelope.response, false));
-    if (isValidVerdict(inner)) {
-      return normalizeVerdict(inner);
+    const cleanedInner = stripTerminalSpinnerPrefixes(envelope.response);
+    let parsedInner;
+    try {
+      parsedInner = JSON.parse(cleanedInner);
+    } catch (_) {
+      throw new Error(
+        'agy envelope lacked structured_output and response was free-form prose rather than pure JSON'
+      );
     }
+    const coercedInner = coerceLlmVerdictCandidate(parsedInner);
+    return normalizeVerdict(coercedInner, { rejectAdditionalKeys: true });
   }
 
   throw new Error('Agy response field was empty (model may have attempted tool calls)');
@@ -1165,21 +1166,19 @@ function parseAgyStdout(stdoutData) {
     throw new Error('Response was empty');
   }
 
-  let wholeWasEnvelope = false;
+  let wholeParsedOk = false;
+  let wholeObj = null;
   try {
-    const whole = JSON.parse(cleaned);
-    if (isAgyEnvelope(whole)) {
-      wholeWasEnvelope = true;
-      return unwrapAgyEnvelope(whole);
+    wholeObj = JSON.parse(cleaned);
+    wholeParsedOk = true;
+  } catch (_) {}
+
+  if (wholeParsedOk) {
+    if (isAgyEnvelope(wholeObj)) {
+      return unwrapAgyEnvelope(wholeObj);
     }
-    const coercedWhole = coerceLlmVerdictCandidate(whole);
-    if (isValidVerdict(coercedWhole)) {
-      return normalizeVerdict(coercedWhole);
-    }
-  } catch (err) {
-    if (wholeWasEnvelope || err instanceof AgyEnvelopeStatusError) {
-      throw err;
-    }
+    const coercedWhole = coerceLlmVerdictCandidate(wholeObj);
+    return normalizeVerdict(coercedWhole, { rejectAdditionalKeys: true });
   }
 
   const topObjects = scanTopLevelJsonObjects(cleaned, {
@@ -1191,22 +1190,6 @@ function parseAgyStdout(stdoutData) {
     if (isAgyEnvelope(obj)) {
       return unwrapAgyEnvelope(obj);
     }
-  }
-
-  for (let idx = topObjects.length - 1; idx >= 0; idx--) {
-    const coercedObj = coerceLlmVerdictCandidate(topObjects[idx]);
-    if (isValidVerdict(coercedObj)) {
-      return normalizeVerdict(coercedObj);
-    }
-  }
-
-  const fallbackObj = extractJsonObject(cleaned, true);
-  if (isAgyEnvelope(fallbackObj)) {
-    return unwrapAgyEnvelope(fallbackObj);
-  }
-  const coercedFallback = coerceLlmVerdictCandidate(fallbackObj);
-  if (isValidVerdict(coercedFallback)) {
-    return normalizeVerdict(coercedFallback);
   }
 
   throw new Error('Response did not contain a valid JSON verdict object');
@@ -1423,10 +1406,12 @@ function inspectSettingsObjectForPaidApi(obj, settingsPath) {
   }
 }
 
-function verifyIncludedAllowanceSettings(settingsPaths, env = process.env) {
+function verifyIncludedAllowanceSettings(settingsPaths, env = process.env, options = {}) {
+  const platform = options.platform || process.platform;
+  const sourceHome = options.sourceHome || null;
   const pathsToCheck = Array.isArray(settingsPaths)
     ? settingsPaths
-    : defaultSettingsPaths(env);
+    : defaultSettingsPaths(env, platform, sourceHome);
 
   for (const settingsPath of pathsToCheck) {
     if (!settingsPath || !fs.existsSync(settingsPath)) {
@@ -1472,13 +1457,13 @@ function isWslWindowsExe(agyBin, platform = process.platform) {
     return false;
   }
   const trimmed = agyBin.trim();
-  if (/^\/mnt\/[a-z]\//i.test(trimmed) && trimmed.toLowerCase().endsWith('.exe')) {
+  if (isWindowsBinaryPath(trimmed)) {
     return true;
   }
   try {
     if (fs.existsSync(trimmed)) {
       const resolved = fs.realpathSync(trimmed);
-      return /^\/mnt\/[a-z]\//i.test(resolved) && resolved.toLowerCase().endsWith('.exe');
+      return isWindowsBinaryPath(resolved);
     }
   } catch (_) {}
   return false;
@@ -1613,10 +1598,16 @@ function buildSanitizedEnv(baseEnv = process.env) {
  * errors, or exits non-zero (e.g. under stale `WSL_INTEROP`).
  */
 function verifyWindowsPaidEnvAbsent(options = {}) {
+  const platform = options.platform || process.platform;
   let rawEnvText = options.windowsEnvText;
   if (typeof rawEnvText !== 'string') {
-    const cmdExe = options.cmdExe || DEFAULT_CMD_EXE;
-    if (!isExecutableFile(cmdExe)) {
+    const defaultWinCmd = path.win32.join(
+      (options.env && options.env.SystemRoot) || 'C:\\Windows',
+      'System32',
+      'cmd.exe'
+    );
+    const cmdExe = options.cmdExe || (platform === 'win32' ? defaultWinCmd : DEFAULT_CMD_EXE);
+    if (!isExecutableFile(cmdExe, platform)) {
       if (options.requireCmdExe) {
         throw new Error(
           `Cannot verify Windows host environment because "${cmdExe}" is not executable; refusing unverified WSL .exe launch`
@@ -1689,9 +1680,45 @@ function selectEffectiveResetTimestamp(exhaustedBuckets) {
   return latestBucket ? latestBucket.resetsAt : 'unknown';
 }
 
+const PAYGO_OR_CREDIT_QUOTA_PATTERN =
+  /\b(?:pay[- ]?as[- ]?you[- ]?go|paygo|metered|overage|g1[-_ ]?credits?|ai[-_ ]?credits?|cloud[-_ ]?billing)\b/i;
+
+function inspectTsvZeroQuota(
+  responseText,
+  { groupName = '', bucketName = '', rawBucketId = '', rawWindow = '', bucketId = '' } = {}
+) {
+  if (typeof responseText !== 'string' || !responseText.trim()) return false;
+  const candidateLabels = [bucketName, rawBucketId, rawWindow, bucketId]
+    .filter((s) => typeof s === 'string' && s.trim() !== '')
+    .map((s) => s.trim().toLowerCase());
+  const allowEmptyColBucket = !bucketName && !rawBucketId && !rawWindow;
+
+  for (const rawLine of responseText.split('\n')) {
+    const trimmedCr = rawLine.replace(/\r+$/, '');
+    if (!trimmedCr.trim()) continue;
+    const cols = trimmedCr.split('\t').map((c) => c.trim());
+    if (cols.length < 3) continue;
+    const [colGroup, colBucket, colRemaining] = cols;
+    if (!/^0(?:\.0+)?%$/.test(colRemaining)) continue;
+
+    const groupMatches = !groupName || colGroup.toLowerCase() === groupName.toLowerCase();
+    const lowerColBucket = colBucket.toLowerCase();
+    const bucketMatches =
+      (lowerColBucket !== '' && candidateLabels.includes(lowerColBucket)) ||
+      (lowerColBucket === '' && allowEmptyColBucket);
+    if (groupMatches && bucketMatches) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function parseAndVerifyGeminiQuota(
   rawStdout,
-  { minRemainingFraction = MIN_QUOTA_REMAINING_FRACTION } = {}
+  {
+    minRemainingFraction = MIN_QUOTA_REMAINING_FRACTION,
+    enforceReserve = true,
+  } = {}
 ) {
   if (
     typeof minRemainingFraction !== 'number' ||
@@ -1742,7 +1769,34 @@ function parseAndVerifyGeminiQuota(
     throw err;
   }
 
-  const groups = envelope.command && envelope.command.data && envelope.command.data.groups;
+  const usageData = envelope.command && envelope.command.data;
+  if (isPlainObject(usageData)) {
+    const overageEnabled =
+      (isPlainObject(usageData.overage_info) && usageData.overage_info.enabled === true) ||
+      (isPlainObject(usageData.overageInfo) && usageData.overageInfo.enabled === true) ||
+      (isPlainObject(usageData.overage) && usageData.overage.enabled === true) ||
+      usageData.overage_enabled === true ||
+      usageData.overageEnabled === true;
+    if (overageEnabled) {
+      const err = new Error(
+        'Paid overage billing (overage_info.enabled: true) is active in agy /usage output; refusing metered overage execution'
+      );
+      err.quotaCheckFailed = true;
+      throw err;
+    }
+    if (
+      typeof usageData.description === 'string' &&
+      PAYGO_OR_CREDIT_QUOTA_PATTERN.test(usageData.description)
+    ) {
+      const err = new Error(
+        `Metered or credit-based quota plan (${usageData.description.trim()}) is not permitted; included allowance required`
+      );
+      err.quotaCheckFailed = true;
+      throw err;
+    }
+  }
+
+  const groups = usageData && usageData.groups;
   if (!Array.isArray(groups) || groups.length === 0) {
     const err = new Error(
       'agy /usage JSON is missing .command.data.groups; Gemini allowance is unverified'
@@ -1751,27 +1805,86 @@ function parseAndVerifyGeminiQuota(
     throw err;
   }
 
-  const bucketById = new Map();
+  const responseText = typeof envelope.response === 'string' ? envelope.response : '';
+  const bucketEntryById = new Map();
   for (const group of groups) {
     if (!isPlainObject(group) || !Array.isArray(group.buckets)) continue;
     for (const bucket of group.buckets) {
       if (isPlainObject(bucket) && typeof bucket.id === 'string') {
-        bucketById.set(bucket.id, bucket);
+        bucketEntryById.set(bucket.id, { group, bucket });
       }
     }
   }
 
   const normalizedBuckets = [];
   for (const requiredId of REQUIRED_GEMINI_QUOTA_BUCKETS) {
-    const rawBucket = bucketById.get(requiredId);
-    if (!rawBucket) {
+    const found = bucketEntryById.get(requiredId);
+    if (!found) {
       const err = new Error(
         `Required Gemini quota bucket "${requiredId}" is missing from agy /usage output`
       );
       err.quotaCheckFailed = true;
       throw err;
     }
-    const fraction = rawBucket.remaining_fraction;
+    const { group, bucket: rawBucket } = found;
+    const resetsAt =
+      typeof rawBucket.reset_time === 'string' && rawBucket.reset_time.trim() !== ''
+        ? rawBucket.reset_time.trim()
+        : 'unknown';
+
+    if (group.disabled === true || group.enabled === false || rawBucket.disabled === true) {
+      const err = new Error(
+        `Gemini quota bucket "${requiredId}" is disabled in agy /usage output`
+      );
+      err.quotaCheckFailed = true;
+      err.resetsAt = resetsAt;
+      throw err;
+    }
+
+    if (
+      (isPlainObject(group.overage_info) && group.overage_info.enabled === true) ||
+      (isPlainObject(group.overageInfo) && group.overageInfo.enabled === true) ||
+      (isPlainObject(rawBucket.overage_info) && rawBucket.overage_info.enabled === true) ||
+      (isPlainObject(rawBucket.overageInfo) && rawBucket.overageInfo.enabled === true)
+    ) {
+      const err = new Error(
+        `Paid overage billing is enabled on quota bucket "${requiredId}"; included allowance required`
+      );
+      err.quotaCheckFailed = true;
+      err.resetsAt = resetsAt;
+      throw err;
+    }
+
+    const groupName = typeof group.name === 'string' ? group.name.trim() : '';
+    const bucketName = typeof rawBucket.name === 'string' ? rawBucket.name.trim() : '';
+    for (const label of [requiredId, bucketName, groupName]) {
+      if (label && PAYGO_OR_CREDIT_QUOTA_PATTERN.test(label)) {
+        const err = new Error(
+          `Metered or credit-based quota bucket "${requiredId}" (${label}) is not permitted; included allowance required`
+        );
+        err.quotaCheckFailed = true;
+        err.resetsAt = resetsAt;
+        throw err;
+      }
+    }
+
+    let fraction = rawBucket.remaining_fraction;
+    if (fraction === undefined) {
+      // Go `json:"remaining_fraction,omitempty"` omits exact 0.0 when 0% remains
+      if (
+        rawBucket.used_percentage === 100 ||
+        inspectTsvZeroQuota(responseText, {
+          groupName,
+          bucketName,
+          rawBucketId: requiredId,
+          rawWindow: typeof rawBucket.window === 'string' ? rawBucket.window : '',
+          bucketId: requiredId,
+        })
+      ) {
+        fraction = 0;
+      }
+    }
+
     if (typeof fraction !== 'number' || !Number.isFinite(fraction) || fraction < 0 || fraction > 1) {
       const err = new Error(
         `Gemini quota bucket "${requiredId}" has invalid remaining_fraction (${JSON.stringify(
@@ -1781,10 +1894,7 @@ function parseAndVerifyGeminiQuota(
       err.quotaCheckFailed = true;
       throw err;
     }
-    const resetsAt =
-      typeof rawBucket.reset_time === 'string' && rawBucket.reset_time.trim() !== ''
-        ? rawBucket.reset_time.trim()
-        : 'unknown';
+
     normalizedBuckets.push({
       id: requiredId,
       window: typeof rawBucket.window === 'string' ? rawBucket.window : requiredId,
@@ -1794,18 +1904,22 @@ function parseAndVerifyGeminiQuota(
     });
   }
 
-  const exhausted = normalizedBuckets.filter((b) => b.remainingFraction <= minRemainingFraction);
-  if (exhausted.length > 0) {
-    const summaryParts = exhausted.map((b) => `${b.id}=${b.remainingPercent}% (resets ${b.resetsAt})`);
-    const err = new Error(
-      `Gemini included allowance is exhausted or at/below the ${(minRemainingFraction * 100).toFixed(
-        0
-      )}% reserve: ${summaryParts.join(', ')}`
-    );
-    err.quotaExhausted = true;
-    err.resetsAt = selectEffectiveResetTimestamp(exhausted);
-    err.usage = normalizedBuckets;
-    throw err;
+  if (enforceReserve !== false) {
+    const exhausted = normalizedBuckets.filter((b) => b.remainingFraction <= minRemainingFraction);
+    if (exhausted.length > 0) {
+      const summaryParts = exhausted.map(
+        (b) => `${b.id}=${b.remainingPercent}% (resets ${b.resetsAt})`
+      );
+      const err = new Error(
+        `Gemini included allowance is exhausted or at/below the ${(
+          minRemainingFraction * 100
+        ).toFixed(0)}% reserve: ${summaryParts.join(', ')}`
+      );
+      err.quotaExhausted = true;
+      err.resetsAt = selectEffectiveResetTimestamp(exhausted);
+      err.usage = normalizedBuckets;
+      throw err;
+    }
   }
 
   return {
@@ -2146,8 +2260,10 @@ function isExecutableFile(candidate, platform = process.platform) {
 function collectAgyCandidates(
   env = process.env,
   platform = process.platform,
-  homedir
+  homedir,
+  options = {}
 ) {
+  const allowWslInterop = Boolean(options.allowWslInterop);
   const useProcessFallback = env === process.env;
   const effectiveHome =
     homedir !== undefined
@@ -2184,12 +2300,17 @@ function collectAgyCandidates(
   }
 
   const pathSep = platform === 'win32' ? ';' : ':';
-  const pathNames = platform === 'win32' ? ['agy.exe', 'agy.cmd', 'agy'] : ['agy'];
+  const pathNames =
+    platform === 'win32'
+      ? ['agy.exe', 'agy.cmd', 'agy']
+      : allowWslInterop
+      ? ['agy', 'agy.exe', 'agy.cmd']
+      : ['agy'];
   if (env && env.PATH) {
     for (const rawDir of env.PATH.split(pathSep)) {
       const dir = rawDir.trim().replace(/^"+|"+$/g, '');
       if (!dir) continue;
-      if (platform !== 'win32' && /^\/mnt\/[a-z](?:\/|$)/i.test(dir)) {
+      if (platform !== 'win32' && !allowWslInterop && /^\/mnt\/[a-z](?:\/|$)/i.test(dir)) {
         continue;
       }
       for (const binName of pathNames) {
@@ -2199,7 +2320,7 @@ function collectAgyCandidates(
   }
 
   const unique = Array.from(new Set(candidates));
-  return platform === 'win32'
+  return platform === 'win32' || allowWslInterop
     ? unique
     : unique.filter((c) => !isWindowsBinaryPath(c));
 }
@@ -2237,7 +2358,9 @@ function resolveAgyBinaries(
     return [explicit];
   }
 
-  const candidates = collectAgyCandidates(env, platform, resolvedHome);
+  const candidates = collectAgyCandidates(env, platform, resolvedHome, {
+    allowWslInterop: wslAllowed,
+  });
   const available = candidates.filter((cand) => {
     try {
       if (!wslAllowed) {
@@ -2270,7 +2393,9 @@ function resolveAgyBin(
     }
     return explicit;
   }
-  const candidates = collectAgyCandidates(env, platform, homedir);
+  const candidates = collectAgyCandidates(env, platform, homedir, {
+    allowWslInterop: wslAllowed,
+  });
   for (const cand of candidates) {
     try {
       if (!wslAllowed) {
@@ -2343,7 +2468,9 @@ function buildReviewCliArgs({
   timeoutMs = DEFAULT_TIMEOUT_MS,
 }) {
   const checkedModel = assertAllowedReviewerModel(model);
-  const printTimeoutSec = Math.max(1, Math.ceil(timeoutMs / 1000));
+  // Keep agy's internal --print-timeout 5s behind Node's process-group timer so Node
+  // reliably classifies timeouts as non-retryable ETIMEDOUT before agy exits early.
+  const printTimeoutSec = Math.max(1, Math.ceil(timeoutMs / 1000) + 5);
   const args = [
     '--project',
     workDir,
@@ -2382,12 +2509,13 @@ function spawnBoundedAgyProcess(
   childEnv,
   timeoutMs,
   stdinPayload = '',
-  spawnCwd = null
+  spawnCwd = null,
+  platform = process.platform
 ) {
   if (!spawnCwd) {
     throw new Error('spawnBoundedAgyProcess requires an explicit isolated workspace cwd');
   }
-  const useProcessGroup = process.platform !== 'win32' && !isWslWindowsExe(agyBin);
+  const useProcessGroup = platform !== 'win32' && !isWslWindowsExe(agyBin, platform);
 
   return new Promise((resolve, reject) => {
     const agyProcess = spawn(agyBin, args, {
@@ -2595,7 +2723,9 @@ function spawnBoundedAgyProcess(
 
 async function verifyGeminiQuotaReserve(agyBin, options = {}) {
   const baseEnv = options.env || process.env;
-  const resolvedBin = agyBin || resolveAgyBinaries(baseEnv)[0];
+  const effectivePlatform = options.platform || process.platform;
+  const resolvedBin =
+    agyBin || resolveAgyBinaries(baseEnv, { platform: effectivePlatform })[0];
   const rawTimeout =
     Number.isFinite(options.preflightTimeoutMs) && options.preflightTimeoutMs > 0
       ? options.preflightTimeoutMs
@@ -2609,6 +2739,7 @@ async function verifyGeminiQuotaReserve(agyBin, options = {}) {
       sourceHome: options.sourceHome,
       agyBin: resolvedBin,
       env: baseEnv,
+      platform: effectivePlatform,
       tempRoot: options.tempRoot,
       schemaObject: null,
       requireAuthFiles: options.requireAuthFiles,
@@ -2630,12 +2761,14 @@ async function verifyGeminiQuotaReserve(agyBin, options = {}) {
       ownedWorkspace.childEnv,
       rawTimeout,
       '',
-      ownedWorkspace.workDir
+      ownedWorkspace.workDir,
+      effectivePlatform
     );
 
     try {
       return parseAndVerifyGeminiQuota(stdoutData, {
         minRemainingFraction: options.minRemainingFraction,
+        enforceReserve: options.enforceReserve,
       });
     } catch (err) {
       err.code = err.code || 1;
@@ -2650,6 +2783,7 @@ async function verifyGeminiQuotaReserve(agyBin, options = {}) {
 }
 
 async function runIsolatedPreflight(agyBin, workspace, options = {}) {
+  const effectivePlatform = options.platform || process.platform;
   const preflightTimeoutMs =
     Number.isFinite(options.preflightTimeoutMs) && options.preflightTimeoutMs > 0
       ? options.preflightTimeoutMs
@@ -2678,7 +2812,8 @@ async function runIsolatedPreflight(agyBin, workspace, options = {}) {
     workspace.childEnv,
     preflightTimeoutMs,
     '',
-    workspace.workDir
+    workspace.workDir,
+    effectivePlatform
   );
   const permissions = verifyIsolatedPermissionsOutput(permRes.stdoutData);
 
@@ -2687,6 +2822,7 @@ async function runIsolatedPreflight(agyBin, workspace, options = {}) {
   if (options.checkQuota !== false) {
     quota = await verifyGeminiQuotaReserve(agyBin, {
       workspace,
+      platform: effectivePlatform,
       preflightTimeoutMs,
       minRemainingFraction: options.minRemainingFraction,
     });
@@ -2699,7 +2835,8 @@ async function runIsolatedPreflight(agyBin, workspace, options = {}) {
     workspace.childEnv,
     preflightTimeoutMs,
     '',
-    workspace.workDir
+    workspace.workDir,
+    effectivePlatform
   );
   const availableModels = parseAvailableGeminiModels(modelsRes.stdoutData);
   const resolvedModels = resolveCandidateModels({
@@ -2721,7 +2858,9 @@ async function runIsolatedPreflight(agyBin, workspace, options = {}) {
 async function runAgy(model, inputContent, options = {}) {
   const checkedModel = assertAllowedReviewerModel(model);
   const baseEnv = options.env || process.env;
-  const agyBin = options.agyBin || resolveAgyBinaries(baseEnv)[0];
+  const effectivePlatform = options.platform || process.platform;
+  const agyBin =
+    options.agyBin || resolveAgyBinaries(baseEnv, { platform: effectivePlatform })[0];
   const timeoutMs =
     Number.isFinite(options.timeoutMs) && options.timeoutMs > 0
       ? options.timeoutMs
@@ -2737,6 +2876,7 @@ async function runAgy(model, inputContent, options = {}) {
       sourceHome: options.sourceHome,
       agyBin,
       env: baseEnv,
+      platform: effectivePlatform,
       tempRoot: options.tempRoot,
       schemaObject: WIRE_JSON_SCHEMA,
       packetText: inputContent,
@@ -2759,7 +2899,8 @@ async function runAgy(model, inputContent, options = {}) {
       ownedWorkspace.childEnv,
       timeoutMs,
       inputContent,
-      ownedWorkspace.workDir
+      ownedWorkspace.workDir,
+      effectivePlatform
     );
 
     try {
@@ -2783,10 +2924,21 @@ async function runAgy(model, inputContent, options = {}) {
 // --- Full-diff deterministic static security floor ---
 
 const GENERIC_SECRET_ASSIGNMENT_SOURCE =
-  '(?:api[_-]?key|secret(?:[_-]?key)?|password|passwd|private[_-]?key|access[_-]?token|auth[_-]?token|client[_-]?secret|hf[_-]?token)\\s*[:=]\\s*[\'"]([A-Za-z0-9_\\-./+=]{12,})[\'"]';
+  '(?:api[_-]?key|secret(?:[_-]?key)?|password|passwd|private[_-]?key|access[_-]?token|auth[_-]?token|client[_-]?secret|hf[_-]?token)\\s*[:=]\\s*([\'\"`])([A-Za-z0-9_\\-./+=!@#%^&*~]{12,})\\1';
+
+const ENV_UNQUOTED_SECRET_ASSIGNMENT_RE =
+  /^(\s*(?:export\s+)?[A-Z][A-Z0-9_]*(?:API_KEY|SECRET|SECRET_KEY|PASSWORD|PASSWD|PRIVATE_KEY|ACCESS_TOKEN|AUTH_TOKEN|CLIENT_SECRET|HF_TOKEN)[A-Z0-9_]*\s*=\s*)([A-Za-z0-9_\-./+=!@#%^&*~]{12,})(?=\s*(?:#.*)?$)/;
 
 const PLACEHOLDER_SECRET_VALUE =
-  /^(?:your[_-].*|dummy.*|example.*|placeholder.*|test[_-].*|mock[_-].*|sample[_-].*|fake[_-].*|changeme.*|replace[_-]?me.*|redacted.*|\[REDACTED[^\]]*\]|<.*>|\$\{.*\}|secret123|a-passphrase-of-at-least-32-characters!!)$/i;
+  /^(?:your[_-].*|dummy.*|example.*|placeholder.*|test[_-].*|mock[_-].*|sample[_-].*|fake[_-].*|changeme.*|replace[_-]?me.*|redacted.*|\[REDACTED[^\]]*\]|<.*>|\$\{.*\}|secret123|a-passphrase-of-at-least-32-characters!!|(?:process\.env|os\.environ|os\.getenv|env)\b.*|https?:\/\/.*|\/.*|\.\.?\/.*|true|false|null|undefined|none)$/i;
+
+function isPlaceholderGenericSecret(secretVal, fullMatch = '') {
+  return (
+    PLACEHOLDER_SECRET_VALUE.test(secretVal) ||
+    fullMatch.includes('${{') ||
+    fullMatch.includes('process.env')
+  );
+}
 
 const KNOWN_CREDENTIAL_PATTERNS = Object.freeze([
   {
@@ -2828,6 +2980,11 @@ const KNOWN_CREDENTIAL_PATTERNS = Object.freeze([
     re: /\bsk-(?:proj-|live-|svcacct-)[A-Za-z0-9_-]{20,}\b/,
     ignore: /^sk-(?:proj-|live-|svcacct-)(?:x+|0+|example.*|dummy.*|test.*)$/i,
     message: 'Potential OpenAI API key detected in added line.',
+  },
+  {
+    re: /\bsk-or-v1-[A-Za-z0-9]{32,}\b/,
+    ignore: /^sk-or-v1-(?:0+|x+|example.*|dummy.*|test.*)$/i,
+    message: 'Potential OpenRouter API key detected in added line.',
   },
   {
     re: /\bxai-[A-Za-z0-9_-]{20,}\b/,
@@ -2904,6 +3061,7 @@ function isLikelyPemBodyLine(body) {
 function redactCredentialsForPrompt(diffText) {
   if (!diffText) return '';
   let inPemPrivateKey = false;
+  let hunkPrefixCols = 1;
   return String(diffText)
     .split('\n')
     .map((rawLine) => {
@@ -2911,14 +3069,30 @@ function redactCredentialsForPrompt(diffText) {
       const line = hasCr ? rawLine.slice(0, -1) : rawLine;
       if (isDiffMetadataHeaderLine(line)) {
         inPemPrivateKey = false;
+        if (line.startsWith('@@ ')) {
+          hunkPrefixCols = 1;
+        } else {
+          const combinedHunk = line.match(
+            /^(@{3,})\s+((?:-\d+(?:,\d+)?\s+)+)\+(\d+)(?:,\d+)?\s+\1/
+          );
+          if (combinedHunk) {
+            const minusRanges = combinedHunk[2].trim().split(/\s+/).filter(Boolean);
+            hunkPrefixCols = Math.max(2, minusRanges.length);
+          }
+        }
         return rawLine;
       }
 
-      const prefix =
-        line.startsWith('+') || line.startsWith('-') || line.startsWith(' ')
-          ? line[0]
-          : '';
-      let body = prefix ? line.slice(1) : line;
+      let prefix = '';
+      if (hunkPrefixCols > 1 && line.length >= hunkPrefixCols) {
+        const candPrefix = line.slice(0, hunkPrefixCols);
+        if (/^[+\- ]+$/.test(candPrefix)) {
+          prefix = candPrefix;
+        }
+      } else if (line.startsWith('+') || line.startsWith('-') || line.startsWith(' ')) {
+        prefix = line[0];
+      }
+      let body = prefix ? line.slice(prefix.length) : line;
 
       if (PEM_BEGIN_RE.test(body)) {
         if (PEM_END_RE.test(body)) {
@@ -2958,12 +3132,8 @@ function redactCredentialsForPrompt(diffText) {
       }
 
       const globalGenericRe = new RegExp(GENERIC_SECRET_ASSIGNMENT_SOURCE, 'gi');
-      body = body.replace(globalGenericRe, (fullMatch, secretVal) => {
-        if (
-          PLACEHOLDER_SECRET_VALUE.test(secretVal) ||
-          fullMatch.includes('${{') ||
-          fullMatch.includes('process.env')
-        ) {
+      body = body.replace(globalGenericRe, (fullMatch, _quoteChar, secretVal) => {
+        if (isPlaceholderGenericSecret(secretVal, fullMatch)) {
           return fullMatch;
         }
         const quoteIdx = fullMatch.lastIndexOf(secretVal);
@@ -2973,6 +3143,11 @@ function redactCredentialsForPrompt(diffText) {
             )}`
           : fullMatch;
       });
+
+      const envMatch = ENV_UNQUOTED_SECRET_ASSIGNMENT_RE.exec(body);
+      if (envMatch && !isPlaceholderGenericSecret(envMatch[2], envMatch[0])) {
+        body = `${envMatch[1]}[REDACTED_SECRET]${body.slice(envMatch[0].length)}`;
+      }
 
       return `${prefix}${body}${hasCr ? '\r' : ''}`;
     })
@@ -3024,14 +3199,18 @@ function detectAddedLineIssues(addedLine, conflictState = { inConflictBlock: tru
 
   if (!matchedSpecificCredential) {
     const globalGenericRe = new RegExp(GENERIC_SECRET_ASSIGNMENT_SOURCE, 'gi');
+    let matchedGeneric = false;
     for (const secretMatch of addedLine.matchAll(globalGenericRe)) {
-      if (
-        !PLACEHOLDER_SECRET_VALUE.test(secretMatch[1]) &&
-        !secretMatch[0].includes('${{') &&
-        !secretMatch[0].includes('process.env')
-      ) {
+      if (!isPlaceholderGenericSecret(secretMatch[2], secretMatch[0])) {
         messages.push('Potential hardcoded credential or secret detected in added line.');
+        matchedGeneric = true;
         break;
+      }
+    }
+    if (!matchedGeneric) {
+      const envMatch = ENV_UNQUOTED_SECRET_ASSIGNMENT_RE.exec(addedLine);
+      if (envMatch && !isPlaceholderGenericSecret(envMatch[2], envMatch[0])) {
+        messages.push('Potential hardcoded credential or secret detected in added line.');
       }
     }
   }
@@ -3327,10 +3506,27 @@ async function withOutputLock(outputPath, fn, lockTimeoutMs = DEFAULT_LOCK_TIMEO
         }
         try {
           const lockRaw = fs.readFileSync(lockPath, 'utf8');
-          const lockMeta = JSON.parse(lockRaw);
-          if (lockMeta.pid !== process.pid && !isProcessAlive(lockMeta.pid)) {
-            fs.unlinkSync(lockPath);
-            continue;
+          let lockMeta = null;
+          try {
+            lockMeta = JSON.parse(lockRaw);
+          } catch (_) {
+            lockMeta = null;
+          }
+          if (
+            isPlainObject(lockMeta) &&
+            Number.isInteger(lockMeta.pid) &&
+            lockMeta.pid > 0
+          ) {
+            if (lockMeta.pid !== process.pid && !isProcessAlive(lockMeta.pid)) {
+              fs.unlinkSync(lockPath);
+              continue;
+            }
+          } else {
+            const lockStat = lstatIfExists(lockPath);
+            if (lockStat && Date.now() - lockStat.mtimeMs >= 2000) {
+              fs.unlinkSync(lockPath);
+              continue;
+            }
           }
         } catch (_) {}
       }
@@ -3379,7 +3575,11 @@ async function reviewDiff(diffContent, options = {}) {
   }
 
   const env = options.env || process.env;
-  verifyIncludedAllowanceSettings(options.settingsPaths, env);
+  const effectivePlatform = options.platform || process.platform;
+  verifyIncludedAllowanceSettings(options.settingsPaths, env, {
+    platform: effectivePlatform,
+    sourceHome: options.sourceHome,
+  });
 
   const normalizedDiff = diffContent.replace(/^\uFEFF/, '');
   if (normalizedDiff.trim() === '') {
@@ -3415,28 +3615,29 @@ async function reviewDiff(diffContent, options = {}) {
   if (options.agyBin) {
     const wslAllowed = isWslInteropAllowed({ allowWslInterop: options.allowWslInterop, env });
     if (!wslAllowed) {
-      assertNonWindowsInteropBinaryOnPosix(options.agyBin, options.platform || process.platform);
+      assertNonWindowsInteropBinaryOnPosix(options.agyBin, effectivePlatform);
     }
-    if (!isExecutableFile(options.agyBin, options.platform || process.platform)) {
+    if (!isExecutableFile(options.agyBin, effectivePlatform)) {
       throw new Error(`Configured agyBin is not an executable file: ${options.agyBin}`);
     }
     binaries = [options.agyBin];
   } else {
     binaries = resolveAgyBinaries(env, {
-      platform: options.platform || process.platform,
+      platform: effectivePlatform,
       allowWslInterop: options.allowWslInterop,
     });
   }
 
-  const hasWinExe = binaries.some(
-    (b) => typeof b === 'string' && b.toLowerCase().endsWith('.exe')
-  );
-  if (typeof options.windowsEnvText === 'string' || hasWinExe) {
+  const usesWslWindowsBinary =
+    effectivePlatform !== 'win32' &&
+    binaries.some((b) => isWslWindowsExe(b, effectivePlatform) || isWindowsBinaryPath(b));
+  if (typeof options.windowsEnvText === 'string' || usesWslWindowsBinary) {
     verifyWindowsPaidEnvAbsent({
       env,
+      platform: effectivePlatform,
       cmdExe: options.cmdExe,
       windowsEnvText: options.windowsEnvText,
-      requireCmdExe: hasWinExe && typeof options.windowsEnvText !== 'string',
+      requireCmdExe: usesWslWindowsBinary && typeof options.windowsEnvText !== 'string',
     });
   }
 
@@ -3454,7 +3655,7 @@ async function reviewDiff(diffContent, options = {}) {
       sourceHome: options.sourceHome,
       agyBin,
       env,
-      platform: options.platform || process.platform,
+      platform: effectivePlatform,
       tempRoot: options.tempRoot,
       schemaObject: WIRE_JSON_SCHEMA,
       packetText: sanitizedDiff,
@@ -3463,6 +3664,7 @@ async function reviewDiff(diffContent, options = {}) {
 
     try {
       const preflight = await runIsolatedPreflight(agyBin, workspace, {
+        platform: effectivePlatform,
         timeoutMs: options.timeoutMs,
         preflightTimeoutMs: options.preflightTimeoutMs,
         checkQuota: shouldCheckQuota,
@@ -3489,6 +3691,7 @@ async function reviewDiff(diffContent, options = {}) {
             workspace.verifySettingsIntact();
             latestQuota = await verifyGeminiQuotaReserve(agyBin, {
               workspace,
+              platform: effectivePlatform,
               timeoutMs: options.timeoutMs,
               preflightTimeoutMs: options.preflightTimeoutMs,
               minRemainingFraction: options.minRemainingFraction,
@@ -3498,6 +3701,7 @@ async function reviewDiff(diffContent, options = {}) {
           console.error(`Attempting review with ${model} via ${agyBin}...`);
           let verdictObj = await runAgy(model, fullInput, {
             env,
+            platform: effectivePlatform,
             agyBin,
             workspace,
             timeoutMs: options.timeoutMs,
@@ -3512,9 +3716,10 @@ async function reviewDiff(diffContent, options = {}) {
             try {
               postRunQuota = await verifyGeminiQuotaReserve(agyBin, {
                 workspace,
+                platform: effectivePlatform,
                 timeoutMs: options.timeoutMs,
                 preflightTimeoutMs: options.preflightTimeoutMs,
-                minRemainingFraction: 0,
+                enforceReserve: false,
               });
             } catch (_) {}
           }
@@ -3558,7 +3763,8 @@ async function reviewDiff(diffContent, options = {}) {
             error.quotaExhausted ||
             error.permissionCheckFailed ||
             error.toolAttempt ||
-            error.timedOut
+            error.timedOut ||
+            error.code === 'EMSGSIZE'
           ) {
             break outerLoop;
           }
@@ -3619,6 +3825,16 @@ async function runReview(options = {}) {
     );
   }
 
+  const effectiveLockTimeoutMs =
+    Number.isFinite(options.lockTimeoutMs) && options.lockTimeoutMs > 0
+      ? options.lockTimeoutMs
+      : Math.max(
+          DEFAULT_LOCK_TIMEOUT_MS,
+          (Number.isFinite(options.timeoutMs) && options.timeoutMs > 0
+            ? options.timeoutMs
+            : DEFAULT_TIMEOUT_MS) + 60000
+        );
+
   return withOutputLock(
     outputPath,
     async () => {
@@ -3642,7 +3858,7 @@ async function runReview(options = {}) {
       writeOutputAtomically(outputPath, result);
       return result;
     },
-    options.lockTimeoutMs
+    effectiveLockTimeoutMs
   );
 }
 
@@ -3657,7 +3873,7 @@ async function run(argv = process.argv.slice(2), env = process.env) {
 
   if (options.help) {
     console.log(
-      'Usage: node scripts/reviewer.js [diff-path] [output-path] [--model <id>] [--output <path>] [--timeout-ms <ms>] [--max-diff-chars <n>]'
+      'Usage: node scripts/reviewer.js [diff-path] [output-path] [--model <id>] [--output <path>] [--timeout-ms <ms>] [--max-diff-chars <n>] [--allow-wsl-interop]'
     );
     return 0;
   }
@@ -3669,6 +3885,7 @@ async function run(argv = process.argv.slice(2), env = process.env) {
       models: options.explicitModels ? options.models : undefined,
       timeoutMs: options.timeoutMs,
       maxDiffChars: options.maxDiffChars,
+      allowWslInterop: options.allowWslInterop,
       env,
     });
     console.log(JSON.stringify(result, null, 2));

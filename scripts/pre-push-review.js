@@ -458,10 +458,13 @@ function prepareSecureReviewDir(workDir) {
     throw new Error(`Invalid REVIEW_DIR directory: ${workDir}`);
   }
   if (process.platform !== 'win32') {
+    if (typeof process.getuid === 'function' && st.uid !== process.getuid()) {
+      throw new Error(
+        `Refusing REVIEW_DIR owned by uid ${st.uid} (expected ${process.getuid()}): ${workDir}`
+      );
+    }
     try {
-      if (typeof process.getuid !== 'function' || st.uid === process.getuid()) {
-        fs.chmodSync(workDir, 0o700);
-      }
+      fs.chmodSync(workDir, 0o700);
     } catch (_) {}
   }
 }
@@ -618,41 +621,50 @@ async function runPrePushReview(options = {}) {
     (env && env.REVIEW_OUTPUT_PATH && env.REVIEW_OUTPUT_PATH.trim()) ||
     path.join(workDir, 'pre-push-review_result.json');
   const pipelineLockTarget = path.join(workDir, '.pre-push-pipeline');
+  const pipelineLockTimeoutMs = Math.max(
+    420000,
+    (Number.isFinite(options.timeoutMs) && options.timeoutMs > 0 ? options.timeoutMs : 360000) +
+      60000
+  );
 
-  return withOutputLock(pipelineLockTarget, async () => {
-    for (const artifactPath of [diffPath, outputPath]) {
-      assertSafeOutputTarget(artifactPath);
-    }
+  return withOutputLock(
+    pipelineLockTarget,
+    async () => {
+      for (const artifactPath of [diffPath, outputPath]) {
+        assertSafeOutputTarget(artifactPath);
+      }
 
-    const diffContent = computePrePushDiff(repoRoot, {
-      remoteName: options.remoteName,
-      stdinText: options.stdinText,
-      range: options.range,
-    });
+      const diffContent = computePrePushDiff(repoRoot, {
+        remoteName: options.remoteName,
+        stdinText: options.stdinText,
+        range: options.range,
+      });
 
-    writeDiffAtomically(diffPath, diffContent);
+      writeDiffAtomically(diffPath, diffContent);
 
-    const result = await runReview({
-      diffPath,
-      outputPath,
-      models: options.models,
-      timeoutMs: options.timeoutMs,
-      maxDiffChars: options.maxDiffChars,
-      agyBin: options.agyBin,
-      settingsPaths: options.settingsPaths,
-      env,
-    });
+      const result = await runReview({
+        diffPath,
+        outputPath,
+        models: options.models,
+        timeoutMs: options.timeoutMs,
+        maxDiffChars: options.maxDiffChars,
+        agyBin: options.agyBin,
+        settingsPaths: options.settingsPaths,
+        env,
+      });
 
-    return {
-      exitCode: result.verdict === 'APPROVE' ? 0 : 1,
-      verdict: result.verdict,
-      summary: result.summary,
-      issues: result.issues,
-      diffBytes: Buffer.byteLength(diffContent, 'utf8'),
-      diffPath,
-      outputPath,
-    };
-  });
+      return {
+        exitCode: result.verdict === 'APPROVE' ? 0 : 1,
+        verdict: result.verdict,
+        summary: result.summary,
+        issues: result.issues,
+        diffBytes: Buffer.byteLength(diffContent, 'utf8'),
+        diffPath,
+        outputPath,
+      };
+    },
+    pipelineLockTimeoutMs
+  );
 }
 
 function readAllStdinSync() {

@@ -72,8 +72,8 @@ jobs:
             exit 1
           fi
           mkdir -p "$WORK_DIR"
-          if [ -L "$WORK_DIR" ] || [ ! -d "$WORK_DIR" ]; then
-            echo "::error::Invalid REVIEW_DIR directory: $WORK_DIR"
+          if [ -L "$WORK_DIR" ] || [ ! -d "$WORK_DIR" ] || [ ! -O "$WORK_DIR" ]; then
+            echo "::error::Invalid or non-owned REVIEW_DIR directory: $WORK_DIR"
             exit 1
           fi
           chmod 700 "$WORK_DIR"
@@ -123,8 +123,8 @@ jobs:
             exit 1
           fi
           mkdir -p "$WORK_DIR"
-          if [ -L "$WORK_DIR" ] || [ ! -d "$WORK_DIR" ]; then
-            echo "::error::Invalid REVIEW_DIR directory: $WORK_DIR"
+          if [ -L "$WORK_DIR" ] || [ ! -d "$WORK_DIR" ] || [ ! -O "$WORK_DIR" ]; then
+            echo "::error::Invalid or non-owned REVIEW_DIR directory: $WORK_DIR"
             exit 1
           fi
           chmod 700 "$WORK_DIR"
@@ -139,15 +139,42 @@ jobs:
             rm -f "$target_file"
           done
 
-          resolve_base_target() {
-            local candidate="${1:-}"
-            if [ -n "$candidate" ]; then
-              case "$candidate" in
-                -*|*..*|*[[:space:]]*)
-                  echo "::error::Invalid BASE_REF value: $candidate" >&2
-                  exit 1
-                  ;;
-              esac
+          resolve_git_target() {
+            local role="${1:-BASE_REF}"
+            local candidate="${2:-}"
+            local prefer_origin="${3:-1}"
+
+            if [ -z "$candidate" ]; then
+              if git rev-parse --verify --quiet origin/main >/dev/null 2>&1; then
+                printf 'origin/main'
+                return
+              fi
+              if git rev-parse --verify --quiet origin/master >/dev/null 2>&1; then
+                printf 'origin/master'
+                return
+              fi
+              if git fetch --no-tags origin "+refs/heads/master:refs/remotes/origin/master" >/dev/null 2>&1 && \
+                 git rev-parse --verify --quiet "refs/remotes/origin/master^{commit}" >/dev/null 2>&1; then
+                printf 'refs/remotes/origin/master'
+                return
+              fi
+              if git fetch --no-tags origin "+refs/heads/main:refs/remotes/origin/main" >/dev/null 2>&1 && \
+                 git rev-parse --verify --quiet "refs/remotes/origin/main^{commit}" >/dev/null 2>&1; then
+                printf 'refs/remotes/origin/main'
+                return
+              fi
+              echo "::error::Unable to resolve default base branch on origin" >&2
+              exit 1
+            fi
+
+            case "$candidate" in
+              -*|*..*|*[[:space:]]*|*:*|*\\*)
+                echo "::error::Invalid ${role} value: $candidate" >&2
+                exit 1
+                ;;
+            esac
+
+            if [ "$prefer_origin" = "1" ]; then
               if git rev-parse --verify --quiet "origin/${candidate}^{commit}" >/dev/null 2>&1; then
                 printf 'origin/%s' "$candidate"
                 return
@@ -156,14 +183,37 @@ jobs:
                 printf '%s' "$candidate"
                 return
               fi
-              printf 'origin/%s' "$candidate"
-              return
-            fi
-            if git rev-parse --verify --quiet origin/main >/dev/null 2>&1; then
-              printf 'origin/main'
             else
-              printf 'origin/master'
+              if git rev-parse --verify --quiet "${candidate}^{commit}" >/dev/null 2>&1; then
+                printf '%s' "$candidate"
+                return
+              fi
+              if git rev-parse --verify --quiet "origin/${candidate}^{commit}" >/dev/null 2>&1; then
+                printf 'origin/%s' "$candidate"
+                return
+              fi
             fi
+
+            # On-demand inert git object fetch (never checks out untrusted files) for unfetched SHAs or branches.
+            if printf '%s' "$candidate" | grep -Eq '^[0-9a-fA-F]{40,64}$'; then
+              if git fetch --no-tags origin "$candidate" >/dev/null 2>&1 && \
+                 git rev-parse --verify --quiet "${candidate}^{commit}" >/dev/null 2>&1; then
+                printf '%s' "$candidate"
+                return
+              fi
+            else
+              local clean_branch="${candidate#origin/}"
+              clean_branch="${clean_branch#refs/heads/}"
+              if [ -n "$clean_branch" ] && \
+                 git fetch --no-tags origin "+refs/heads/${clean_branch}:refs/remotes/origin/${clean_branch}" >/dev/null 2>&1 && \
+                 git rev-parse --verify --quiet "refs/remotes/origin/${clean_branch}^{commit}" >/dev/null 2>&1; then
+                printf 'refs/remotes/origin/%s' "$clean_branch"
+                return
+              fi
+            fi
+
+            echo "::error::Unable to resolve ${role} '${candidate}' locally or on origin" >&2
+            exit 1
           }
 
           if [ -n "${PR_NUMBER:-}" ]; then
@@ -174,28 +224,16 @@ jobs:
             PR_TRACKING_REF="refs/remotes/origin/pr/${PR_NUMBER}"
             # Fetch only git objects for refs/pull/<n>/head; never check out untrusted PR files.
             git fetch --no-tags origin "+refs/pull/${PR_NUMBER}/head:${PR_TRACKING_REF}"
-            START_REF="$(resolve_base_target "${BASE_REF:-}")"
+            START_REF="$(resolve_git_target "BASE_REF" "${BASE_REF:-}" "1")"
             git diff --no-ext-diff --no-color "${START_REF}...${PR_TRACKING_REF}" -- > "$DIFF_PATH"
           elif [ -n "${BASE_SHA:-}" ] && [ -n "${HEAD_SHA:-}" ] && \
                git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null && \
                git cat-file -e "${HEAD_SHA}^{commit}" 2>/dev/null; then
             git diff --no-ext-diff --no-color "${BASE_SHA}...${HEAD_SHA}" -- > "$DIFF_PATH"
           else
-            START_REF="$(resolve_base_target "${BASE_REF:-}")"
+            START_REF="$(resolve_git_target "BASE_REF" "${BASE_REF:-}" "1")"
             END_CANDIDATE="${HEAD_REF:-HEAD}"
-            case "$END_CANDIDATE" in
-              -*|*..*|*[[:space:]]*)
-                echo "::error::Invalid HEAD_REF value: $END_CANDIDATE"
-                exit 1
-                ;;
-            esac
-            if git rev-parse --verify --quiet "${END_CANDIDATE}^{commit}" >/dev/null 2>&1; then
-              END_REF="$END_CANDIDATE"
-            elif git rev-parse --verify --quiet "origin/${END_CANDIDATE}^{commit}" >/dev/null 2>&1; then
-              END_REF="origin/${END_CANDIDATE}"
-            else
-              END_REF="$END_CANDIDATE"
-            fi
+            END_REF="$(resolve_git_target "HEAD_REF" "$END_CANDIDATE" "0")"
             git diff --no-ext-diff --no-color "${START_REF}...${END_REF}" -- > "$DIFF_PATH"
           fi
           echo "Generated PR diff at $DIFF_PATH ($(wc -c < "$DIFF_PATH") bytes)"
