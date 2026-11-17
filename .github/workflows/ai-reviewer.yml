@@ -9,6 +9,9 @@ name: AI Reviewer Pipeline
 # - Triggering via `workflow_dispatch` restricts execution to write+ collaborators,
 #   checks out only the trusted workflow branch (`scripts/reviewer.js`), and fetches
 #   `refs/pull/<pr_number>/head` as inert git objects without checking out PR code.
+# Advisory only: this workflow is never a required status check, and all model-authored text
+# is escaped, mention-stripped, and labelled as AI-generated before it reaches the job summary,
+# Slack, email, or a webhook (see scripts/ai-review-sanitize.js).
 on:
   workflow_dispatch:
     inputs:
@@ -42,8 +45,6 @@ jobs:
     # (supports either a JSON array like `["self-hosted","linux","trimurti"]` or a single label).
     runs-on: ${{ (startsWith(vars.AI_REVIEWER_RUNS_ON, '[') && fromJSON(vars.AI_REVIEWER_RUNS_ON)) || vars.AI_REVIEWER_RUNS_ON || 'ubuntu-latest' }}
     timeout-minutes: 12
-    env:
-      REVIEW_DIR: /tmp/gemini
     outputs:
       verdict: ${{ steps.record_verdict.outputs.verdict }}
       summary: ${{ steps.record_verdict.outputs.summary }}
@@ -51,22 +52,36 @@ jobs:
     steps:
       # --- Stage 1: checkout & Component 1: Environment & Prerequisites ---
       - name: Checkout code
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Setup Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version-file: .node-version
 
+      # Per-run scratch directory under the runner's temp dir (never a shared, world-visible /tmp/gemini).
+      - name: Resolve review directory
+        run: |
+          set -euo pipefail
+          if [ -z "${REVIEW_DIR:-}" ]; then
+            REVIEW_DIR="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/gemini-$(id -u)"
+          fi
+          if [ -n "${GITHUB_ENV:-}" ]; then
+            printf 'REVIEW_DIR=%s\n' "$REVIEW_DIR" >> "$GITHUB_ENV"
+          fi
+          echo "Using REVIEW_DIR=$REVIEW_DIR"
+
       - name: Prepare environment and prerequisites
+        id: prepare
         run: |
           set -euo pipefail
           node --version
           git --version
 
-          WORK_DIR="${REVIEW_DIR:-/tmp/gemini}"
+          WORK_DIR="${REVIEW_DIR:-${RUNNER_TEMP:-${TMPDIR:-/tmp}}/gemini-$(id -u)}"
           if [ -L "$WORK_DIR" ]; then
             echo "::error::Refusing symlinked REVIEW_DIR: $WORK_DIR"
             exit 1
@@ -94,6 +109,7 @@ jobs:
             fi
           done
 
+          AGY_AVAILABLE=true
           if [ -n "${REVIEWER_AGY_BIN:-}" ] && [ -x "${REVIEWER_AGY_BIN}" ]; then
             echo "Found configured REVIEWER_AGY_BIN at ${REVIEWER_AGY_BIN}"
           elif [ -n "${AGY_BIN:-}" ] && [ -x "${AGY_BIN}" ]; then
@@ -101,11 +117,18 @@ jobs:
           elif command -v agy >/dev/null 2>&1; then
             echo "Found agy CLI binary at $(command -v agy)"
           else
-            echo "::warning::agy CLI binary is not in PATH; non-empty diffs will fail closed per kg-trimurti-review."
+            AGY_AVAILABLE=false
+            echo "::notice::No runner with the agy CLI is available (set AI_REVIEWER_RUNS_ON to one); skipping the AI review cleanly."
+          fi
+          if [ -n "${GITHUB_OUTPUT:-}" ]; then
+            printf 'agy_available=%s\n' "$AGY_AVAILABLE" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Test AI reviewer script
         run: node scripts/test-reviewer.js
+
+      - name: Test AI reviewer hardening
+        run: node scripts/test-reviewer-hardening.js
 
       # --- Stage 2: prepare_diff ---
       - name: Generate pull request diff
@@ -117,7 +140,7 @@ jobs:
           HEAD_REF: ${{ inputs.head_ref || '' }}
         run: |
           set -euo pipefail
-          WORK_DIR="${REVIEW_DIR:-/tmp/gemini}"
+          WORK_DIR="${REVIEW_DIR:-${RUNNER_TEMP:-${TMPDIR:-/tmp}}/gemini-$(id -u)}"
           if [ -L "$WORK_DIR" ]; then
             echo "::error::Refusing symlinked REVIEW_DIR: $WORK_DIR"
             exit 1
@@ -252,16 +275,17 @@ jobs:
       # --- Stage 3: run_reviewer (allow_failure; gate enforced in report_verdict) ---
       - name: Run Trimurti AI Reviewer
         id: run_reviewer
+        if: steps.prepare.outputs.agy_available == 'true'
         continue-on-error: true
         run: |
           set -euo pipefail
-          WORK_DIR="${REVIEW_DIR:-/tmp/gemini}"
+          WORK_DIR="${REVIEW_DIR:-${RUNNER_TEMP:-${TMPDIR:-/tmp}}/gemini-$(id -u)}"
           node scripts/reviewer.js "$WORK_DIR/pr26.diff" "$WORK_DIR/review_result.json"
 
       # --- Component 4: Artifact Retention ---
       - name: Upload review verdict artifact
         if: always() && !cancelled()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: ai-review-verdict
           path: ${{ env.REVIEW_DIR }}/review_result.json
@@ -274,13 +298,15 @@ jobs:
         if: always() && !cancelled()
         env:
           REVIEWER_OUTCOME: ${{ steps.run_reviewer.outcome }}
+          AGY_AVAILABLE: ${{ steps.prepare.outputs.agy_available }}
         run: |
           set -euo pipefail
-          WORK_DIR="${REVIEW_DIR:-/tmp/gemini}"
+          WORK_DIR="${REVIEW_DIR:-${RUNNER_TEMP:-${TMPDIR:-/tmp}}/gemini-$(id -u)}"
           RESULT_PATH="${REVIEW_OUTPUT_PATH:-$WORK_DIR/review_result.json}"
 
-          RESULT_PATH="$RESULT_PATH" REVIEWER_OUTCOME="${REVIEWER_OUTCOME:-}" node -e '
+          RESULT_PATH="$RESULT_PATH" REVIEWER_OUTCOME="${REVIEWER_OUTCOME:-}" AGY_AVAILABLE="${AGY_AVAILABLE:-}" node -e '
             const fs = require("fs");
+            const path = require("path");
 
             function escCommandData(val) {
               return String(val ?? "")
@@ -368,6 +394,9 @@ jobs:
             } else if (parseErr) {
               verdict = "ERROR";
               summary = `Invalid JSON in ${resultPath}: ${singleLine(parseErr.message)}`.slice(0, 500);
+            } else if (singleLine(process.env.AGY_AVAILABLE) === "false" && outcome === "skipped") {
+              verdict = "SKIPPED";
+              summary = "No runner with the agy CLI is available, so the AI review was skipped. This is not a failure; set AI_REVIEWER_RUNS_ON to a runner that has agy to enable it.";
             } else {
               verdict = "ERROR";
               summary =
@@ -387,22 +416,26 @@ jobs:
             }
 
             if (process.env.GITHUB_STEP_SUMMARY) {
-              const lines = [
-                `### Trimurti AI Review: ${verdict}`,
-                "",
-                summary || "No summary provided.",
-              ];
-              if (cleanIssues.length > 0) {
-                lines.push("", "#### Issues", "");
-                for (const issue of cleanIssues) {
-                  const loc = issue.line ? `${issue.file}:${issue.line}` : issue.file;
-                  lines.push(`- \`${loc}\`: ${issue.message}`);
-                }
-                if (totalIssuesCount > cleanIssues.length) {
-                  lines.push("", `_Showing first ${cleanIssues.length} of ${totalIssuesCount} issues._`);
-                }
-              }
-              fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, lines.join("\n") + "\n", "utf8");
+              const sanitize = require(path.join(
+                process.env.GITHUB_WORKSPACE || process.cwd(),
+                "scripts",
+                "ai-review-sanitize.js"
+              ));
+              fs.appendFileSync(
+                process.env.GITHUB_STEP_SUMMARY,
+                sanitize.buildSummaryMarkdown({
+                  verdict,
+                  summary,
+                  issues: cleanIssues,
+                  totalIssuesCount,
+                }),
+                "utf8"
+              );
+            }
+
+            if (verdict === "SKIPPED") {
+              console.log(`::notice title=Trimurti AI Review (SKIPPED)::${escCommandData(summary)}`);
+              process.exit(0);
             }
 
             if (verdict === "APPROVE" && cleanIssues.length === 0 && outcome === "success") {
@@ -433,6 +466,9 @@ jobs:
           '
 
   # --- Component 4: Schema Mapping & Native Webhook / Alert Delivery ---
+  # Model-authored text (summary, issue messages, file names) is untrusted. Every payload below
+  # is built by scripts/ai-review-sanitize.js, which escapes & < >, strips Slack special
+  # mentions and @-mentions, disables Slack unfurling, and labels the text as AI-generated.
   notify_failure:
     name: Notify on Review Failure
     runs-on: ubuntu-latest
@@ -441,13 +477,24 @@ jobs:
     needs: [report_verdict]
     if: failure() && needs.report_verdict.result == 'failure'
     steps:
+      - name: Checkout code
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version-file: .node-version
+
       - name: Send Notifications
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
           TRIMURTI_WEBHOOK_URL: ${{ secrets.TRIMURTI_WEBHOOK_URL }}
           EMAIL_API_KEY: ${{ secrets.EMAIL_API_KEY }}
-          EMAIL_TO: ${{ secrets.EMAIL_TO || vars.EMAIL_TO || 'sanjay@kapoors.com' }}
-          EMAIL_FROM: ${{ secrets.EMAIL_FROM || vars.EMAIL_FROM || 'info@kapoors.com' }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO || vars.EMAIL_TO || '' }}
+          EMAIL_FROM: ${{ secrets.EMAIL_FROM || vars.EMAIL_FROM || '' }}
           PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number || '' }}
           PR_URL: ${{ github.event.pull_request.html_url || (inputs.pr_number && format('{0}/{1}/pull/{2}', github.server_url, github.repository, inputs.pr_number)) || '' }}
           PR_TITLE: ${{ github.event.pull_request.title || '' }}
@@ -464,6 +511,13 @@ jobs:
           TMP_CURL_DIR="$(mktemp -d)"
           trap 'rm -rf "$TMP_CURL_DIR"' EXIT
 
+          SANITIZE_MODULE="${GITHUB_WORKSPACE:-$PWD}/scripts/ai-review-sanitize.js"
+          if [ ! -f "$SANITIZE_MODULE" ]; then
+            echo "::error::Missing $SANITIZE_MODULE; refusing to send unsanitized model output."
+            exit 1
+          fi
+          export SANITIZE_MODULE
+
           SLACK_URL_CLEAN="$(printf '%s' "${SLACK_WEBHOOK_URL:-}" | tr -d '\r\n' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
           TRIMURTI_URL_CLEAN="$(printf '%s' "${TRIMURTI_WEBHOOK_URL:-}" | tr -d '\r\n' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
           EMAIL_KEY_CLEAN="$(printf '%s' "${EMAIL_API_KEY:-}" | tr -d '\r\n' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
@@ -479,30 +533,17 @@ jobs:
             TRIMURTI_BODY="$TMP_CURL_DIR/trimurti.json"
             TRIMURTI_URL_CLEAN="$TRIMURTI_URL_CLEAN" TRIMURTI_CFG="$TRIMURTI_CFG" TRIMURTI_BODY="$TRIMURTI_BODY" node -e '
               const fs = require("fs");
-              let issues = [];
-              try {
-                const parsed = JSON.parse(process.env.REVIEW_ISSUES_JSON || "[]");
-                if (Array.isArray(parsed)) issues = parsed;
-              } catch (_) {}
-              const rawVerdict = (process.env.REVIEW_VERDICT || "").trim();
-              const verdict = rawVerdict === "REQUEST_CHANGES" || rawVerdict === "ERROR" ? rawVerdict : "ERROR";
-              const defaultSummary =
-                verdict === "REQUEST_CHANGES"
-                  ? "The AI Reviewer requested changes."
-                  : "The Trimurti AI Reviewer pipeline failed closed before producing a review verdict.";
-              const payload = {
-                schema: "trimurti.ai_review.v1",
-                verdict,
-                summary: (process.env.REVIEW_SUMMARY || "").trim() || defaultSummary,
-                issues,
-                repository: process.env.REPO_FULL_NAME || "kapoorgalleries/metaplex",
-                pull_request: {
-                  number: Number(process.env.PR_NUMBER) || process.env.PR_NUMBER || null,
-                  title: (process.env.PR_TITLE || "").trim(),
-                  url: process.env.PR_URL || "",
-                },
-                workflow_run_url: process.env.RUN_URL || "",
-              };
+              const sanitize = require(process.env.SANITIZE_MODULE);
+              const payload = sanitize.buildWebhookPayload({
+                verdict: process.env.REVIEW_VERDICT,
+                summary: process.env.REVIEW_SUMMARY,
+                issues: sanitize.parseIssues(process.env.REVIEW_ISSUES_JSON),
+                repo: process.env.REPO_FULL_NAME,
+                num: process.env.PR_NUMBER,
+                title: process.env.PR_TITLE,
+                prUrl: process.env.PR_URL,
+                runUrl: process.env.RUN_URL,
+              });
               fs.writeFileSync(process.env.TRIMURTI_BODY, JSON.stringify(payload), "utf8");
               fs.writeFileSync(
                 process.env.TRIMURTI_CFG,
@@ -528,40 +569,18 @@ jobs:
             SLACK_BODY="$TMP_CURL_DIR/slack.json"
             SLACK_URL_CLEAN="$SLACK_URL_CLEAN" SLACK_CFG="$SLACK_CFG" SLACK_BODY="$SLACK_BODY" node -e '
               const fs = require("fs");
-              const num = process.env.PR_NUMBER || "?";
-              const title = (process.env.PR_TITLE || "").trim();
-              const repo = process.env.REPO_FULL_NAME || "kapoorgalleries/metaplex";
-              const prUrl = process.env.PR_URL || "";
-              const runUrl = process.env.RUN_URL || "";
-              const rawVerdict = (process.env.REVIEW_VERDICT || "").trim();
-              const verdict = rawVerdict === "REQUEST_CHANGES" || rawVerdict === "ERROR" ? rawVerdict : "ERROR";
-              const defaultSummary =
-                verdict === "REQUEST_CHANGES"
-                  ? "The AI Reviewer requested changes."
-                  : "The Trimurti AI Reviewer pipeline failed closed before producing a review verdict.";
-              const summary = (process.env.REVIEW_SUMMARY || "").trim() || defaultSummary;
-              let issues = [];
-              try {
-                const parsed = JSON.parse(process.env.REVIEW_ISSUES_JSON || "[]");
-                if (Array.isArray(parsed)) issues = parsed;
-              } catch (_) {}
-              const issueLines = issues.slice(0, 10).map((issue) => {
-                const loc = issue.line ? `${issue.file}:${issue.line}` : String(issue.file || "unknown");
-                return `• \`${loc}\`: ${issue.message}`;
+              const sanitize = require(process.env.SANITIZE_MODULE);
+              const payload = sanitize.buildSlackPayload({
+                verdict: process.env.REVIEW_VERDICT,
+                summary: process.env.REVIEW_SUMMARY,
+                issues: sanitize.parseIssues(process.env.REVIEW_ISSUES_JSON),
+                repo: process.env.REPO_FULL_NAME,
+                num: process.env.PR_NUMBER,
+                title: process.env.PR_TITLE,
+                prUrl: process.env.PR_URL,
+                runUrl: process.env.RUN_URL,
               });
-              if (issues.length > 10) {
-                issueLines.push(`• ...and ${issues.length - 10} additional issue(s)`);
-              }
-              const lines = [
-                `🚨 *AI PR Review Failed!* (${repo} #${num})`,
-                title ? `PR: ${title}` : null,
-                `Verdict: \`${verdict}\``,
-                `Summary: ${summary}`,
-                issueLines.length > 0 ? `Issues:\n${issueLines.join("\n")}` : null,
-                prUrl ? `View details here: ${prUrl}` : null,
-                runUrl ? `Workflow run: ${runUrl}` : null,
-              ].filter(Boolean);
-              fs.writeFileSync(process.env.SLACK_BODY, JSON.stringify({ text: lines.join("\n") }), "utf8");
+              fs.writeFileSync(process.env.SLACK_BODY, JSON.stringify(payload), "utf8");
               fs.writeFileSync(
                 process.env.SLACK_CFG,
                 `url = ${JSON.stringify(process.env.SLACK_URL_CLEAN)}\nheader = "Content-Type: application/json"\n`,
@@ -582,71 +601,36 @@ jobs:
           fi
 
           # --- Email Notification (SendGrid v3 API) ---
-          if [ -n "$EMAIL_KEY_CLEAN" ]; then
-            configured_count=$((configured_count + 1))
+          # Recipients and sender come only from the EMAIL_TO / EMAIL_FROM repository secrets or
+          # variables; there are no built-in addresses.
+          if [ -n "$EMAIL_KEY_CLEAN" ] && [ -n "$(printf '%s' "${EMAIL_TO:-}" | tr -d '[:space:]')" ] && [ -n "$(printf '%s' "${EMAIL_FROM:-}" | tr -d '[:space:]')" ]; then
             EMAIL_CFG="$TMP_CURL_DIR/email.cfg"
             EMAIL_BODY="$TMP_CURL_DIR/email.json"
-            EMAIL_KEY_CLEAN="$EMAIL_KEY_CLEAN" SENDGRID_API_URL="$SENDGRID_API_URL" EMAIL_CFG="$EMAIL_CFG" EMAIL_BODY="$EMAIL_BODY" node -e '
+            if EMAIL_KEY_CLEAN="$EMAIL_KEY_CLEAN" SENDGRID_API_URL="$SENDGRID_API_URL" EMAIL_CFG="$EMAIL_CFG" EMAIL_BODY="$EMAIL_BODY" node -e '
               const fs = require("fs");
-              const num = process.env.PR_NUMBER || "?";
-              const title = (process.env.PR_TITLE || "").trim();
-              const repo = process.env.REPO_FULL_NAME || "kapoorgalleries/metaplex";
-              const prUrl = process.env.PR_URL || "";
-              const runUrl = process.env.RUN_URL || "";
-              const rawVerdict = (process.env.REVIEW_VERDICT || "").trim();
-              const verdict = rawVerdict === "REQUEST_CHANGES" || rawVerdict === "ERROR" ? rawVerdict : "ERROR";
-              const defaultSummary =
-                verdict === "REQUEST_CHANGES"
-                  ? "The AI Reviewer requested changes."
-                  : "The Trimurti AI Reviewer pipeline failed closed before producing a review verdict.";
-              const summary = (process.env.REVIEW_SUMMARY || "").trim() || defaultSummary;
-              let issues = [];
-              try {
-                const parsed = JSON.parse(process.env.REVIEW_ISSUES_JSON || "[]");
-                if (Array.isArray(parsed)) issues = parsed;
-              } catch (_) {}
-              const seen = new Set();
-              const toList = (process.env.EMAIL_TO || "sanjay@kapoors.com")
-                .split(",")
-                .map((s) => s.trim())
-                .filter((s) => {
-                  if (!s) return false;
-                  const low = s.toLowerCase();
-                  if (seen.has(low)) return false;
-                  seen.add(low);
-                  return true;
-                })
-                .map((email) => ({ email }));
-              if (toList.length === 0) {
-                toList.push({ email: "sanjay@kapoors.com" });
+              const sanitize = require(process.env.SANITIZE_MODULE);
+              const toList = sanitize.parseEmailList(process.env.EMAIL_TO).map((email) => ({ email }));
+              const fromList = sanitize.parseEmailList(process.env.EMAIL_FROM);
+              if (toList.length === 0 || fromList.length === 0) {
+                process.exit(3);
               }
-              const fromEmail = (process.env.EMAIL_FROM || "info@kapoors.com").trim() || "info@kapoors.com";
-              const bodyLines = [
-                `The Trimurti AI Reviewer failed on ${repo} Pull Request #${num}.`,
-                title ? `Title: ${title}` : null,
-                `Verdict: ${verdict}`,
-                "",
-                `Summary: ${summary}`,
-              ];
-              if (issues.length > 0) {
-                bodyLines.push("", "Issues:");
-                for (const issue of issues) {
-                  const loc = issue.line ? `${issue.file}:${issue.line}` : String(issue.file || "unknown");
-                  bodyLines.push(`- ${loc}: ${issue.message}`);
-                }
-              }
-              bodyLines.push(
-                "",
-                prUrl ? `Pull Request: ${prUrl}` : null,
-                runUrl ? `Workflow Run: ${runUrl}` : null
-              );
+              const message = sanitize.buildEmailMessage({
+                verdict: process.env.REVIEW_VERDICT,
+                summary: process.env.REVIEW_SUMMARY,
+                issues: sanitize.parseIssues(process.env.REVIEW_ISSUES_JSON),
+                repo: process.env.REPO_FULL_NAME,
+                num: process.env.PR_NUMBER,
+                title: process.env.PR_TITLE,
+                prUrl: process.env.PR_URL,
+                runUrl: process.env.RUN_URL,
+              });
               fs.writeFileSync(
                 process.env.EMAIL_BODY,
                 JSON.stringify({
                   personalizations: [{ to: toList }],
-                  from: { email: fromEmail, name: "Kapoor Galleries CI" },
-                  subject: `Build Failed: PR #${num}${title ? " - " + title.slice(0, 80) : ""}`,
-                  content: [{ type: "text/plain", value: bodyLines.filter((v) => v !== null).join("\n") }],
+                  from: { email: fromList[0], name: "Kapoor Galleries CI" },
+                  subject: message.subject,
+                  content: [{ type: "text/plain", value: message.body }],
                 }),
                 "utf8"
               );
@@ -660,22 +644,26 @@ jobs:
                 ].join("\n"),
                 "utf8"
               );
-            '
-            if ! curl --proto '=https' --tlsv1.2 -fsS --max-time 30 \
-              --request POST \
-              --config "$EMAIL_CFG" \
-              --data-binary "@$EMAIL_BODY" >/dev/null; then
-              echo "::error::Failed to send SendGrid email notification."
-              notify_rc=1
+            '; then
+              configured_count=$((configured_count + 1))
+              if ! curl --proto '=https' --tlsv1.2 -fsS --max-time 30 \
+                --request POST \
+                --config "$EMAIL_CFG" \
+                --data-binary "@$EMAIL_BODY" >/dev/null; then
+                echo "::error::Failed to send SendGrid email notification."
+                notify_rc=1
+              else
+                echo "Email notification sent."
+              fi
             else
-              echo "Email notification sent."
+              echo "::warning::EMAIL_TO or EMAIL_FROM has no valid address; skipping email notification."
             fi
           else
-            echo "::warning::EMAIL_API_KEY secret is not configured; skipping email notification."
+            echo "::warning::EMAIL_API_KEY, EMAIL_TO, or EMAIL_FROM is not configured; skipping email notification."
           fi
 
           if [ "$configured_count" -eq 0 ]; then
-            echo "::warning::Neither SLACK_WEBHOOK_URL, TRIMURTI_WEBHOOK_URL, nor EMAIL_API_KEY is configured; no external notifications were sent."
+            echo "::warning::No notification channel is configured (Slack, Trimurti webhook, or email); no external notifications were sent."
           fi
 
           exit "$notify_rc"
