@@ -39,8 +39,21 @@ const {
 
 const MANAGED_HOOK_MARKER = '# Managed by scripts/pre-push-review.js';
 const GIT_MAX_BUFFER = 64 * 1024 * 1024;
+const MAX_TIMEOUT_MS = 2147483647;
 const HEX_OID_RE = /^[0-9a-f]{40,64}$/i;
 const ZERO_OID_RE = /^0+$/;
+
+function parsePositiveSafeInt(raw, label, maxValue = Number.MAX_SAFE_INTEGER) {
+  const str = String(raw ?? '');
+  if (!/^\d+$/.test(str)) {
+    throw new Error(`Invalid ${label}: "${raw ?? ''}"`);
+  }
+  const num = Number(str);
+  if (!Number.isSafeInteger(num) || num <= 0 || num > maxValue) {
+    throw new Error(`Invalid ${label}: "${raw ?? ''}"`);
+  }
+  return num;
+}
 
 function defaultReviewDir(env = process.env, platform = process.platform) {
   if (env && env.REVIEW_DIR && env.REVIEW_DIR.trim() !== '') {
@@ -114,10 +127,7 @@ function parsePrePushArgs(argv = process.argv.slice(2)) {
     }
     if (!endOfOptions && (arg === '--timeout-ms' || arg.startsWith('--timeout-ms='))) {
       const val = arg === '--timeout-ms' ? argv[++i] : arg.slice('--timeout-ms='.length);
-      if (!val || !/^\d+$/.test(val) || Number(val) <= 0) {
-        throw new Error(`Invalid --timeout-ms: "${val ?? ''}"`);
-      }
-      timeoutMs = Number(val);
+      timeoutMs = parsePositiveSafeInt(val, '--timeout-ms', MAX_TIMEOUT_MS);
       continue;
     }
     if (
@@ -126,10 +136,7 @@ function parsePrePushArgs(argv = process.argv.slice(2)) {
     ) {
       const val =
         arg === '--max-diff-chars' ? argv[++i] : arg.slice('--max-diff-chars='.length);
-      if (!val || !/^\d+$/.test(val) || Number(val) <= 0) {
-        throw new Error(`Invalid --max-diff-chars: "${val ?? ''}"`);
-      }
-      maxDiffChars = Number(val);
+      maxDiffChars = parsePositiveSafeInt(val, '--max-diff-chars');
       continue;
     }
     if (!endOfOptions && arg.startsWith('-')) {
@@ -176,8 +183,19 @@ function buildGitSubprocessEnv(baseEnv = process.env) {
   return envCopy;
 }
 
+function buildGitArgs(args, options = {}) {
+  const prefix = [];
+  if (options && options.gitDir) {
+    prefix.push(`--git-dir=${options.gitDir}`);
+  }
+  if (options && options.workTree) {
+    prefix.push(`--work-tree=${options.workTree}`);
+  }
+  return prefix.length > 0 ? prefix.concat(args) : args;
+}
+
 function runGit(repoRoot, args, options = {}) {
-  const res = spawnSync('git', args, {
+  const res = spawnSync('git', buildGitArgs(args, options), {
     cwd: repoRoot,
     env: buildGitSubprocessEnv(options.env || process.env),
     encoding: 'utf8',
@@ -191,15 +209,15 @@ function runGit(repoRoot, args, options = {}) {
   return res;
 }
 
-function resolveRepoRoot(cwd = process.cwd(), fallbackDir = null) {
+function resolveRepoRoot(cwd = process.cwd(), fallbackDir = null, options = {}) {
   if (cwd && fs.existsSync(cwd)) {
-    const res = runGit(cwd, ['rev-parse', '--show-toplevel']);
+    const res = runGit(cwd, ['rev-parse', '--show-toplevel'], options);
     if (res.status === 0 && res.stdout.trim()) {
       return res.stdout.trim();
     }
   }
   if (fallbackDir && fs.existsSync(fallbackDir)) {
-    const fbRes = runGit(fallbackDir, ['rev-parse', '--show-toplevel']);
+    const fbRes = runGit(fallbackDir, ['rev-parse', '--show-toplevel'], options);
     if (fbRes.status === 0 && fbRes.stdout.trim()) {
       return fbRes.stdout.trim();
     }
@@ -207,34 +225,114 @@ function resolveRepoRoot(cwd = process.cwd(), fallbackDir = null) {
   throw new Error(`Not inside a git repository: ${cwd}`);
 }
 
-function resolveCommitOid(repoRoot, rev) {
+function resolveTargetGitContext(explicitRepoRoot, fallbackRepoRoot = null, env = process.env) {
+  if (explicitRepoRoot) {
+    return {
+      repoRoot: resolveRepoRoot(explicitRepoRoot, null, { env }),
+      gitDir: null,
+      workTree: null,
+    };
+  }
+  const hasExplicitGitDir = Boolean(env && env.GIT_DIR && String(env.GIT_DIR).trim() !== '');
+  const hasExplicitWorkTree = Boolean(
+    env && env.GIT_WORK_TREE && String(env.GIT_WORK_TREE).trim() !== ''
+  );
+  if (hasExplicitGitDir || hasExplicitWorkTree) {
+    const baseCwd = fs.existsSync(process.cwd()) ? process.cwd() : os.tmpdir();
+    const probeEnv = buildGitSubprocessEnv(env);
+    if (hasExplicitGitDir) {
+      probeEnv.GIT_DIR = String(env.GIT_DIR).trim();
+    }
+    if (hasExplicitWorkTree) {
+      probeEnv.GIT_WORK_TREE = String(env.GIT_WORK_TREE).trim();
+    }
+    const gitDirRes = spawnSync('git', ['rev-parse', '--git-dir'], {
+      cwd: baseCwd,
+      env: probeEnv,
+      encoding: 'utf8',
+      maxBuffer: GIT_MAX_BUFFER,
+      windowsHide: true,
+    });
+    if (gitDirRes.error || gitDirRes.status !== 0 || !gitDirRes.stdout.trim()) {
+      throw new Error(
+        `Not inside a git repository (invalid GIT_DIR/GIT_WORK_TREE): ${baseCwd}`
+      );
+    }
+    const gitDir = path.resolve(baseCwd, gitDirRes.stdout.trim());
+    if (hasExplicitWorkTree) {
+      const workTree = path.resolve(baseCwd, String(env.GIT_WORK_TREE).trim());
+      if (!fs.existsSync(workTree)) {
+        throw new Error(`GIT_WORK_TREE does not exist: ${workTree}`);
+      }
+      return { repoRoot: workTree, gitDir, workTree };
+    }
+    if (path.basename(gitDir) === '.git' && fs.existsSync(path.dirname(gitDir))) {
+      return { repoRoot: path.dirname(gitDir), gitDir, workTree: null };
+    }
+    const topRes = spawnSync('git', ['rev-parse', '--show-toplevel'], {
+      cwd: baseCwd,
+      env: probeEnv,
+      encoding: 'utf8',
+      maxBuffer: GIT_MAX_BUFFER,
+      windowsHide: true,
+    });
+    const topDir =
+      !topRes.error && topRes.status === 0 && topRes.stdout.trim()
+        ? path.resolve(baseCwd, topRes.stdout.trim())
+        : baseCwd;
+    return {
+      repoRoot: fs.existsSync(topDir) ? topDir : os.tmpdir(),
+      gitDir,
+      workTree: null,
+    };
+  }
+  return {
+    repoRoot: resolveRepoRoot(process.cwd(), fallbackRepoRoot, { env }),
+    gitDir: null,
+    workTree: null,
+  };
+}
+
+function resolveCommitOid(repoRoot, rev, gitOptions = {}) {
   if (!rev) return null;
-  const res = runGit(repoRoot, ['rev-parse', '--verify', '--quiet', `${rev}^{commit}`]);
+  const res = runGit(
+    repoRoot,
+    ['rev-parse', '--verify', '--quiet', `${rev}^{commit}`],
+    gitOptions
+  );
   if (res.status !== 0) return null;
   const oid = res.stdout.trim();
   return HEX_OID_RE.test(oid) ? oid : null;
 }
 
-function resolveTreeOid(repoRoot, rev) {
+function resolveTreeOid(repoRoot, rev, gitOptions = {}) {
   if (!rev) return null;
-  const res = runGit(repoRoot, ['rev-parse', '--verify', '--quiet', `${rev}^{tree}`]);
+  const res = runGit(
+    repoRoot,
+    ['rev-parse', '--verify', '--quiet', `${rev}^{tree}`],
+    gitOptions
+  );
   if (res.status !== 0) return null;
   const oid = res.stdout.trim();
   return HEX_OID_RE.test(oid) ? oid : null;
 }
 
-function resolveBlobOid(repoRoot, rev) {
+function resolveBlobOid(repoRoot, rev, gitOptions = {}) {
   if (!rev) return null;
-  const res = runGit(repoRoot, ['rev-parse', '--verify', '--quiet', `${rev}^{blob}`]);
+  const res = runGit(
+    repoRoot,
+    ['rev-parse', '--verify', '--quiet', `${rev}^{blob}`],
+    gitOptions
+  );
   if (res.status !== 0) return null;
   const oid = res.stdout.trim();
   return HEX_OID_RE.test(oid) ? oid : null;
 }
 
-function formatPushedBlobDiff(repoRoot, blobOid, refLabel) {
-  const res = spawnSync('git', ['cat-file', 'blob', blobOid], {
+function formatPushedBlobDiff(repoRoot, blobOid, refLabel, gitOptions = {}) {
+  const res = spawnSync('git', buildGitArgs(['cat-file', 'blob', blobOid], gitOptions), {
     cwd: repoRoot,
-    env: buildGitSubprocessEnv(process.env),
+    env: buildGitSubprocessEnv(gitOptions.env || process.env),
     maxBuffer: GIT_MAX_BUFFER,
     windowsHide: true,
   });
@@ -283,34 +381,47 @@ function formatPushedBlobDiff(repoRoot, blobOid, refLabel) {
   return out.join('\n');
 }
 
-function getMergeBase(repoRoot, oidA, oidB) {
-  const res = runGit(repoRoot, ['merge-base', oidA, oidB]);
+function getMergeBase(repoRoot, oidA, oidB, gitOptions = {}) {
+  const res = runGit(repoRoot, ['merge-base', oidA, oidB], gitOptions);
   if (res.status !== 0) return null;
   const oid = res.stdout.trim();
   return HEX_OID_RE.test(oid) ? oid : null;
 }
 
-function isAncestor(repoRoot, ancestorOid, descendantOid) {
+function isAncestor(repoRoot, ancestorOid, descendantOid, gitOptions = {}) {
   if (!ancestorOid || !descendantOid) return false;
   if (ancestorOid === descendantOid) return true;
-  const res = runGit(repoRoot, ['merge-base', '--is-ancestor', ancestorOid, descendantOid]);
+  const res = runGit(
+    repoRoot,
+    ['merge-base', '--is-ancestor', ancestorOid, descendantOid],
+    gitOptions
+  );
   return res.status === 0;
 }
 
-function isShallowRepository(repoRoot) {
-  const res = runGit(repoRoot, ['rev-parse', '--is-shallow-repository']);
+function isShallowRepository(repoRoot, gitOptions = {}) {
+  const res = runGit(repoRoot, ['rev-parse', '--is-shallow-repository'], gitOptions);
   return res.status === 0 && res.stdout.trim() === 'true';
 }
 
-function getEmptyTreeOid(repoRoot) {
-  const res = runGit(repoRoot, ['hash-object', '-t', 'tree', '--stdin'], { input: '' });
+function getEmptyTreeOid(repoRoot, gitOptions = {}) {
+  const res = runGit(
+    repoRoot,
+    ['hash-object', '-t', 'tree', '--stdin'],
+    Object.assign({}, gitOptions, { input: '' })
+  );
   if (res.status !== 0 || !res.stdout.trim()) {
     throw new Error('Unable to compute git empty tree OID');
   }
   return res.stdout.trim();
 }
 
-function resolveDefaultBaseCommit(repoRoot, remoteName = 'origin', refOptions = {}) {
+function resolveDefaultBaseCommit(
+  repoRoot,
+  remoteName = 'origin',
+  refOptions = {},
+  gitOptions = {}
+) {
   const localRef =
     typeof refOptions === 'string' ? refOptions : (refOptions && refOptions.localRef) || '';
   const remoteRef =
@@ -336,14 +447,14 @@ function resolveDefaultBaseCommit(repoRoot, remoteName = 'origin', refOptions = 
     );
   }
   for (const cand of remoteCandidates) {
-    const oid = resolveCommitOid(repoRoot, cand);
+    const oid = resolveCommitOid(repoRoot, cand, gitOptions);
     if (oid) return oid;
   }
 
   if (allowLocalHeads) {
     for (const localCand of ['refs/heads/main', 'refs/heads/master']) {
       if (localCand === localRef || localCand === remoteRef) continue;
-      const oid = resolveCommitOid(repoRoot, localCand);
+      const oid = resolveCommitOid(repoRoot, localCand, gitOptions);
       if (oid) return oid;
     }
   }
@@ -351,7 +462,13 @@ function resolveDefaultBaseCommit(repoRoot, remoteName = 'origin', refOptions = 
 }
 
 function parsePrePushStdin(stdinText) {
-  if (typeof stdinText !== 'string' || stdinText.trim() === '') {
+  if (typeof stdinText !== 'string') {
+    return [];
+  }
+  if (stdinText.includes('\0')) {
+    throw new Error('Invalid NUL byte in git pre-push stdin');
+  }
+  if (stdinText.trim() === '') {
     return [];
   }
   const updates = [];
@@ -374,18 +491,21 @@ function parsePrePushStdin(stdinText) {
 
 function computePrePushDiff(repoRoot, options = {}) {
   const remoteName = options.remoteName || 'origin';
+  const gitOptions = {
+    env: options.env,
+    gitDir: options.gitDir || null,
+    workTree: options.workTree || null,
+  };
 
   if (options.range) {
     if (options.range.startsWith('-')) {
       throw new Error(`Invalid revision range "${options.range}"`);
     }
-    const diffRes = runGit(repoRoot, [
-      'diff',
-      '--no-ext-diff',
-      '--no-color',
-      options.range,
-      '--',
-    ]);
+    const diffRes = runGit(
+      repoRoot,
+      ['diff', '--no-ext-diff', '--no-color', options.range, '--'],
+      gitOptions
+    );
     if (diffRes.status !== 0) {
       throw new Error(
         `git diff failed for range "${options.range}": ${(diffRes.stderr || '').trim()}`
@@ -402,11 +522,11 @@ function computePrePushDiff(repoRoot, options = {}) {
       return '';
     }
   } else {
-    const headOid = resolveCommitOid(repoRoot, 'HEAD');
+    const headOid = resolveCommitOid(repoRoot, 'HEAD', gitOptions);
     if (!headOid) {
       return '';
     }
-    const symRes = runGit(repoRoot, ['symbolic-ref', '--quiet', 'HEAD']);
+    const symRes = runGit(repoRoot, ['symbolic-ref', '--quiet', 'HEAD'], gitOptions);
     const currentRef = symRes.status === 0 ? symRes.stdout.trim() : 'HEAD';
     updates = [
       {
@@ -427,28 +547,26 @@ function computePrePushDiff(repoRoot, options = {}) {
     if (ZERO_OID_RE.test(update.localOid)) {
       continue;
     }
-    const localCommit = resolveCommitOid(repoRoot, update.localOid);
+    const localCommit = resolveCommitOid(repoRoot, update.localOid, gitOptions);
     if (!localCommit) {
-      const localTree = resolveTreeOid(repoRoot, update.localOid);
+      const localTree = resolveTreeOid(repoRoot, update.localOid, gitOptions);
       if (localTree) {
         const remoteTree = !ZERO_OID_RE.test(update.remoteOid)
-          ? resolveTreeOid(repoRoot, update.remoteOid)
+          ? resolveTreeOid(repoRoot, update.remoteOid, gitOptions)
           : null;
         if (remoteTree === localTree) {
           continue;
         }
-        const treeFromOid = remoteTree || (emptyTreeOid = emptyTreeOid || getEmptyTreeOid(repoRoot));
+        const treeFromOid =
+          remoteTree || (emptyTreeOid = emptyTreeOid || getEmptyTreeOid(repoRoot, gitOptions));
         const treePairKey = `tree:${treeFromOid}..${localTree}`;
         if (!seenPairs.has(treePairKey)) {
           seenPairs.add(treePairKey);
-          const treeDiffRes = runGit(repoRoot, [
-            'diff',
-            '--no-ext-diff',
-            '--no-color',
-            treeFromOid,
-            localTree,
-            '--',
-          ]);
+          const treeDiffRes = runGit(
+            repoRoot,
+            ['diff', '--no-ext-diff', '--no-color', treeFromOid, localTree, '--'],
+            gitOptions
+          );
           if (treeDiffRes.status !== 0) {
             throw new Error(
               `git diff failed for pushed tree ${localTree}: ${(treeDiffRes.stderr || '').trim()}`
@@ -461,10 +579,10 @@ function computePrePushDiff(repoRoot, options = {}) {
         continue;
       }
 
-      const localBlob = resolveBlobOid(repoRoot, update.localOid);
+      const localBlob = resolveBlobOid(repoRoot, update.localOid, gitOptions);
       if (localBlob) {
         const remoteBlob = !ZERO_OID_RE.test(update.remoteOid)
-          ? resolveBlobOid(repoRoot, update.remoteOid)
+          ? resolveBlobOid(repoRoot, update.remoteOid, gitOptions)
           : null;
         if (remoteBlob === localBlob) {
           continue;
@@ -472,7 +590,14 @@ function computePrePushDiff(repoRoot, options = {}) {
         const blobKey = `blob:${localBlob}:${update.remoteRef || update.localRef}`;
         if (!seenPairs.has(blobKey)) {
           seenPairs.add(blobKey);
-          chunks.push(formatPushedBlobDiff(repoRoot, localBlob, update.remoteRef || update.localRef));
+          chunks.push(
+            formatPushedBlobDiff(
+              repoRoot,
+              localBlob,
+              update.remoteRef || update.localRef,
+              gitOptions
+            )
+          );
         }
         continue;
       }
@@ -483,7 +608,7 @@ function computePrePushDiff(repoRoot, options = {}) {
     }
 
     const remoteCommit = !ZERO_OID_RE.test(update.remoteOid)
-      ? resolveCommitOid(repoRoot, update.remoteOid)
+      ? resolveCommitOid(repoRoot, update.remoteOid, gitOptions)
       : null;
 
     let fromOid = null;
@@ -491,7 +616,7 @@ function computePrePushDiff(repoRoot, options = {}) {
       if (remoteCommit === localCommit) {
         continue;
       }
-      if (isAncestor(repoRoot, remoteCommit, localCommit)) {
+      if (isAncestor(repoRoot, remoteCommit, localCommit, gitOptions)) {
         // Fast-forward push: review strictly the newly pushed commits.
         fromOid = remoteCommit;
       } else {
@@ -499,13 +624,18 @@ function computePrePushDiff(repoRoot, options = {}) {
         // prefer merge-base against the remote's default branch so rebased PR branches
         // exclude upstream master commits and ancestor rewinds still scan remaining PR commits;
         // otherwise diff directly from the overwritten remoteCommit tree.
-        const defaultBase = resolveDefaultBaseCommit(repoRoot, remoteName, {
-          localRef: update.localRef,
-          remoteRef: update.remoteRef,
-          allowLocalHeads: !isHookStdinMode,
-        });
+        const defaultBase = resolveDefaultBaseCommit(
+          repoRoot,
+          remoteName,
+          {
+            localRef: update.localRef,
+            remoteRef: update.remoteRef,
+            allowLocalHeads: !isHookStdinMode,
+          },
+          gitOptions
+        );
         const mbDefault = defaultBase
-          ? getMergeBase(repoRoot, defaultBase, localCommit)
+          ? getMergeBase(repoRoot, defaultBase, localCommit, gitOptions)
           : null;
         if (mbDefault && mbDefault !== localCommit) {
           fromOid = mbDefault;
@@ -516,28 +646,33 @@ function computePrePushDiff(repoRoot, options = {}) {
         }
       }
     } else {
-      const defaultBase = resolveDefaultBaseCommit(repoRoot, remoteName, {
-        localRef: update.localRef,
-        remoteRef: update.remoteRef,
-        allowLocalHeads: !isHookStdinMode,
-      });
+      const defaultBase = resolveDefaultBaseCommit(
+        repoRoot,
+        remoteName,
+        {
+          localRef: update.localRef,
+          remoteRef: update.remoteRef,
+          allowLocalHeads: !isHookStdinMode,
+        },
+        gitOptions
+      );
       if (defaultBase) {
-        const mb = getMergeBase(repoRoot, defaultBase, localCommit);
+        const mb = getMergeBase(repoRoot, defaultBase, localCommit, gitOptions);
         if (mb) {
           fromOid = mb;
         } else {
           if (shallowChecked === null) {
-            shallowChecked = isShallowRepository(repoRoot);
+            shallowChecked = isShallowRepository(repoRoot, gitOptions);
           }
           if (shallowChecked) {
             fromOid = defaultBase;
           } else {
-            emptyTreeOid = emptyTreeOid || getEmptyTreeOid(repoRoot);
+            emptyTreeOid = emptyTreeOid || getEmptyTreeOid(repoRoot, gitOptions);
             fromOid = emptyTreeOid;
           }
         }
       } else {
-        emptyTreeOid = emptyTreeOid || getEmptyTreeOid(repoRoot);
+        emptyTreeOid = emptyTreeOid || getEmptyTreeOid(repoRoot, gitOptions);
         fromOid = emptyTreeOid;
       }
     }
@@ -552,14 +687,11 @@ function computePrePushDiff(repoRoot, options = {}) {
     }
     seenPairs.add(pairKey);
 
-    const diffRes = runGit(repoRoot, [
-      'diff',
-      '--no-ext-diff',
-      '--no-color',
-      fromOid,
-      localCommit,
-      '--',
-    ]);
+    const diffRes = runGit(
+      repoRoot,
+      ['diff', '--no-ext-diff', '--no-color', fromOid, localCommit, '--'],
+      gitOptions
+    );
     if (diffRes.status !== 0) {
       throw new Error(
         `git diff failed for ${pairKey}: ${(diffRes.stderr || '').trim()}`
@@ -601,7 +733,20 @@ function buildHookScript() {
     `${MANAGED_HOOK_MARKER} — Trimurti local pre-push AI review gate.`,
     'set -eu',
     '',
+    'HOOK_GIT_DIR="$(git rev-parse --git-dir 2>/dev/null || true)"',
+    'if [ -n "$HOOK_GIT_DIR" ] && [ -d "$HOOK_GIT_DIR" ]; then',
+    '  HOOK_GIT_DIR="$(cd "$HOOK_GIT_DIR" 2>/dev/null && pwd || printf \'%s\' "$HOOK_GIT_DIR")"',
+    'fi',
+    '',
     'REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"',
+    'if [ -z "${GIT_WORK_TREE:-}" ] && [ -n "${GIT_DIR:-}" ] && [ -n "$HOOK_GIT_DIR" ]; then',
+    '  if [ "$(basename "$HOOK_GIT_DIR")" = ".git" ]; then',
+    '    CAND_ROOT="$(dirname "$HOOK_GIT_DIR")"',
+    '    if [ -d "$CAND_ROOT" ] && [ -f "$CAND_ROOT/scripts/pre-push-review.js" ]; then',
+    '      REPO_ROOT="$CAND_ROOT"',
+    '    fi',
+    '  fi',
+    'fi',
     'if [ -z "$REPO_ROOT" ] || [ ! -f "$REPO_ROOT/scripts/pre-push-review.js" ]; then',
     '  echo "Trimurti pre-push AI review failed closed: scripts/pre-push-review.js not found." >&2',
     '  exit 1',
@@ -657,15 +802,29 @@ function buildHookScript() {
     '  exit 1',
     'fi',
     '',
+    'if [ -n "${GIT_DIR:-}" ] && [ -n "$HOOK_GIT_DIR" ]; then',
+    '  export GIT_DIR="$HOOK_GIT_DIR"',
+    'fi',
+    'if [ -n "${GIT_WORK_TREE:-}" ] && [ -d "$REPO_ROOT" ]; then',
+    '  export GIT_WORK_TREE="$REPO_ROOT"',
+    'fi',
     'export PATH="$(dirname "$NODE_BIN"):$PATH"',
+    'cd "$REPO_ROOT"',
     'exec "$NODE_BIN" "$REPO_ROOT/scripts/pre-push-review.js" "$@"',
     '',
   ].join('\n');
 }
 
 function installPrePushHook(repoRoot, options = {}) {
-  const resolvedRoot = resolveRepoRoot(repoRoot);
-  const hooksRes = runGit(resolvedRoot, ['rev-parse', '--git-path', 'hooks']);
+  const gitOptions = {
+    env: options.env,
+    gitDir: options.gitDir || null,
+    workTree: options.workTree || null,
+  };
+  const resolvedRoot = options.gitDir
+    ? repoRoot
+    : resolveRepoRoot(repoRoot, null, gitOptions);
+  const hooksRes = runGit(resolvedRoot, ['rev-parse', '--git-path', 'hooks'], gitOptions);
   if (hooksRes.status !== 0 || !hooksRes.stdout.trim()) {
     throw new Error('Unable to resolve git hooks directory');
   }
@@ -738,10 +897,12 @@ function writeDiffAtomically(diffPath, diffContent) {
 
 async function runPrePushReview(options = {}) {
   const env = options.env || process.env;
-  const repoRoot = resolveRepoRoot(
-    options.repoRoot || process.cwd(),
-    options.repoRoot ? null : options.fallbackRepoRoot || null
+  const targetCtx = resolveTargetGitContext(
+    options.repoRoot,
+    options.repoRoot ? null : options.fallbackRepoRoot || null,
+    env
   );
+  const repoRoot = targetCtx.repoRoot;
   const workDir = options.reviewDir || defaultReviewDir(env);
   prepareSecureReviewDir(workDir);
 
@@ -768,6 +929,9 @@ async function runPrePushReview(options = {}) {
         remoteName: options.remoteName,
         stdinText: options.stdinText,
         range: options.range,
+        env,
+        gitDir: targetCtx.gitDir,
+        workTree: targetCtx.workTree,
       });
 
       writeDiffAtomically(diffPath, diffContent);
@@ -799,45 +963,166 @@ async function runPrePushReview(options = {}) {
 }
 
 const MAX_STDIN_BYTES = 16 * 1024 * 1024;
+const DEFAULT_STDIN_TIMEOUT_MS = 30000;
 
-function readAllStdin(stream = process.stdin, maxBytes = MAX_STDIN_BYTES) {
+function resolveStdinTimeoutMs(explicitTimeoutMs, cliTimeoutMs, env = process.env) {
+  if (explicitTimeoutMs !== undefined) {
+    if (
+      !Number.isFinite(explicitTimeoutMs) ||
+      explicitTimeoutMs <= 0 ||
+      explicitTimeoutMs > MAX_TIMEOUT_MS
+    ) {
+      throw new Error(`Invalid stdinTimeoutMs: "${explicitTimeoutMs}"`);
+    }
+    return explicitTimeoutMs;
+  }
+  const rawEnv =
+    env && env.PRE_PUSH_STDIN_TIMEOUT_MS !== undefined
+      ? String(env.PRE_PUSH_STDIN_TIMEOUT_MS).trim()
+      : '';
+  if (rawEnv !== '') {
+    return parsePositiveSafeInt(rawEnv, 'PRE_PUSH_STDIN_TIMEOUT_MS', MAX_TIMEOUT_MS);
+  }
+  if (Number.isFinite(cliTimeoutMs) && cliTimeoutMs > 0) {
+    return Math.min(cliTimeoutMs, DEFAULT_STDIN_TIMEOUT_MS);
+  }
+  if (
+    env &&
+    ((env.REVIEWER_TIMEOUT_MS !== undefined && env.REVIEWER_TIMEOUT_MS !== '') ||
+      (env.AGY_TIMEOUT_MS !== undefined && env.AGY_TIMEOUT_MS !== ''))
+  ) {
+    return Math.min(resolveEffectiveTimeoutMs(undefined, env), DEFAULT_STDIN_TIMEOUT_MS);
+  }
+  return DEFAULT_STDIN_TIMEOUT_MS;
+}
+
+function readAllStdin(
+  stream = process.stdin,
+  maxBytes = MAX_STDIN_BYTES,
+  timeoutMs = DEFAULT_STDIN_TIMEOUT_MS
+) {
   return new Promise((resolve, reject) => {
-    if (!stream || typeof stream.on !== 'function') {
+    if (
+      !stream ||
+      typeof stream.on !== 'function' ||
+      typeof stream.removeListener !== 'function'
+    ) {
       reject(new Error('Invalid stdin stream'));
       return;
     }
-    if (stream.readableEnded) {
-      resolve('');
+    const installLateErrorGuard = () => {
+      const swallowLateError = () => {};
+      const clearLateError = () => {
+        stream.removeListener('error', swallowLateError);
+      };
+      stream.on('error', swallowLateError);
+      if (stream.closed || (stream._readableState && stream._readableState.closed)) {
+        setImmediate(clearLateError);
+      } else {
+        stream.once('close', clearLateError);
+      }
+    };
+
+    if (
+      !Number.isFinite(maxBytes) ||
+      maxBytes <= 0 ||
+      maxBytes > Number.MAX_SAFE_INTEGER
+    ) {
+      installLateErrorGuard();
+      reject(new Error(`Invalid stdin maxBytes: ${maxBytes}`));
+      return;
+    }
+    if (
+      timeoutMs !== undefined &&
+      timeoutMs !== null &&
+      (!Number.isFinite(timeoutMs) || timeoutMs <= 0 || timeoutMs > MAX_TIMEOUT_MS)
+    ) {
+      installLateErrorGuard();
+      reject(new Error(`Invalid stdin timeoutMs: ${timeoutMs}`));
+      return;
+    }
+    if (stream.errored) {
+      installLateErrorGuard();
+      reject(
+        stream.errored instanceof Error
+          ? stream.errored
+          : new Error(`Stdin stream errored before EOF: ${String(stream.errored)}`)
+      );
       return;
     }
     if (stream.destroyed) {
+      installLateErrorGuard();
       reject(new Error('Stdin stream was destroyed before EOF'));
+      return;
+    }
+    if (stream.readableEnded || stream.readableDidRead) {
+      installLateErrorGuard();
+      reject(new Error('Stdin stream was already consumed before readAllStdin attached'));
       return;
     }
 
     const chunks = [];
     let totalBytes = 0;
     let settled = false;
+    let timer = null;
 
     const cleanup = () => {
+      if (timer !== null) {
+        clearTimeout(timer);
+        timer = null;
+      }
       stream.removeListener('data', onData);
       stream.removeListener('end', onEnd);
       stream.removeListener('error', onError);
       stream.removeListener('close', onClose);
     };
 
-    const finishError = (err) => {
+    const finishError = (err, abortActiveStream = false) => {
       if (settled) return;
       settled = true;
-      cleanup();
+      chunks.length = 0;
+      if (abortActiveStream) {
+        // Attach before cleanup() and pause() so synchronous pause->destroy(err)
+        // or nextTick emitErrorNT on an already-destroyed stream never goes unhandled.
+        installLateErrorGuard();
+        cleanup();
+        if (typeof stream.pause === 'function') {
+          try {
+            stream.pause();
+          } catch (_) {}
+        }
+        if (stream === process.stdin && typeof stream.unref === 'function') {
+          try {
+            stream.unref();
+          } catch (_) {}
+        }
+      } else {
+        cleanup();
+      }
       reject(err);
     };
 
     const onData = (chunk) => {
-      const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk), 'utf8');
+      let buf;
+      if (Buffer.isBuffer(chunk)) {
+        buf = chunk;
+      } else if (ArrayBuffer.isView(chunk)) {
+        buf = Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength);
+      } else if (chunk instanceof ArrayBuffer) {
+        buf = Buffer.from(chunk);
+      } else if (typeof chunk === 'string') {
+        buf = Buffer.from(chunk, 'utf8');
+      } else {
+        finishError(new Error(`Invalid pre-push stdin chunk type: ${typeof chunk}`), true);
+        return;
+      }
+      if (buf.includes(0)) {
+        finishError(new Error('Invalid NUL byte in pre-push stdin'), true);
+        return;
+      }
       totalBytes += buf.length;
       if (totalBytes > maxBytes) {
-        finishError(new Error(`Pre-push stdin exceeded maximum size of ${maxBytes} bytes`));
+        finishError(new Error(`Pre-push stdin exceeded maximum size of ${maxBytes} bytes`), true);
         return;
       }
       chunks.push(buf);
@@ -845,19 +1130,35 @@ function readAllStdin(stream = process.stdin, maxBytes = MAX_STDIN_BYTES) {
 
     const onEnd = () => {
       if (settled) return;
+      let decoded;
+      try {
+        decoded = new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks));
+      } catch (_) {
+        finishError(new Error('Invalid UTF-8 byte sequence in pre-push stdin'), false);
+        return;
+      }
       settled = true;
       cleanup();
-      resolve(Buffer.concat(chunks).toString('utf8'));
+      resolve(decoded);
     };
 
     const onError = (err) => {
-      finishError(err instanceof Error ? err : new Error(String(err)));
+      finishError(err instanceof Error ? err : new Error(String(err)), true);
     };
 
     const onClose = () => {
       if (settled) return;
-      finishError(new Error('Stdin stream closed unexpectedly before EOF'));
+      finishError(new Error('Stdin stream closed unexpectedly before EOF'), false);
     };
+
+    if (timeoutMs !== undefined && timeoutMs !== null) {
+      timer = setTimeout(() => {
+        finishError(
+          new Error(`Timed out after ${timeoutMs}ms waiting for pre-push stdin EOF`),
+          true
+        );
+      }, timeoutMs);
+    }
 
     stream.on('data', onData);
     stream.on('end', onEnd);
@@ -890,12 +1191,12 @@ async function runCli(argv = process.argv.slice(2), env = process.env, io = {}) 
 
   if (opts.installHook) {
     try {
-      const targetRoot = resolveRepoRoot(
-        explicitRepoRoot || process.cwd(),
-        fallbackRepoRoot
-      );
-      const { hookPath, backupPath } = installPrePushHook(targetRoot, {
+      const targetCtx = resolveTargetGitContext(explicitRepoRoot, fallbackRepoRoot, env);
+      const { hookPath, backupPath } = installPrePushHook(targetCtx.repoRoot, {
         force: opts.force,
+        env,
+        gitDir: targetCtx.gitDir,
+        workTree: targetCtx.workTree,
       });
       console.log(`Installed Trimurti pre-push AI review hook at ${hookPath}`);
       if (backupPath) {
@@ -919,10 +1220,20 @@ async function runCli(argv = process.argv.slice(2), env = process.env, io = {}) 
     stdinText = undefined;
   } else if (io.stdinText !== undefined) {
     stdinText = io.stdinText;
-  } else if (!isTty) {
+  } else if (!isTty && (opts.positionalCount === 2 || Boolean(io.stdinStream))) {
+    // Only read hook ref lines from stdin in git's `<remote-name> <remote-url>` hook
+    // protocol (2 positional args) or when a test explicitly injects `io.stdinStream`.
+    // Manual CLI checks (`positionalCount < 2`) in non-TTY runners with open/idle
+    // stdin pipes must never block waiting for EOF on `process.stdin`.
     let rawStdin;
     try {
-      rawStdin = await readAllStdin(io.stdinStream || process.stdin);
+      const stdinTimeoutMs = resolveStdinTimeoutMs(io.stdinTimeoutMs, opts.timeoutMs, env);
+      const maxStdinBytes = io.maxStdinBytes !== undefined ? io.maxStdinBytes : MAX_STDIN_BYTES;
+      rawStdin = await readAllStdin(
+        io.stdinStream || process.stdin,
+        maxStdinBytes,
+        stdinTimeoutMs
+      );
     } catch (err) {
       console.error(
         `[Trimurti Pre-Push Review] ERROR (fail-closed): Failed to read pre-push stdin: ${err.message}`
@@ -936,7 +1247,6 @@ async function runCli(argv = process.argv.slice(2), env = process.env, io = {}) 
       // with zero ref updates on stdin (up-to-date push).
       stdinText = '';
     } else {
-      // Invoked as a manual/script CLI check in a non-TTY subshell without `--range`.
       stdinText = undefined;
     }
   } else {
@@ -988,12 +1298,17 @@ if (require.main === module) {
 
 module.exports = {
   MANAGED_HOOK_MARKER,
+  MAX_STDIN_BYTES,
+  DEFAULT_STDIN_TIMEOUT_MS,
+  MAX_TIMEOUT_MS,
   defaultReviewDir,
   parsePrePushArgs,
   parsePrePushStdin,
   computePrePushDiff,
   installPrePushHook,
   runPrePushReview,
+  resolveTargetGitContext,
+  resolveStdinTimeoutMs,
   readAllStdin,
   runCli,
 };
