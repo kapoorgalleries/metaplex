@@ -92,7 +92,7 @@ export function parseMdTable(text: string): Record<string, string>[] {
 }
 
 function mdCell(v: unknown): string {
-  return String(v ?? '').replace(/\r?\n/g, ' ').replace(/\|/g, '\\|');
+  return String(v ?? '').replace(/\r?\n/g, ' ').replace(/\\/g, '\\\\').replace(/\|/g, '\\|');
 }
 
 export function mdTable(rows: ReadonlyArray<object>, columns: string[]): string {

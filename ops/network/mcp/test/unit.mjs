@@ -253,6 +253,8 @@ if (pwshExe) {
 }
 
 assert.equal(mdTable([{ a: 'x | y', b: 'l1\nl2' }], ['a', 'b']).split('\n')[2], '| x \\| y | l1 l2 |');
+// a backslash is escaped first, so a trailing one cannot turn the escaped pipe back into a cell break
+assert.equal(mdTable([{ a: 'C:\\dir\\', b: 'p\\|q' }], ['a', 'b']).split('\n')[2], '| C:\\\\dir\\\\ | p\\\\\\|q |');
 const long = 'HEAD' + 'x'.repeat(20000) + 'TAIL';
 const c = clipStream(long);
 assert.ok(c.startsWith('HEAD') && c.endsWith('TAIL') && c.length < 10200);
