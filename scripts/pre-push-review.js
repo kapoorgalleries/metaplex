@@ -26,6 +26,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const tty = require('tty');
 const { spawnSync } = require('child_process');
 
 const {
@@ -797,12 +798,75 @@ async function runPrePushReview(options = {}) {
   );
 }
 
-function readAllStdinSync() {
-  try {
-    return fs.readFileSync(0, 'utf8');
-  } catch (_) {
-    return '';
-  }
+const MAX_STDIN_BYTES = 16 * 1024 * 1024;
+
+function readAllStdin(stream = process.stdin, maxBytes = MAX_STDIN_BYTES) {
+  return new Promise((resolve, reject) => {
+    if (!stream || typeof stream.on !== 'function') {
+      reject(new Error('Invalid stdin stream'));
+      return;
+    }
+    if (stream.readableEnded) {
+      resolve('');
+      return;
+    }
+    if (stream.destroyed) {
+      reject(new Error('Stdin stream was destroyed before EOF'));
+      return;
+    }
+
+    const chunks = [];
+    let totalBytes = 0;
+    let settled = false;
+
+    const cleanup = () => {
+      stream.removeListener('data', onData);
+      stream.removeListener('end', onEnd);
+      stream.removeListener('error', onError);
+      stream.removeListener('close', onClose);
+    };
+
+    const finishError = (err) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(err);
+    };
+
+    const onData = (chunk) => {
+      const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk), 'utf8');
+      totalBytes += buf.length;
+      if (totalBytes > maxBytes) {
+        finishError(new Error(`Pre-push stdin exceeded maximum size of ${maxBytes} bytes`));
+        return;
+      }
+      chunks.push(buf);
+    };
+
+    const onEnd = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(Buffer.concat(chunks).toString('utf8'));
+    };
+
+    const onError = (err) => {
+      finishError(err instanceof Error ? err : new Error(String(err)));
+    };
+
+    const onClose = () => {
+      if (settled) return;
+      finishError(new Error('Stdin stream closed unexpectedly before EOF'));
+    };
+
+    stream.on('data', onData);
+    stream.on('end', onEnd);
+    stream.on('error', onError);
+    stream.on('close', onClose);
+    if (typeof stream.resume === 'function') {
+      stream.resume();
+    }
+  });
 }
 
 async function runCli(argv = process.argv.slice(2), env = process.env, io = {}) {
@@ -844,14 +908,27 @@ async function runCli(argv = process.argv.slice(2), env = process.env, io = {}) 
     }
   }
 
-  const isTty = io.isTTY !== undefined ? Boolean(io.isTTY) : Boolean(process.stdin.isTTY);
+  const isTty =
+    io.isTTY !== undefined
+      ? Boolean(io.isTTY)
+      : io.stdinStream
+        ? Boolean(io.stdinStream.isTTY)
+        : Boolean(tty.isatty(0));
   let stdinText;
   if (opts.range) {
     stdinText = undefined;
   } else if (io.stdinText !== undefined) {
     stdinText = io.stdinText;
   } else if (!isTty) {
-    const rawStdin = readAllStdinSync();
+    let rawStdin;
+    try {
+      rawStdin = await readAllStdin(io.stdinStream || process.stdin);
+    } catch (err) {
+      console.error(
+        `[Trimurti Pre-Push Review] ERROR (fail-closed): Failed to read pre-push stdin: ${err.message}`
+      );
+      return 1;
+    }
     if (rawStdin.trim() !== '') {
       stdinText = rawStdin;
     } else if (opts.positionalCount === 2) {
@@ -917,5 +994,6 @@ module.exports = {
   computePrePushDiff,
   installPrePushHook,
   runPrePushReview,
+  readAllStdin,
   runCli,
 };

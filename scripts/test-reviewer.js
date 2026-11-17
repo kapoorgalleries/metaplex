@@ -2883,6 +2883,70 @@ async function main() {
           );
         }
 
+        // Delayed pipe stdin guard: pre-push hook mode (`<remote> <url>`) must NOT
+        // fail open with EAGAIN -> '' when git writes ref lines after subprocess startup,
+        // and broken stdin streams must fail closed (exit 1).
+        {
+          const { PassThrough } = require('stream');
+          const brokenStream = new PassThrough();
+          setImmediate(() => brokenStream.destroy(new Error('simulated pipe read failure')));
+          const brokenCode = await runPrePushCli(['origin', 'https://example.com/repo.git'], gitEnv, {
+            isTTY: false,
+            stdinStream: brokenStream,
+            repoRoot: path.resolve(__dirname, '..'),
+          });
+          assert.strictEqual(brokenCode, 1, 'Expected broken pre-push stdin stream to fail closed with exit 1');
+
+          const slowRepo = fs.mkdtempSync(path.join(tmpRoot, 'slow-pipe-repo-'));
+          const slowRevDir = fs.mkdtempSync(path.join(tmpRoot, 'slow-pipe-rev-'));
+          assert.strictEqual(spawnSync('git', ['init', '-b', 'main'], { cwd: slowRepo, env: gitEnv }).status, 0);
+          assert.strictEqual(spawnSync('git', ['config', 'user.name', 'Test'], { cwd: slowRepo, env: gitEnv }).status, 0);
+          assert.strictEqual(
+            spawnSync('git', ['config', 'user.email', 'test@example.com'], { cwd: slowRepo, env: gitEnv }).status,
+            0
+          );
+          fs.writeFileSync(path.join(slowRepo, 'leak.js'), `const k = "${'ghp_' + 'Z'.repeat(36)}";\n`, 'utf8');
+          assert.strictEqual(spawnSync('git', ['add', 'leak.js'], { cwd: slowRepo, env: gitEnv }).status, 0);
+          assert.strictEqual(spawnSync('git', ['commit', '-m', 'leak'], { cwd: slowRepo, env: gitEnv }).status, 0);
+          const leakSha = spawnSync('git', ['rev-parse', 'HEAD'], {
+            cwd: slowRepo,
+            env: gitEnv,
+            encoding: 'utf8',
+          }).stdout.trim();
+
+          const slowChildOutcome = await new Promise((resolve, reject) => {
+            const child = spawn(process.execPath, [PRE_PUSH_PATH, 'origin', 'https://example.com/repo.git'], {
+              cwd: slowRepo,
+              env: {
+                ...gitEnv,
+                HOME: fs.mkdtempSync(path.join(tmpRoot, 'slow-empty-home-')),
+                PATH: '/usr/bin:/bin',
+                REVIEW_DIR: slowRevDir,
+              },
+              stdio: ['pipe', 'pipe', 'pipe'],
+            });
+            let stderr = '';
+            child.stderr.on('data', (d) => {
+              stderr += d.toString();
+            });
+            child.on('error', reject);
+            setTimeout(() => {
+              child.stdin.write(`refs/heads/main ${leakSha} refs/heads/main ${'0'.repeat(40)}\n`);
+              child.stdin.end();
+            }, 80);
+            child.on('close', (code) => resolve({ code, stderr }));
+          });
+          assert.strictEqual(
+            slowChildOutcome.code,
+            1,
+            `Expected delayed pre-push pipe write to wait for EOF and block push (exit 1), got ${slowChildOutcome.code}: ${slowChildOutcome.stderr}`
+          );
+          assert(
+            !slowChildOutcome.stderr.includes('Empty diff; no changes to review.'),
+            `Delayed pre-push pipe must not treat slow stdin as empty diff: ${slowChildOutcome.stderr}`
+          );
+        }
+
         // Self-diff guard: our own branch diff against origin/master must trigger zero static false positives
         const selfDiffRes = spawnSync('git', ['diff', 'origin/master', '--'], {
           cwd: path.resolve(__dirname, '..'),
