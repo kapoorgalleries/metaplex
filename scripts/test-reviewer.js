@@ -97,11 +97,14 @@ const {
 
 const {
   MANAGED_HOOK_MARKER,
+  DEFAULT_STDIN_TIMEOUT_MS,
   parsePrePushArgs,
   parsePrePushStdin,
   computePrePushDiff,
   installPrePushHook,
   runPrePushReview,
+  resolveStdinTimeoutMs,
+  readAllStdin,
   runCli: runPrePushCli,
 } = require(PRE_PUSH_PATH);
 
@@ -2883,11 +2886,86 @@ async function main() {
           );
         }
 
-        // Delayed pipe stdin guard: pre-push hook mode (`<remote> <url>`) must NOT
-        // fail open with EAGAIN -> '' when git writes ref lines after subprocess startup,
-        // and broken stdin streams must fail closed (exit 1).
+        // Delayed pipe stdin, bounded deadline, stream cleanup, pre-consumed stream fail-closed,
+        // and non-TTY manual CLI open-pipe non-hang guards:
         {
-          const { PassThrough } = require('stream');
+          const { PassThrough, Readable } = require('stream');
+
+          assert.strictEqual(resolveStdinTimeoutMs(undefined, undefined, {}), DEFAULT_STDIN_TIMEOUT_MS);
+          assert.strictEqual(resolveStdinTimeoutMs(undefined, 1200, {}), 1200);
+          assert.strictEqual(
+            resolveStdinTimeoutMs(undefined, undefined, { REVIEWER_TIMEOUT_MS: '650' }),
+            650
+          );
+          assert.strictEqual(
+            resolveStdinTimeoutMs(undefined, 90000, { PRE_PUSH_STDIN_TIMEOUT_MS: '4500' }),
+            4500
+          );
+          assert.throws(
+            () => resolveStdinTimeoutMs(undefined, undefined, { PRE_PUSH_STDIN_TIMEOUT_MS: 'bad' }),
+            /Invalid PRE_PUSH_STDIN_TIMEOUT_MS/
+          );
+          assert.throws(
+            () =>
+              resolveStdinTimeoutMs(undefined, undefined, {
+                PRE_PUSH_STDIN_TIMEOUT_MS: '3000000000',
+              }),
+            /Invalid PRE_PUSH_STDIN_TIMEOUT_MS/
+          );
+          assert.throws(
+            () =>
+              resolveStdinTimeoutMs(undefined, undefined, {
+                PRE_PUSH_STDIN_TIMEOUT_MS: '9'.repeat(400),
+              }),
+            /Invalid PRE_PUSH_STDIN_TIMEOUT_MS/
+          );
+          assert.throws(
+            () => parsePrePushArgs(['--timeout-ms', '3000000000']),
+            /Invalid --timeout-ms/
+          );
+          assert.throws(
+            () => parsePrePushArgs(['--timeout-ms', '9'.repeat(400)]),
+            /Invalid --timeout-ms/
+          );
+          assert.throws(
+            () => parsePrePushArgs(['--max-diff-chars', '9'.repeat(400)]),
+            /Invalid --max-diff-chars/
+          );
+          await assert.rejects(
+            () => readAllStdin(new PassThrough(), 1024, 3000000000),
+            /Invalid stdin timeoutMs/
+          );
+
+          // 5a. Pre-buffered stream, split multi-byte UTF-8, Uint8Array views, and invalid UTF-8 / object guards
+          const preBuffered = new PassThrough();
+          preBuffered.end('refs/tags/v1-🚀 ' + 'b'.repeat(40) + ' refs/tags/v1-🚀 ' + '0'.repeat(40) + '\n');
+          assert.strictEqual(
+            await readAllStdin(preBuffered),
+            'refs/tags/v1-🚀 ' + 'b'.repeat(40) + ' refs/tags/v1-🚀 ' + '0'.repeat(40) + '\n'
+          );
+          const u8Clean = Readable.from([new Uint8Array([0x6f, 0x6b, 0x0a])]);
+          assert.strictEqual(await readAllStdin(u8Clean), 'ok\n');
+          const u8Nul = Readable.from([new Uint8Array([0x61, 0x00, 0x62])]);
+          await assert.rejects(() => readAllStdin(u8Nul), /Invalid NUL byte/);
+          const objStream = Readable.from([{ unexpected: true }]);
+          await assert.rejects(() => readAllStdin(objStream), /Invalid pre-push stdin chunk type/);
+          const badUtf8 = new PassThrough();
+          badUtf8.end(Buffer.from([0xff, 0xfe, 0x0a]));
+          await assert.rejects(() => readAllStdin(badUtf8), /Invalid UTF-8 byte sequence/);
+          const splitUtf8 = new PassThrough();
+          const rocketBytes = Buffer.from('refs/tags/v2-🚀\n', 'utf8');
+          const splitIdx = rocketBytes.indexOf(0xf0) + 2; // split mid 4-byte UTF-8 sequence
+          const splitReadPromise = readAllStdin(splitUtf8);
+          splitUtf8.write(rocketBytes.subarray(0, splitIdx));
+          setImmediate(() => {
+            splitUtf8.end(rocketBytes.subarray(splitIdx));
+          });
+          assert.strictEqual(await splitReadPromise, 'refs/tags/v2-🚀\n');
+          for (const ev of ['data', 'end', 'error', 'close']) {
+            assert.strictEqual(splitUtf8.listenerCount(ev), 0, `Expected 0 '${ev}' listeners after EOF`);
+          }
+
+          // 5b. Broken stream fails closed (exit 1)
           const brokenStream = new PassThrough();
           setImmediate(() => brokenStream.destroy(new Error('simulated pipe read failure')));
           const brokenCode = await runPrePushCli(['origin', 'https://example.com/repo.git'], gitEnv, {
@@ -2897,15 +2975,156 @@ async function main() {
           });
           assert.strictEqual(brokenCode, 1, 'Expected broken pre-push stdin stream to fail closed with exit 1');
 
+          // 5b. Pre-consumed / already-ended stream MUST fail closed (never resolve '' -> APPROVE)
+          const drainedStream = Readable.from(['refs/heads/main ' + 'a'.repeat(40) + ' refs/heads/main ' + '0'.repeat(40) + '\n']);
+          drainedStream.resume();
+          await new Promise((r) => drainedStream.on('end', r));
+          await assert.rejects(
+            () => readAllStdin(drainedStream),
+            /destroyed before EOF|already consumed/
+          );
+          const preDrainedPassThrough = new PassThrough({ autoDestroy: false });
+          preDrainedPassThrough.end('refs/heads/main ' + 'a'.repeat(40) + ' refs/heads/main ' + '0'.repeat(40) + '\n');
+          preDrainedPassThrough.resume();
+          await new Promise((r) => preDrainedPassThrough.on('end', r));
+          assert.strictEqual(preDrainedPassThrough.readableEnded, true);
+          assert.strictEqual(preDrainedPassThrough.destroyed, false);
+          const preDrainedCode = await runPrePushCli(['origin', 'https://example.com/repo.git'], gitEnv, {
+            isTTY: false,
+            stdinStream: preDrainedPassThrough,
+            repoRoot: path.resolve(__dirname, '..'),
+          });
+          assert.strictEqual(
+            preDrainedCode,
+            1,
+            'Already-consumed hook stdin stream must fail closed (exit 1), never fail open as empty diff'
+          );
+
+          // 5c. Overflow & NUL-byte streams pause immediately, reject fail-closed, and absorb MULTIPLE late pipe errors
+          const overStream = new PassThrough({ autoDestroy: false });
+          const overPromise = readAllStdin(overStream, 32, 2000);
+          overStream.write(Buffer.alloc(48, 0x61));
+          await assert.rejects(() => overPromise, /exceeded maximum size of 32 bytes/);
+          assert.strictEqual(overStream.isPaused(), true, 'Overflowed stdin stream must be paused');
+          assert.doesNotThrow(() => {
+            overStream.emit('error', new Error('late broken pipe #1 after overflow'));
+            overStream.emit('error', new Error('late broken pipe #2 after overflow'));
+            overStream.destroy(new Error('late broken pipe #3 on destroy'));
+          });
+          await new Promise((r) => setImmediate(r));
+          assert.strictEqual(overStream.listenerCount('error'), 0, 'Expected 0 error listeners after close');
+          assert.strictEqual(overStream.listenerCount('close'), 0, 'Expected 0 close listeners after close');
+
+          // Synchronous pause->destroy(err) listener on overflow must also never throw unhandled error
+          {
+            const pds = new PassThrough({ autoDestroy: false });
+            pds.on('pause', () => {
+              pds.destroy(new Error('sync destroy inside pause listener'));
+            });
+            const pdsPromise = readAllStdin(pds, 16, 2000);
+            pds.write(Buffer.alloc(32, 0x62));
+            await assert.rejects(() => pdsPromise, /exceeded maximum size of 16 bytes/);
+            await new Promise((r) => setImmediate(r));
+            assert.strictEqual(pds.listenerCount('error'), 0, 'Expected 0 error listeners after pause->destroy close');
+          }
+
+          const nulStream = new PassThrough();
+          setImmediate(() => {
+            nulStream.end(`refs/heads/main\0bad ${'a'.repeat(40)} refs/heads/main ${'0'.repeat(40)}\n`);
+          });
+          const nulCode = await runPrePushCli(['origin', 'https://example.com/repo.git'], gitEnv, {
+            isTTY: false,
+            stdinStream: nulStream,
+            repoRoot: path.resolve(__dirname, '..'),
+          });
+          assert.strictEqual(nulCode, 1, 'NUL byte in pre-push stdin must fail closed');
+          assert.throws(() => parsePrePushStdin('\0'), /Invalid NUL byte/);
+
+          // 5d. Stalled open hook pipe times out cleanly (fail-closed) without hanging
+          const stalledStream = new PassThrough({ autoDestroy: false });
+          const stallStart = Date.now();
+          const stalledCode = await runPrePushCli(['origin', 'https://example.com/repo.git'], gitEnv, {
+            isTTY: false,
+            stdinStream: stalledStream,
+            stdinTimeoutMs: 60,
+            repoRoot: path.resolve(__dirname, '..'),
+          });
+          assert.strictEqual(stalledCode, 1, 'Stalled hook stdin pipe must fail closed on deadline');
+          assert.ok(Date.now() - stallStart < 2000, 'Stalled hook stdin timeout must fire promptly');
+          assert.strictEqual(stalledStream.isPaused(), true, 'Timed-out stdin stream must be paused');
+          assert.doesNotThrow(() => {
+            stalledStream.destroy(new Error('late error after stdin timeout'));
+          });
+
+          const stalledChildOutcome = await new Promise((resolve, reject) => {
+            const child = spawn(
+              process.execPath,
+              [PRE_PUSH_PATH, 'origin', 'https://example.com/repo.git'],
+              {
+                cwd: path.resolve(__dirname, '..'),
+                env: {
+                  ...gitEnv,
+                  PRE_PUSH_STDIN_TIMEOUT_MS: '80',
+                  REVIEW_DIR: fs.mkdtempSync(path.join(tmpRoot, 'stalled-child-rev-')),
+                },
+                stdio: ['pipe', 'pipe', 'pipe'],
+              }
+            );
+            let stderr = '';
+            child.stdout.resume();
+            child.stderr.on('data', (d) => {
+              stderr += d.toString();
+            });
+            const killTimer = setTimeout(() => {
+              child.stdin.destroy();
+              child.kill('SIGKILL');
+              reject(new Error(`Stalled hook child did not exit on PRE_PUSH_STDIN_TIMEOUT_MS: ${stderr}`));
+            }, 5000);
+            child.on('error', (err) => {
+              clearTimeout(killTimer);
+              child.stdin.destroy();
+              reject(err);
+            });
+            child.on('close', (code) => {
+              clearTimeout(killTimer);
+              child.stdin.destroy();
+              resolve({ code, stderr });
+            });
+          });
+          assert.strictEqual(stalledChildOutcome.code, 1);
+          assert(
+            stalledChildOutcome.stderr.includes('Timed out after 80ms waiting for pre-push stdin EOF'),
+            `Expected child hook stdin timeout message, got: ${stalledChildOutcome.stderr}`
+          );
+
+          // 5e. Delayed hook pipe write + real mock agy APPROVE proves delayed ref lines are diffed
+          // and blocked specifically by static secret detection (not an unrelated missing-agy error),
+          // AND manual CLI mode with an open unclosed non-TTY stdin pipe never hangs!
           const slowRepo = fs.mkdtempSync(path.join(tmpRoot, 'slow-pipe-repo-'));
           const slowRevDir = fs.mkdtempSync(path.join(tmpRoot, 'slow-pipe-rev-'));
+          const slowAgyDir = fs.mkdtempSync(path.join(tmpRoot, 'slow-pipe-agy-'));
+          const slowApproveAgy = makeFakeAgy(
+            slowAgyDir,
+            `
+            process.stdin.resume();
+            process.stdin.on("end", () => {
+              process.stdout.write(JSON.stringify({
+                conversation_id: "c-slow-pipe",
+                status: "SUCCESS",
+                structured_output: { verdict: "APPROVE", summary: "Model approved.", issues: [] }
+              }) + "\\n");
+            });
+            `,
+            { name: 'slow-approve.js' }
+          );
           assert.strictEqual(spawnSync('git', ['init', '-b', 'main'], { cwd: slowRepo, env: gitEnv }).status, 0);
           assert.strictEqual(spawnSync('git', ['config', 'user.name', 'Test'], { cwd: slowRepo, env: gitEnv }).status, 0);
           assert.strictEqual(
             spawnSync('git', ['config', 'user.email', 'test@example.com'], { cwd: slowRepo, env: gitEnv }).status,
             0
           );
-          fs.writeFileSync(path.join(slowRepo, 'leak.js'), `const k = "${'ghp_' + 'Z'.repeat(36)}";\n`, 'utf8');
+          const slowSecretToken = ['ghp', 'Z'.repeat(36)].join('_');
+          fs.writeFileSync(path.join(slowRepo, 'leak.js'), `const k = "${slowSecretToken}";\n`, 'utf8');
           assert.strictEqual(spawnSync('git', ['add', 'leak.js'], { cwd: slowRepo, env: gitEnv }).status, 0);
           assert.strictEqual(spawnSync('git', ['commit', '-m', 'leak'], { cwd: slowRepo, env: gitEnv }).status, 0);
           const leakSha = spawnSync('git', ['rev-parse', 'HEAD'], {
@@ -2914,27 +3133,105 @@ async function main() {
             encoding: 'utf8',
           }).stdout.trim();
 
+          // Deterministic in-process proof that pre-attach destroy(err) swallows queued nextTick error,
+          // and post-attachment idle + partial writes never resolve before EOF and reject specifically for leaked secret
+          {
+            const preDestroyed = new PassThrough();
+            preDestroyed.destroy(new Error('pre-attach sync destroy'));
+            await assert.rejects(() => readAllStdin(preDestroyed), /pre-attach sync destroy|destroyed before EOF/);
+            await new Promise((r) => setImmediate(r));
+            assert.strictEqual(preDestroyed.listenerCount('error'), 0, 'Expected 0 error listeners after pre-attach destroy close');
+
+            const phasedPipe = new PassThrough();
+            const phasedRevDir = fs.mkdtempSync(path.join(tmpRoot, 'phased-pipe-rev-'));
+            let phasedSettled = false;
+            const phasedPromise = runPrePushCli(
+              ['origin', 'https://example.com/repo.git'],
+              {
+                ...gitEnv,
+                HOME: authHome,
+                PATH: `${path.dirname(process.execPath)}${path.delimiter}/usr/bin${path.delimiter}/bin`,
+                REVIEW_DIR: phasedRevDir,
+                AGY_BIN: slowApproveAgy,
+              },
+              {
+                isTTY: false,
+                stdinStream: phasedPipe,
+                repoRoot: slowRepo,
+              }
+            ).then((code) => {
+              phasedSettled = true;
+              return code;
+            });
+            assert.strictEqual(phasedPipe.listenerCount('data'), 1, 'Expected reader already attached before first write');
+            await new Promise((r) => setTimeout(r, 25));
+            assert.strictEqual(phasedSettled, false, 'Must not settle on attached idle pipe before write/EOF');
+            phasedPipe.write(`refs/heads/main ${leakSha} `);
+            await new Promise((r) => setTimeout(r, 25));
+            assert.strictEqual(phasedSettled, false, 'Must not settle after partial write before EOF');
+            phasedPipe.end(`refs/heads/main ${'0'.repeat(40)}\n`);
+            assert.strictEqual(await phasedPromise, 1, 'Expected phased delayed pipe to block leaked secret after EOF');
+            const phasedVerdict = JSON.parse(fs.readFileSync(path.join(phasedRevDir, 'pre-push-review_result.json'), 'utf8'));
+            assert.strictEqual(phasedVerdict.verdict, 'REQUEST_CHANGES');
+            assert(
+              phasedVerdict.issues.some((iss) => iss.message.includes('Potential GitHub personal access token')),
+              `Expected phased verdict to report GitHub PAT issue, got: ${JSON.stringify(phasedVerdict)}`
+            );
+            assert(
+              fs.readFileSync(path.join(phasedRevDir, 'pre-push.diff'), 'utf8').includes(slowSecretToken),
+              'Expected phased pre-push.diff to contain the pushed commit diff'
+            );
+          }
+
+          const childNodePath = `${path.dirname(process.execPath)}${path.delimiter}/usr/bin${path.delimiter}/bin`;
           const slowChildOutcome = await new Promise((resolve, reject) => {
             const child = spawn(process.execPath, [PRE_PUSH_PATH, 'origin', 'https://example.com/repo.git'], {
               cwd: slowRepo,
               env: {
                 ...gitEnv,
-                HOME: fs.mkdtempSync(path.join(tmpRoot, 'slow-empty-home-')),
-                PATH: '/usr/bin:/bin',
+                HOME: authHome,
+                PATH: childNodePath,
                 REVIEW_DIR: slowRevDir,
+                AGY_BIN: slowApproveAgy,
               },
               stdio: ['pipe', 'pipe', 'pipe'],
             });
+            let stdout = '';
             let stderr = '';
+            child.stdout.on('data', (d) => {
+              stdout += d.toString();
+            });
             child.stderr.on('data', (d) => {
               stderr += d.toString();
             });
-            child.on('error', reject);
+            const killTimer = setTimeout(() => {
+              child.kill('SIGKILL');
+              reject(new Error(`Delayed pre-push child timed out; stderr=${stderr}`));
+            }, 15000);
+            child.on('error', (err) => {
+              clearTimeout(killTimer);
+              reject(err);
+            });
             setTimeout(() => {
-              child.stdin.write(`refs/heads/main ${leakSha} refs/heads/main ${'0'.repeat(40)}\n`);
-              child.stdin.end();
-            }, 80);
-            child.on('close', (code) => resolve({ code, stderr }));
+              if (child.exitCode !== null) {
+                clearTimeout(killTimer);
+                reject(new Error(`Child exited prematurely before stdin write (${child.exitCode}): ${stderr}`));
+                return;
+              }
+              child.stdin.write(`refs/heads/main ${leakSha} `);
+              setTimeout(() => {
+                if (child.exitCode !== null || fs.existsSync(path.join(slowRevDir, 'pre-push.diff'))) {
+                  clearTimeout(killTimer);
+                  reject(new Error(`Child completed prematurely before stdin EOF (${child.exitCode}): ${stderr}`));
+                  return;
+                }
+                child.stdin.end(`refs/heads/main ${'0'.repeat(40)}\n`);
+              }, 80);
+            }, 150);
+            child.on('close', (code) => {
+              clearTimeout(killTimer);
+              resolve({ code, stdout, stderr });
+            });
           });
           assert.strictEqual(
             slowChildOutcome.code,
@@ -2945,6 +3242,146 @@ async function main() {
             !slowChildOutcome.stderr.includes('Empty diff; no changes to review.'),
             `Delayed pre-push pipe must not treat slow stdin as empty diff: ${slowChildOutcome.stderr}`
           );
+          assert(
+            slowChildOutcome.stderr.includes('Potential GitHub personal access token detected in added line.'),
+            `Expected delayed pre-push pipe to diff leak.js and surface GitHub token issue, got: ${slowChildOutcome.stderr}`
+          );
+          assert(
+            fs.readFileSync(path.join(slowRevDir, 'pre-push.diff'), 'utf8').includes(slowSecretToken),
+            'Expected pre-push.diff to contain the delayed pushed commit diff'
+          );
+
+          // Manual CLI check (`positionalCount === 0` and `positionalCount === 1`) with an OPEN
+          // unclosed non-TTY stdin pipe MUST NOT block waiting on process.stdin EOF!
+          for (const manualArgs of [[], ['origin']]) {
+            const openPipeRevDir = fs.mkdtempSync(path.join(tmpRoot, 'open-pipe-manual-rev-'));
+            const openPipeOutcome = await new Promise((resolve, reject) => {
+              const child = spawn(process.execPath, [PRE_PUSH_PATH, ...manualArgs], {
+                cwd: slowRepo,
+                env: {
+                  ...gitEnv,
+                  HOME: authHome,
+                  PATH: childNodePath,
+                  REVIEW_DIR: openPipeRevDir,
+                  AGY_BIN: slowApproveAgy,
+                },
+                stdio: ['pipe', 'pipe', 'pipe'],
+              });
+              let stdout = '';
+              let stderr = '';
+              child.stdout.on('data', (d) => {
+                stdout += d.toString();
+              });
+              child.stderr.on('data', (d) => {
+                stderr += d.toString();
+              });
+              // Deliberately keep `child.stdin` OPEN without writing or calling `.end()`!
+              const killTimer = setTimeout(() => {
+                child.stdin.destroy();
+                child.kill('SIGKILL');
+                reject(
+                  new Error(
+                    `Manual CLI (${JSON.stringify(manualArgs)}) hung on open non-TTY stdin pipe! stderr=${stderr}`
+                  )
+                );
+              }, 10000);
+              child.on('error', (err) => {
+                clearTimeout(killTimer);
+                child.stdin.destroy();
+                reject(err);
+              });
+              child.on('close', (code) => {
+                clearTimeout(killTimer);
+                child.stdin.destroy();
+                resolve({ code, stdout, stderr });
+              });
+            });
+            assert.strictEqual(
+              openPipeOutcome.code,
+              1,
+              `Expected open-pipe manual CLI (${JSON.stringify(manualArgs)}) to run branch review and catch secret: ${openPipeOutcome.stderr}`
+            );
+            assert(
+              openPipeOutcome.stderr.includes('Potential GitHub personal access token detected in added line.'),
+              `Expected open-pipe manual CLI (${JSON.stringify(manualArgs)}) to report leak.js secret: ${openPipeOutcome.stderr}`
+            );
+          }
+
+          // 5f. Cross-repo `git --git-dir=... [--work-tree=...] push` from another repo CWD MUST NOT
+          // evaluate the wrong repository (`process.cwd()`) and fail open on leaked secrets!
+          if (process.platform !== 'win32') {
+            const gdPubRemote = fs.mkdtempSync(path.join(tmpRoot, 'gd-pub-remote-'));
+            const gdBakRemote = fs.mkdtempSync(path.join(tmpRoot, 'gd-bak-remote-'));
+            const gdRepoA = fs.mkdtempSync(path.join(tmpRoot, 'gd-repoA-'));
+            assert.strictEqual(spawnSync('git', ['init', '--bare', '-b', 'main'], { cwd: gdPubRemote, env: gitEnv }).status, 0);
+            assert.strictEqual(spawnSync('git', ['init', '--bare', '-b', 'main'], { cwd: gdBakRemote, env: gitEnv }).status, 0);
+            assert.strictEqual(spawnSync('git', ['init', '-b', 'main'], { cwd: gdRepoA, env: gitEnv }).status, 0);
+            assert.strictEqual(spawnSync('git', ['config', 'user.name', 'Test'], { cwd: gdRepoA, env: gitEnv }).status, 0);
+            assert.strictEqual(spawnSync('git', ['config', 'user.email', 'test@example.com'], { cwd: gdRepoA, env: gitEnv }).status, 0);
+            assert.strictEqual(spawnSync('git', ['remote', 'add', 'origin', gdPubRemote], { cwd: gdRepoA, env: gitEnv }).status, 0);
+
+            const gdScripts = path.join(gdRepoA, 'scripts');
+            fs.mkdirSync(gdScripts, { recursive: true });
+            fs.copyFileSync(REVIEWER_PATH, path.join(gdScripts, 'reviewer.js'));
+            fs.copyFileSync(PRE_PUSH_PATH, path.join(gdScripts, 'pre-push-review.js'));
+            assert.strictEqual(spawnSync('git', ['add', '.'], { cwd: gdRepoA, env: gitEnv }).status, 0);
+            assert.strictEqual(spawnSync('git', ['commit', '-m', 'init'], { cwd: gdRepoA, env: gitEnv }).status, 0);
+            assert.strictEqual(spawnSync('git', ['push', '-u', 'origin', 'main'], { cwd: gdRepoA, env: gitEnv }).status, 0);
+
+            assert.strictEqual(spawnSync('git', ['checkout', '-b', 'feat-leak'], { cwd: gdRepoA, env: gitEnv }).status, 0);
+            const gdSecret = ['ghp', 'Q'.repeat(36)].join('_');
+            fs.writeFileSync(path.join(gdRepoA, 'leak.js'), `const s = "${gdSecret}";\n`, 'utf8');
+            assert.strictEqual(spawnSync('git', ['add', 'leak.js'], { cwd: gdRepoA, env: gitEnv }).status, 0);
+            assert.strictEqual(spawnSync('git', ['commit', '-m', 'leak'], { cwd: gdRepoA, env: gitEnv }).status, 0);
+            const gdLeakSha = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: gdRepoA, env: gitEnv, encoding: 'utf8' }).stdout.trim();
+
+            installPrePushHook(gdRepoA, { force: true });
+
+            // Populate gdBakRemote + clone gdRepoB so gdRepoB ALREADY has gdLeakSha on origin/main
+            assert.strictEqual(spawnSync('git', ['fetch', gdRepoA, `${gdLeakSha}:refs/heads/main`], { cwd: gdBakRemote, env: gitEnv }).status, 0);
+            const gdRepoB = path.join(tmpRoot, 'gd-repoB');
+            assert.strictEqual(spawnSync('git', ['clone', gdBakRemote, gdRepoB], { env: gitEnv }).status, 0);
+
+            for (const gitArgs of [
+              [`--git-dir=${path.join(gdRepoA, '.git')}`, `--work-tree=${gdRepoA}`, 'push', '-u', 'origin', 'feat-leak'],
+              [`--git-dir=${path.join(gdRepoA, '.git')}`, 'push', '-u', 'origin', 'feat-leak'],
+            ]) {
+              const gdPushRes = spawnSync('git', gitArgs, {
+                cwd: gdRepoB,
+                env: {
+                  ...gitEnv,
+                  HOME: authHome,
+                  PATH: childNodePath,
+                  REVIEW_DIR: fs.mkdtempSync(path.join(tmpRoot, 'gd-rev-')),
+                  AGY_BIN: slowApproveAgy,
+                },
+                encoding: 'utf8',
+              });
+              assert.notStrictEqual(
+                gdPushRes.status,
+                0,
+                `Expected cross-repo git push (${gitArgs.join(' ')}) from gdRepoB CWD to block secret push, got 0: ${gdPushRes.stderr}`
+              );
+              assert(
+                gdPushRes.stderr.includes('Potential GitHub personal access token detected in added line.'),
+                `Expected cross-repo git push to catch gdRepoA secret, got: ${gdPushRes.stderr}`
+              );
+            }
+            const pubCheck = spawnSync('git', ['rev-parse', '--verify', '--quiet', 'refs/heads/feat-leak'], {
+              cwd: gdPubRemote,
+              env: gitEnv,
+              encoding: 'utf8',
+            });
+            assert.notStrictEqual(pubCheck.status, 0, 'gdPubRemote must NEVER receive leaked feat-leak branch');
+
+            // Invalid GIT_DIR must fail closed (exit 1), never fall back silently to script repoRoot
+            const badGitDirCode = await runPrePushCli(
+              ['origin', 'https://example.com/repo.git'],
+              { ...gitEnv, GIT_DIR: path.join(tmpRoot, 'nonexistent-git-dir') },
+              { isTTY: false, stdinText: '' }
+            );
+            assert.strictEqual(badGitDirCode, 1, 'Invalid GIT_DIR must fail closed');
+          }
         }
 
         // Self-diff guard: our own branch diff against origin/master must trigger zero static false positives
