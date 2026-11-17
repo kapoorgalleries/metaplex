@@ -618,6 +618,19 @@ function parsePositiveInt(raw, label) {
   return num;
 }
 
+function resolveEffectiveTimeoutMs(timeoutMsOption, env = process.env) {
+  if (Number.isFinite(timeoutMsOption) && timeoutMsOption > 0) {
+    return timeoutMsOption;
+  }
+  if (env && env.REVIEWER_TIMEOUT_MS !== undefined && env.REVIEWER_TIMEOUT_MS !== '') {
+    return parsePositiveInt(env.REVIEWER_TIMEOUT_MS, 'REVIEWER_TIMEOUT_MS');
+  }
+  if (env && env.AGY_TIMEOUT_MS !== undefined && env.AGY_TIMEOUT_MS !== '') {
+    return parsePositiveInt(env.AGY_TIMEOUT_MS, 'AGY_TIMEOUT_MS');
+  }
+  return DEFAULT_TIMEOUT_MS;
+}
+
 function parseEnvExplicitModels(env = process.env) {
   const raw = env && (env.REVIEWER_MODELS || env.AGY_MODELS);
   if (raw && raw.trim() !== '') {
@@ -639,15 +652,7 @@ function resolveModels(env = process.env) {
 function parseArgs(argv = process.argv.slice(2), env = process.env) {
   const cliModels = [];
   let outputOverride = null;
-  const envTimeoutRaw =
-    env && env.REVIEWER_TIMEOUT_MS !== undefined && env.REVIEWER_TIMEOUT_MS !== ''
-      ? { val: env.REVIEWER_TIMEOUT_MS, name: 'REVIEWER_TIMEOUT_MS' }
-      : env && env.AGY_TIMEOUT_MS !== undefined && env.AGY_TIMEOUT_MS !== ''
-      ? { val: env.AGY_TIMEOUT_MS, name: 'AGY_TIMEOUT_MS' }
-      : null;
-  let timeoutMs = envTimeoutRaw
-    ? parsePositiveInt(envTimeoutRaw.val, envTimeoutRaw.name)
-    : DEFAULT_TIMEOUT_MS;
+  let timeoutMs = resolveEffectiveTimeoutMs(undefined, env);
 
   const envMaxCharsRaw =
     env && env.REVIEWER_MAX_DIFF_CHARS !== undefined && env.REVIEWER_MAX_DIFF_CHARS !== ''
@@ -1972,7 +1977,42 @@ function assertSafeOutputTarget(outputPath, platform = process.platform) {
   if (leafStat && leafStat.isSymbolicLink()) {
     throw new Error(`Refusing to overwrite symlinked review result file: ${resolved}`);
   }
+  if (platform !== 'win32' && typeof process.getuid === 'function') {
+    const myUid = process.getuid();
+    const dirStat = lstatIfExists(dir);
+    if (dirStat && dirStat.isDirectory()) {
+      if (dirStat.uid !== myUid && dirStat.uid !== 0) {
+        throw new Error(
+          `Refusing output directory owned by uid ${dirStat.uid} (expected ${myUid}): ${dir}`
+        );
+      }
+      if ((dirStat.mode & 0o002) !== 0 && (dirStat.mode & 0o1000) === 0) {
+        throw new Error(`Refusing world-writable non-sticky output directory: ${dir}`);
+      }
+    }
+    if (leafStat && leafStat.uid !== myUid && leafStat.uid !== 0) {
+      throw new Error(
+        `Refusing to overwrite review result file owned by uid ${leafStat.uid} (expected ${myUid}): ${resolved}`
+      );
+    }
+  }
   return { resolved, dir };
+}
+
+function assertSafeDiffInputPath(diffPath, platform = process.platform) {
+  if (typeof diffPath !== 'string' || diffPath.trim() === '') {
+    throw new Error('Diff path must be a non-empty string');
+  }
+  if (/^\/(?:dev\/(?:null|stdin|fd\/\d+)|proc\/(?:self|\d+)\/fd\/\d+)$/.test(diffPath)) {
+    return diffPath;
+  }
+  const resolved = path.resolve(diffPath);
+  assertSafeDirectoryHierarchy(path.dirname(resolved), 'diff directory', platform);
+  const leafStat = lstatIfExists(resolved);
+  if (leafStat && leafStat.isSymbolicLink()) {
+    throw new Error(`Refusing symlinked diff file: ${resolved}`);
+  }
+  return resolved;
 }
 
 function copyIsolatedAuthFile(srcPath, dstPath) {
@@ -2861,14 +2901,7 @@ async function runAgy(model, inputContent, options = {}) {
   const effectivePlatform = options.platform || process.platform;
   const agyBin =
     options.agyBin || resolveAgyBinaries(baseEnv, { platform: effectivePlatform })[0];
-  const timeoutMs =
-    Number.isFinite(options.timeoutMs) && options.timeoutMs > 0
-      ? options.timeoutMs
-      : Number(baseEnv.REVIEWER_TIMEOUT_MS) > 0
-      ? Number(baseEnv.REVIEWER_TIMEOUT_MS)
-      : Number(baseEnv.AGY_TIMEOUT_MS) > 0
-      ? Number(baseEnv.AGY_TIMEOUT_MS)
-      : DEFAULT_TIMEOUT_MS;
+  const timeoutMs = resolveEffectiveTimeoutMs(options.timeoutMs, baseEnv);
 
   const ownedWorkspace =
     options.workspace ||
@@ -2924,19 +2957,59 @@ async function runAgy(model, inputContent, options = {}) {
 // --- Full-diff deterministic static security floor ---
 
 const GENERIC_SECRET_ASSIGNMENT_SOURCE =
-  '(?:api[_-]?key|secret(?:[_-]?key)?|password|passwd|private[_-]?key|access[_-]?token|auth[_-]?token|client[_-]?secret|hf[_-]?token)\\s*[:=]\\s*([\'\"`])([A-Za-z0-9_\\-./+=!@#%^&*~]{12,})\\1';
+  '(?:api[_-]?key|secret(?:[_-]?key)?|password|passwd|private[_-]?key|access[_-]?token|auth[_-]?token|_authtoken|client[_-]?secret|refresh[_-]?token|hf[_-]?token)(?:[\'\"`])?\\s*[:=]\\s*([\'\"`])([A-Za-z0-9_\\-./+=!@#%^&*~]{12,})\\1';
 
 const ENV_UNQUOTED_SECRET_ASSIGNMENT_RE =
-  /^(\s*(?:export\s+)?[A-Z][A-Z0-9_]*(?:API_KEY|SECRET|SECRET_KEY|PASSWORD|PASSWD|PRIVATE_KEY|ACCESS_TOKEN|AUTH_TOKEN|CLIENT_SECRET|HF_TOKEN)[A-Z0-9_]*\s*=\s*)([A-Za-z0-9_\-./+=!@#%^&*~]{12,})(?=\s*(?:#.*)?$)/;
+  /^(\s*(?:(?:export\s+)?[A-Z][A-Z0-9_]*(?:API_KEY|SECRET|SECRET_KEY|PASSWORD|PASSWD|PRIVATE_KEY|ACCESS_TOKEN|AUTH_TOKEN|CLIENT_SECRET|REFRESH_TOKEN|HF_TOKEN)[A-Z0-9_]*|(?:\/\/[^\s:=]+\/:)?_authToken)\s*=\s*)([A-Za-z0-9_\-./+=!@#%^&*~]{12,})(?=\s*(?:#.*)?$)/;
+
+const YAML_UNQUOTED_SECRET_ASSIGNMENT_RE =
+  /^(\s*(?:-\s+)?(?:api[_-]?key|secret(?:[_-]?key)?|password|passwd|private[_-]?key|access[_-]?token|auth[_-]?token|client[_-]?secret|refresh[_-]?token|hf[_-]?token)\s*:\s+)([A-Za-z0-9_\-./+=!@#%^&*~]{12,})(?=\s*(?:#.*)?$)/i;
+
+const URI_CREDENTIAL_SOURCE =
+  '\\b((?:postgres(?:ql)?|mysql|mariadb|mongodb(?:\\+srv)?|redis(?:s)?|amqps?|https?):\\/\\/[^/\\s:@\'\"`]+:)([^/\\s@\'\"`]{8,})(@[A-Za-z0-9._-]+)';
+
+const BEARER_TOKEN_SOURCE =
+  '(\\bAuthorization\\s*[:=]\\s*[\'\"`]?Bearer\\s+)([A-Za-z0-9._\\-+/=]{20,})';
+
+const PENDING_SECRET_KEY_LINE_RE =
+  /(?:api[_-]?key|secret(?:[_-]?key)?|password|passwd|private[_-]?key|access[_-]?token|auth[_-]?token|_authtoken|client[_-]?secret|refresh[_-]?token|hf[_-]?token)(?:['"`])?\s*[:=]\s*$/i;
+
+const LEADING_QUOTED_SECRET_VALUE_RE =
+  /^(\s*(['"`]))([A-Za-z0-9_\-./+=!@#%^&*~]{12,})(\2\s*[,;]?\s*(?:(?:\/\/|#).*)?)$/;
 
 const PLACEHOLDER_SECRET_VALUE =
-  /^(?:your[_-].*|dummy.*|example.*|placeholder.*|test[_-].*|mock[_-].*|sample[_-].*|fake[_-].*|changeme.*|replace[_-]?me.*|redacted.*|\[REDACTED[^\]]*\]|<.*>|\$\{.*\}|secret123|a-passphrase-of-at-least-32-characters!!|(?:process\.env|os\.environ|os\.getenv|env)\b.*|https?:\/\/.*|\/.*|\.\.?\/.*|true|false|null|undefined|none)$/i;
+  /^(?:your[_-].*|dummy.*|example.*|placeholder.*|test[_-].*|mock[_-].*|sample[_-].*|fake[_-].*|changeme.*|replace[_-]?me.*|redacted.*|\[REDACTED[^\]]*\]|<.*>|\$\{.*\}|secret123|a-passphrase-of-at-least-32-characters!!|(?:process\.env|os\.environ|os\.getenv|env|secrets|vars|inputs|needs|steps|github|runner|matrix)\b.*|https?:\/\/.*|\/.*|\.\.?\/.*|true|false|null|undefined|none)$/i;
 
 function isPlaceholderGenericSecret(secretVal, fullMatch = '') {
   return (
     PLACEHOLDER_SECRET_VALUE.test(secretVal) ||
     fullMatch.includes('${{') ||
     fullMatch.includes('process.env')
+  );
+}
+
+function isRealUnquotedYamlSecret(secretVal, fullMatch = '') {
+  return (
+    !isPlaceholderGenericSecret(secretVal, fullMatch) &&
+    /[0-9!@#%^&*~+=/._-]/.test(secretVal)
+  );
+}
+
+function isPlaceholderUriPassword(pass) {
+  return (
+    isPlaceholderGenericSecret(pass) ||
+    /^(?:password|pass|secret|admin|postgres|root|user|test|guest|example|placeholder|changeme|x+|0+|12345678|\$[A-Za-z_{].*)$/i.test(
+      pass
+    )
+  );
+}
+
+function isPlaceholderBearerToken(tok) {
+  return (
+    isPlaceholderGenericSecret(tok) ||
+    /^(?:x+|0+|example.*|dummy.*|placeholder.*|test.*|token.*|\[REDACTED[^\]]*\]|\$[A-Za-z_{].*)$/i.test(
+      tok
+    )
   );
 }
 
@@ -2955,6 +3028,11 @@ const KNOWN_CREDENTIAL_PATTERNS = Object.freeze([
     re: /\bgithub_pat_[A-Za-z0-9_]{22,}\b/,
     ignore: /^github_pat_(?:x+|0+|example.*|dummy.*|test.*)$/i,
     message: 'Potential fine-grained GitHub token detected in added line.',
+  },
+  {
+    re: /\bnpm_[A-Za-z0-9]{30,}\b/,
+    ignore: /^npm_(?:0+|x+|example.*|dummy.*|placeholder.*|test.*)$/i,
+    message: 'Potential npm access token detected in added line.',
   },
   {
     re: /\bSG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}\b/,
@@ -2997,6 +3075,11 @@ const KNOWN_CREDENTIAL_PATTERNS = Object.freeze([
     message: 'Potential Google API key detected in added line.',
   },
   {
+    re: /\bGOCSPX-[A-Za-z0-9_-]{20,}\b/,
+    ignore: /^GOCSPX-(?:0+|x+|example.*|dummy.*|placeholder.*|test.*)$/i,
+    message: 'Potential Google OAuth client secret detected in added line.',
+  },
+  {
     re: /\bya29\.[0-9A-Za-z._-]{30,}\b/,
     ignore: /^ya29\.(?:0+|x+|example.*|test.*)$/i,
     message: 'Potential Google OAuth access token detected in added line.',
@@ -3005,6 +3088,11 @@ const KNOWN_CREDENTIAL_PATTERNS = Object.freeze([
     re: /(?<![0-9A-Za-z_/-])1\/\/0[0-9A-Za-z_-]{30,}\b/,
     ignore: /^1\/\/0(?:0+|x+|example.*|dummy.*|placeholder.*|test.*)$/i,
     message: 'Potential Google OAuth refresh token detected in added line.',
+  },
+  {
+    re: /\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{16,}\b/,
+    ignore: /\.(?:0+|x+|signature|example|dummy|placeholder|test)$/i,
+    message: 'Potential JSON Web Token (JWT) detected in added line.',
   },
   {
     re: /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/,
@@ -3061,6 +3149,7 @@ function isLikelyPemBodyLine(body) {
 function redactCredentialsForPrompt(diffText) {
   if (!diffText) return '';
   let inPemPrivateKey = false;
+  let pendingSecretAssignment = false;
   let hunkPrefixCols = 1;
   return String(diffText)
     .split('\n')
@@ -3069,6 +3158,7 @@ function redactCredentialsForPrompt(diffText) {
       const line = hasCr ? rawLine.slice(0, -1) : rawLine;
       if (isDiffMetadataHeaderLine(line)) {
         inPemPrivateKey = false;
+        pendingSecretAssignment = false;
         if (line.startsWith('@@ ')) {
           hunkPrefixCols = 1;
         } else {
@@ -3095,6 +3185,7 @@ function redactCredentialsForPrompt(diffText) {
       let body = prefix ? line.slice(prefix.length) : line;
 
       if (PEM_BEGIN_RE.test(body)) {
+        pendingSecretAssignment = false;
         if (PEM_END_RE.test(body)) {
           inPemPrivateKey = false;
           const inlineRedacted = body.replace(PEM_INLINE_SPAN_RE, '[REDACTED_PRIVATE_KEY]');
@@ -3120,6 +3211,14 @@ function redactCredentialsForPrompt(diffText) {
         inPemPrivateKey = false;
       }
 
+      if (pendingSecretAssignment) {
+        pendingSecretAssignment = false;
+        const contMatch = LEADING_QUOTED_SECRET_VALUE_RE.exec(body);
+        if (contMatch && !isPlaceholderGenericSecret(contMatch[3], contMatch[0])) {
+          body = `${contMatch[1]}[REDACTED_SECRET]${contMatch[4]}`;
+        }
+      }
+
       for (const rule of KNOWN_CREDENTIAL_PATTERNS) {
         if (rule.re === PEM_BEGIN_RE || String(rule.re).includes('PRIVATE KEY')) continue;
         const globalRe = new RegExp(
@@ -3130,6 +3229,20 @@ function redactCredentialsForPrompt(diffText) {
           rule.ignore && rule.ignore.test(matched) ? matched : '[REDACTED_SECRET]'
         );
       }
+
+      const globalUriRe = new RegExp(URI_CREDENTIAL_SOURCE, 'gi');
+      body = body.replace(globalUriRe, (fullMatch, uriPrefix, uriPass, uriHost) =>
+        isPlaceholderUriPassword(uriPass)
+          ? fullMatch
+          : `${uriPrefix}[REDACTED_SECRET]${uriHost}`
+      );
+
+      const globalBearerRe = new RegExp(BEARER_TOKEN_SOURCE, 'gi');
+      body = body.replace(globalBearerRe, (fullMatch, bearerPrefix, bearerTok) =>
+        isPlaceholderBearerToken(bearerTok)
+          ? fullMatch
+          : `${bearerPrefix}[REDACTED_SECRET]`
+      );
 
       const globalGenericRe = new RegExp(GENERIC_SECRET_ASSIGNMENT_SOURCE, 'gi');
       body = body.replace(globalGenericRe, (fullMatch, _quoteChar, secretVal) => {
@@ -3149,6 +3262,15 @@ function redactCredentialsForPrompt(diffText) {
         body = `${envMatch[1]}[REDACTED_SECRET]${body.slice(envMatch[0].length)}`;
       }
 
+      const yamlMatch = YAML_UNQUOTED_SECRET_ASSIGNMENT_RE.exec(body);
+      if (yamlMatch && isRealUnquotedYamlSecret(yamlMatch[2], yamlMatch[0])) {
+        body = `${yamlMatch[1]}[REDACTED_SECRET]${body.slice(yamlMatch[0].length)}`;
+      }
+
+      if (PENDING_SECRET_KEY_LINE_RE.test(body)) {
+        pendingSecretAssignment = true;
+      }
+
       return `${prefix}${body}${hasCr ? '\r' : ''}`;
     })
     .join('\n');
@@ -3166,10 +3288,46 @@ function detectUnredactedRealSecret(redactedText) {
       }
     }
   }
+  const globalUriRe = new RegExp(URI_CREDENTIAL_SOURCE, 'gi');
+  for (const match of redactedText.matchAll(globalUriRe)) {
+    if (!isPlaceholderUriPassword(match[2])) {
+      return 'Potential hardcoded URI password detected in diff.';
+    }
+  }
+  const globalBearerRe = new RegExp(BEARER_TOKEN_SOURCE, 'gi');
+  for (const match of redactedText.matchAll(globalBearerRe)) {
+    if (!isPlaceholderBearerToken(match[2])) {
+      return 'Potential hardcoded Bearer token detected in diff.';
+    }
+  }
+  const globalGenericRe = new RegExp(GENERIC_SECRET_ASSIGNMENT_SOURCE, 'gi');
+  for (const rawLine of String(redactedText || '').split(/\r?\n/)) {
+    if (isDiffMetadataHeaderLine(rawLine)) continue;
+    const body =
+      rawLine.startsWith('+') || rawLine.startsWith('-') || rawLine.startsWith(' ')
+        ? rawLine.slice(1)
+        : rawLine;
+    for (const m of body.matchAll(globalGenericRe)) {
+      if (!isPlaceholderGenericSecret(m[2], m[0])) {
+        return 'Potential hardcoded credential or secret detected in diff.';
+      }
+    }
+    const envMatch = ENV_UNQUOTED_SECRET_ASSIGNMENT_RE.exec(body);
+    if (envMatch && !isPlaceholderGenericSecret(envMatch[2], envMatch[0])) {
+      return 'Potential hardcoded credential or secret detected in diff.';
+    }
+    const yamlMatch = YAML_UNQUOTED_SECRET_ASSIGNMENT_RE.exec(body);
+    if (yamlMatch && isRealUnquotedYamlSecret(yamlMatch[2], yamlMatch[0])) {
+      return 'Potential hardcoded credential or secret detected in diff.';
+    }
+  }
   return null;
 }
 
-function detectAddedLineIssues(addedLine, conflictState = { inConflictBlock: true }) {
+function detectAddedLineIssues(
+  addedLine,
+  conflictState = { inConflictBlock: true, pendingSecretAssignment: false }
+) {
   const messages = [];
 
   if (/^<{7}(?:\s|$)/.test(addedLine)) {
@@ -3180,6 +3338,16 @@ function detectAddedLineIssues(addedLine, conflictState = { inConflictBlock: tru
   } else if (/^>{7}(?:\s|$)/.test(addedLine)) {
     conflictState.inConflictBlock = false;
     messages.push('Unresolved git merge conflict marker detected.');
+  }
+
+  let matchedContinuationSecret = false;
+  if (conflictState.pendingSecretAssignment) {
+    conflictState.pendingSecretAssignment = false;
+    const contMatch = LEADING_QUOTED_SECRET_VALUE_RE.exec(addedLine);
+    if (contMatch && !isPlaceholderGenericSecret(contMatch[3], contMatch[0])) {
+      messages.push('Potential hardcoded credential or secret detected in added line.');
+      matchedContinuationSecret = true;
+    }
   }
 
   let matchedSpecificCredential = false;
@@ -3197,22 +3365,58 @@ function detectAddedLineIssues(addedLine, conflictState = { inConflictBlock: tru
     }
   }
 
-  if (!matchedSpecificCredential) {
-    const globalGenericRe = new RegExp(GENERIC_SECRET_ASSIGNMENT_SOURCE, 'gi');
+  if (!matchedSpecificCredential && !matchedContinuationSecret) {
     let matchedGeneric = false;
-    for (const secretMatch of addedLine.matchAll(globalGenericRe)) {
-      if (!isPlaceholderGenericSecret(secretMatch[2], secretMatch[0])) {
-        messages.push('Potential hardcoded credential or secret detected in added line.');
+
+    const globalUriRe = new RegExp(URI_CREDENTIAL_SOURCE, 'gi');
+    for (const uriMatch of addedLine.matchAll(globalUriRe)) {
+      if (!isPlaceholderUriPassword(uriMatch[2])) {
+        messages.push('Potential hardcoded URI password detected in added line.');
         matchedGeneric = true;
         break;
       }
     }
+
+    if (!matchedGeneric) {
+      const globalBearerRe = new RegExp(BEARER_TOKEN_SOURCE, 'gi');
+      for (const bearerMatch of addedLine.matchAll(globalBearerRe)) {
+        if (!isPlaceholderBearerToken(bearerMatch[2])) {
+          messages.push('Potential hardcoded Bearer token detected in added line.');
+          matchedGeneric = true;
+          break;
+        }
+      }
+    }
+
+    if (!matchedGeneric) {
+      const globalGenericRe = new RegExp(GENERIC_SECRET_ASSIGNMENT_SOURCE, 'gi');
+      for (const secretMatch of addedLine.matchAll(globalGenericRe)) {
+        if (!isPlaceholderGenericSecret(secretMatch[2], secretMatch[0])) {
+          messages.push('Potential hardcoded credential or secret detected in added line.');
+          matchedGeneric = true;
+          break;
+        }
+      }
+    }
+
     if (!matchedGeneric) {
       const envMatch = ENV_UNQUOTED_SECRET_ASSIGNMENT_RE.exec(addedLine);
       if (envMatch && !isPlaceholderGenericSecret(envMatch[2], envMatch[0])) {
         messages.push('Potential hardcoded credential or secret detected in added line.');
+        matchedGeneric = true;
       }
     }
+
+    if (!matchedGeneric) {
+      const yamlMatch = YAML_UNQUOTED_SECRET_ASSIGNMENT_RE.exec(addedLine);
+      if (yamlMatch && isRealUnquotedYamlSecret(yamlMatch[2], yamlMatch[0])) {
+        messages.push('Potential hardcoded credential or secret detected in added line.');
+      }
+    }
+  }
+
+  if (PENDING_SECRET_KEY_LINE_RE.test(addedLine)) {
+    conflictState.pendingSecretAssignment = true;
   }
 
   return messages;
@@ -3250,13 +3454,14 @@ function staticSecurityReview(diffContent) {
   let currentLine = 0;
   let inHunk = false;
   let hunkPrefixCols = 1;
-  const conflictState = { inConflictBlock: false };
+  const conflictState = { inConflictBlock: false, pendingSecretAssignment: false };
 
   const lines = text.split(/\r?\n/);
   for (const rawLine of lines) {
     if (rawLine.startsWith('diff --git ')) {
       inHunk = false;
       conflictState.inConflictBlock = false;
+      conflictState.pendingSecretAssignment = false;
       const gitHeaderMatch = rawLine.match(
         /^diff --git ("a\/(?:[^"\\]|\\.)*"|a\/.+?) ("b\/(?:[^"\\]|\\.)*"|b\/.+)$/
       );
@@ -3272,6 +3477,7 @@ function staticSecurityReview(diffContent) {
     if (rawLine.startsWith('diff --cc ') || rawLine.startsWith('diff --combined ')) {
       inHunk = false;
       conflictState.inConflictBlock = false;
+      conflictState.pendingSecretAssignment = false;
       const rawTarget = rawLine.replace(/^diff --(?:cc|combined)\s+/, '').trim();
       const unquoted =
         unquoteGitPath(rawTarget, 'b/') ||
@@ -3288,11 +3494,13 @@ function staticSecurityReview(diffContent) {
     if (rawLine.startsWith('--- /dev/null') || rawLine.startsWith('+++ /dev/null')) {
       inHunk = false;
       conflictState.inConflictBlock = false;
+      conflictState.pendingSecretAssignment = false;
       continue;
     }
     if (rawLine.startsWith('--- ')) {
       inHunk = false;
       conflictState.inConflictBlock = false;
+      conflictState.pendingSecretAssignment = false;
       const fromPath = unquoteGitPath(rawLine.slice(4), 'a/');
       if (fromPath) {
         currentFile = fromPath;
@@ -3303,6 +3511,7 @@ function staticSecurityReview(diffContent) {
     if (rawLine.startsWith('+++ ')) {
       inHunk = false;
       conflictState.inConflictBlock = false;
+      conflictState.pendingSecretAssignment = false;
       const toPath = unquoteGitPath(rawLine.slice(4), 'b/');
       if (toPath) {
         currentFile = toPath;
@@ -3316,6 +3525,7 @@ function staticSecurityReview(diffContent) {
       inHunk = true;
       hunkPrefixCols = 1;
       conflictState.inConflictBlock = false;
+      conflictState.pendingSecretAssignment = false;
       currentLine = Math.max(0, parseInt(hunkMatch[1], 10) - 1);
       continue;
     }
@@ -3328,6 +3538,7 @@ function staticSecurityReview(diffContent) {
       const minusRanges = combinedHunkMatch[2].trim().split(/\s+/).filter(Boolean);
       hunkPrefixCols = Math.max(2, minusRanges.length);
       conflictState.inConflictBlock = false;
+      conflictState.pendingSecretAssignment = false;
       currentLine = Math.max(0, parseInt(combinedHunkMatch[3], 10) - 1);
       continue;
     }
@@ -3347,6 +3558,7 @@ function staticSecurityReview(diffContent) {
         }
       } else {
         currentLine += 1;
+        conflictState.pendingSecretAssignment = false;
         if (/^<{7}(?:\s|$)/.test(body)) conflictState.inConflictBlock = true;
         else if (/^>{7}(?:\s|$)/.test(body)) conflictState.inConflictBlock = false;
       }
@@ -3361,6 +3573,7 @@ function staticSecurityReview(diffContent) {
       }
     } else if (!rawLine.startsWith('-')) {
       currentLine += 1;
+      conflictState.pendingSecretAssignment = false;
       const contextLine = rawLine.startsWith(' ') ? rawLine.slice(1) : rawLine;
       if (/^<{7}(?:\s|$)/.test(contextLine)) {
         conflictState.inConflictBlock = true;
@@ -3442,6 +3655,18 @@ function removeStaleOutput(outputPath) {
 function writeOutputAtomically(outputPath, payloadObj) {
   const { resolved, dir } = assertSafeOutputTarget(outputPath);
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  if (
+    process.platform !== 'win32' &&
+    dir === path.dirname(POSIX_DEFAULT_OUTPUT_PATH) &&
+    typeof process.getuid === 'function'
+  ) {
+    try {
+      const dirStat = lstatIfExists(dir);
+      if (dirStat && dirStat.isDirectory() && dirStat.uid === process.getuid()) {
+        fs.chmodSync(dir, 0o700);
+      }
+    } catch (_) {}
+  }
   const rand = crypto.randomBytes(6).toString('hex');
   const tmpPath = path.join(dir, `.review_result.${process.pid}.${Date.now()}.${rand}.tmp`);
   try {
@@ -3449,6 +3674,9 @@ function writeOutputAtomically(outputPath, payloadObj) {
       encoding: 'utf8',
       mode: 0o600,
     });
+    if (process.platform !== 'win32') {
+      fs.chmodSync(tmpPath, 0o600);
+    }
     fs.renameSync(tmpPath, resolved);
   } catch (err) {
     try {
@@ -3504,6 +3732,13 @@ async function withOutputLock(outputPath, fn, lockTimeoutMs = DEFAULT_LOCK_TIMEO
         if (err.code !== 'EEXIST') {
           throw err;
         }
+        const statBefore = lstatIfExists(lockPath);
+        if (!statBefore) {
+          continue;
+        }
+        if (statBefore.isSymbolicLink()) {
+          throw new Error(`Refusing symlinked review output lock file: ${lockPath}`);
+        }
         try {
           const lockRaw = fs.readFileSync(lockPath, 'utf8');
           let lockMeta = null;
@@ -3512,18 +3747,27 @@ async function withOutputLock(outputPath, fn, lockTimeoutMs = DEFAULT_LOCK_TIMEO
           } catch (_) {
             lockMeta = null;
           }
+          let shouldEvict = false;
           if (
             isPlainObject(lockMeta) &&
             Number.isInteger(lockMeta.pid) &&
             lockMeta.pid > 0
           ) {
             if (lockMeta.pid !== process.pid && !isProcessAlive(lockMeta.pid)) {
-              fs.unlinkSync(lockPath);
-              continue;
+              shouldEvict = true;
             }
-          } else {
-            const lockStat = lstatIfExists(lockPath);
-            if (lockStat && Date.now() - lockStat.mtimeMs >= 2000) {
+          } else if (Date.now() - statBefore.mtimeMs >= 2000) {
+            shouldEvict = true;
+          }
+
+          if (shouldEvict) {
+            const statNow = lstatIfExists(lockPath);
+            if (
+              statNow &&
+              !statNow.isSymbolicLink() &&
+              statNow.ino === statBefore.ino &&
+              statNow.mtimeMs === statBefore.mtimeMs
+            ) {
               fs.unlinkSync(lockPath);
               continue;
             }
@@ -3816,8 +4060,9 @@ async function reviewDiff(diffContent, options = {}) {
 
 async function runReview(options = {}) {
   const env = options.env || process.env;
-  const diffPath = options.diffPath || defaultDiffPath(env);
-  const outputPath = options.outputPath || defaultOutputPath(env);
+  const effectivePlatform = options.platform || process.platform;
+  const diffPath = options.diffPath || defaultDiffPath(env, effectivePlatform);
+  const outputPath = options.outputPath || defaultOutputPath(env, effectivePlatform);
 
   if (areSameTargetPaths(diffPath, outputPath)) {
     throw new Error(
@@ -3825,21 +4070,19 @@ async function runReview(options = {}) {
     );
   }
 
+  const effectiveTimeoutMs = resolveEffectiveTimeoutMs(options.timeoutMs, env);
   const effectiveLockTimeoutMs =
     Number.isFinite(options.lockTimeoutMs) && options.lockTimeoutMs > 0
       ? options.lockTimeoutMs
-      : Math.max(
-          DEFAULT_LOCK_TIMEOUT_MS,
-          (Number.isFinite(options.timeoutMs) && options.timeoutMs > 0
-            ? options.timeoutMs
-            : DEFAULT_TIMEOUT_MS) + 60000
-        );
+      : Math.max(DEFAULT_LOCK_TIMEOUT_MS, effectiveTimeoutMs + 60000);
 
   return withOutputLock(
     outputPath,
     async () => {
-      assertSafeOutputTarget(outputPath);
+      assertSafeOutputTarget(outputPath, effectivePlatform);
       removeStaleOutput(outputPath);
+
+      assertSafeDiffInputPath(diffPath, effectivePlatform);
 
       if (!fs.existsSync(diffPath)) {
         throw new Error(`Diff file not found at ${diffPath}`);
@@ -3854,7 +4097,11 @@ async function runReview(options = {}) {
       }
 
       const diffContent = fs.readFileSync(diffPath, 'utf8');
-      const result = await reviewDiff(diffContent, { ...options, env });
+      const result = await reviewDiff(diffContent, {
+        ...options,
+        timeoutMs: effectiveTimeoutMs,
+        env,
+      });
       writeOutputAtomically(outputPath, result);
       return result;
     },
@@ -3933,6 +4180,7 @@ module.exports = {
   verifyIsolatedPermissionsOutput,
   parseArgs,
   parseCliArgs: parseArgs,
+  resolveEffectiveTimeoutMs,
   isWindowsBinaryPath,
   isWslWindowsExe,
   assertNonWindowsInteropBinaryOnPosix,
@@ -3956,6 +4204,7 @@ module.exports = {
   createIsolatedRunWorkspace,
   buildReviewCliArgs,
   assertSafeOutputTarget,
+  assertSafeDiffInputPath,
   redactCredentialsForPrompt,
   buildReviewPrompt,
   withOutputLock,

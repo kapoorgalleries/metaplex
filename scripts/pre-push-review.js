@@ -31,6 +31,7 @@ const { spawnSync } = require('child_process');
 const {
   assertAllowedReviewerModel,
   assertSafeOutputTarget,
+  resolveEffectiveTimeoutMs,
   runReview,
   withOutputLock,
 } = require('./reviewer');
@@ -54,6 +55,7 @@ function parsePrePushArgs(argv = process.argv.slice(2)) {
   let help = false;
   let installHook = false;
   let force = false;
+  let allowWslInterop;
   let range = null;
   let outputOverride = null;
   const models = [];
@@ -78,6 +80,10 @@ function parsePrePushArgs(argv = process.argv.slice(2)) {
     }
     if (!endOfOptions && arg === '--force') {
       force = true;
+      continue;
+    }
+    if (!endOfOptions && arg === '--allow-wsl-interop') {
+      allowWslInterop = true;
       continue;
     }
     if (!endOfOptions && (arg === '--range' || arg.startsWith('--range='))) {
@@ -139,6 +145,7 @@ function parsePrePushArgs(argv = process.argv.slice(2)) {
     help,
     installHook,
     force,
+    allowWslInterop,
     range,
     outputPath: outputOverride,
     models: models.length > 0 ? models : undefined,
@@ -205,6 +212,74 @@ function resolveCommitOid(repoRoot, rev) {
   if (res.status !== 0) return null;
   const oid = res.stdout.trim();
   return HEX_OID_RE.test(oid) ? oid : null;
+}
+
+function resolveTreeOid(repoRoot, rev) {
+  if (!rev) return null;
+  const res = runGit(repoRoot, ['rev-parse', '--verify', '--quiet', `${rev}^{tree}`]);
+  if (res.status !== 0) return null;
+  const oid = res.stdout.trim();
+  return HEX_OID_RE.test(oid) ? oid : null;
+}
+
+function resolveBlobOid(repoRoot, rev) {
+  if (!rev) return null;
+  const res = runGit(repoRoot, ['rev-parse', '--verify', '--quiet', `${rev}^{blob}`]);
+  if (res.status !== 0) return null;
+  const oid = res.stdout.trim();
+  return HEX_OID_RE.test(oid) ? oid : null;
+}
+
+function formatPushedBlobDiff(repoRoot, blobOid, refLabel) {
+  const res = spawnSync('git', ['cat-file', 'blob', blobOid], {
+    cwd: repoRoot,
+    env: buildGitSubprocessEnv(process.env),
+    maxBuffer: GIT_MAX_BUFFER,
+    windowsHide: true,
+  });
+  if (res.error || res.status !== 0 || !Buffer.isBuffer(res.stdout)) {
+    throw new Error(`Unable to read pushed git blob ${blobOid}`);
+  }
+  const cleanLabel =
+    String(refLabel || blobOid)
+      .replace(/^refs\/(?:tags|heads)\//, '')
+      .replace(/[\r\n"\\]+/g, '_')
+      .trim() || blobOid;
+
+  const buf = res.stdout;
+  if (buf.length === 0) {
+    return [
+      `diff --git a/${cleanLabel} b/${cleanLabel}`,
+      'new file mode 100644',
+      '--- /dev/null',
+      `+++ b/${cleanLabel}`,
+      '',
+    ].join('\n');
+  }
+  if (buf.includes(0)) {
+    return [
+      `diff --git a/${cleanLabel} b/${cleanLabel}`,
+      'new file mode 100644',
+      `Binary files /dev/null and b/${cleanLabel} differ`,
+      '',
+    ].join('\n');
+  }
+  const text = buf.toString('utf8');
+  const hasTrailingNewline = text.endsWith('\n');
+  const rawLines = (hasTrailingNewline ? text.slice(0, -1) : text).split('\n');
+  const out = [
+    `diff --git a/${cleanLabel} b/${cleanLabel}`,
+    'new file mode 100644',
+    '--- /dev/null',
+    `+++ b/${cleanLabel}`,
+    `@@ -0,0 +1,${rawLines.length} @@`,
+    ...rawLines.map((l) => `+${l}`),
+  ];
+  if (!hasTrailingNewline) {
+    out.push('\\ No newline at end of file');
+  }
+  out.push('');
+  return out.join('\n');
 }
 
 function getMergeBase(repoRoot, oidA, oidB) {
@@ -353,7 +428,57 @@ function computePrePushDiff(repoRoot, options = {}) {
     }
     const localCommit = resolveCommitOid(repoRoot, update.localOid);
     if (!localCommit) {
-      continue;
+      const localTree = resolveTreeOid(repoRoot, update.localOid);
+      if (localTree) {
+        const remoteTree = !ZERO_OID_RE.test(update.remoteOid)
+          ? resolveTreeOid(repoRoot, update.remoteOid)
+          : null;
+        if (remoteTree === localTree) {
+          continue;
+        }
+        const treeFromOid = remoteTree || (emptyTreeOid = emptyTreeOid || getEmptyTreeOid(repoRoot));
+        const treePairKey = `tree:${treeFromOid}..${localTree}`;
+        if (!seenPairs.has(treePairKey)) {
+          seenPairs.add(treePairKey);
+          const treeDiffRes = runGit(repoRoot, [
+            'diff',
+            '--no-ext-diff',
+            '--no-color',
+            treeFromOid,
+            localTree,
+            '--',
+          ]);
+          if (treeDiffRes.status !== 0) {
+            throw new Error(
+              `git diff failed for pushed tree ${localTree}: ${(treeDiffRes.stderr || '').trim()}`
+            );
+          }
+          if (treeDiffRes.stdout) {
+            chunks.push(treeDiffRes.stdout);
+          }
+        }
+        continue;
+      }
+
+      const localBlob = resolveBlobOid(repoRoot, update.localOid);
+      if (localBlob) {
+        const remoteBlob = !ZERO_OID_RE.test(update.remoteOid)
+          ? resolveBlobOid(repoRoot, update.remoteOid)
+          : null;
+        if (remoteBlob === localBlob) {
+          continue;
+        }
+        const blobKey = `blob:${localBlob}:${update.remoteRef || update.localRef}`;
+        if (!seenPairs.has(blobKey)) {
+          seenPairs.add(blobKey);
+          chunks.push(formatPushedBlobDiff(repoRoot, localBlob, update.remoteRef || update.localRef));
+        }
+        continue;
+      }
+
+      throw new Error(
+        `Unable to resolve pushed git object "${update.localOid}" for ref "${update.localRef}"`
+      );
     }
 
     const remoteCommit = !ZERO_OID_RE.test(update.remoteOid)
@@ -491,12 +616,19 @@ function buildHookScript() {
     '      WANT_VER="$(tr -d \'[:space:]\' < "$REPO_ROOT/.node-version")"',
     '      WANT_VER="${WANT_VER#v}"',
     '      WANT_VER="${WANT_VER#V}"',
+    '      case "$WANT_VER" in',
+    '        ""|*[!0-9.]*|.*|*.|*..*) WANT_VER="" ;;',
+    '      esac',
     '      if [ -n "$WANT_VER" ]; then',
-    '        for ver in $(cd "$NVM_BASE" 2>/dev/null && ls -1d "v$WANT_VER"* 2>/dev/null | sed \'s/^v//\' | sort -t. -k1,1n -k2,2n -k3,3n); do',
-    '          cand="$NVM_BASE/v$ver/bin/node"',
-    '          if [ -x "$cand" ]; then',
-    '            NODE_BIN="$cand"',
-    '          fi',
+    '        for ver in $(cd "$NVM_BASE" 2>/dev/null && ls -1d v* 2>/dev/null | sed \'s/^v//\' | sort -t. -k1,1n -k2,2n -k3,3n); do',
+    '          case "$ver" in',
+    '            "$WANT_VER"|"$WANT_VER".*)',
+    '              cand="$NVM_BASE/v$ver/bin/node"',
+    '              if [ -x "$cand" ]; then',
+    '                NODE_BIN="$cand"',
+    '              fi',
+    '              ;;',
+    '          esac',
     '        done',
     '      fi',
     '    fi',
@@ -621,11 +753,8 @@ async function runPrePushReview(options = {}) {
     (env && env.REVIEW_OUTPUT_PATH && env.REVIEW_OUTPUT_PATH.trim()) ||
     path.join(workDir, 'pre-push-review_result.json');
   const pipelineLockTarget = path.join(workDir, '.pre-push-pipeline');
-  const pipelineLockTimeoutMs = Math.max(
-    420000,
-    (Number.isFinite(options.timeoutMs) && options.timeoutMs > 0 ? options.timeoutMs : 360000) +
-      60000
-  );
+  const effectiveTimeoutMs = resolveEffectiveTimeoutMs(options.timeoutMs, env);
+  const pipelineLockTimeoutMs = Math.max(420000, effectiveTimeoutMs + 60000);
 
   return withOutputLock(
     pipelineLockTarget,
@@ -646,8 +775,9 @@ async function runPrePushReview(options = {}) {
         diffPath,
         outputPath,
         models: options.models,
-        timeoutMs: options.timeoutMs,
+        timeoutMs: effectiveTimeoutMs,
         maxDiffChars: options.maxDiffChars,
+        allowWslInterop: options.allowWslInterop,
         agyBin: options.agyBin,
         settingsPaths: options.settingsPaths,
         env,
@@ -686,7 +816,7 @@ async function runCli(argv = process.argv.slice(2), env = process.env, io = {}) 
 
   if (opts.help) {
     console.log(
-      'Usage: node scripts/pre-push-review.js [remote-name] [remote-url] [--install-hook] [--force] [--range <rev-range>]'
+      'Usage: node scripts/pre-push-review.js [remote-name] [remote-url] [--install-hook] [--force] [--range <rev-range>] [--allow-wsl-interop]'
     );
     return 0;
   }
@@ -747,6 +877,7 @@ async function runCli(argv = process.argv.slice(2), env = process.env, io = {}) 
       models: opts.models,
       timeoutMs: opts.timeoutMs,
       maxDiffChars: opts.maxDiffChars,
+      allowWslInterop: opts.allowWslInterop,
       env,
     });
 

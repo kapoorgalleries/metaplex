@@ -65,6 +65,7 @@ const {
   resolveCandidateModels,
   verifyIsolatedPermissionsOutput,
   parseArgs,
+  resolveEffectiveTimeoutMs,
   resolveAgyBin,
   resolveAgyBinaries,
   isValidIssue,
@@ -82,6 +83,8 @@ const {
   buildAgyEnv,
   createIsolatedRunWorkspace,
   buildReviewCliArgs,
+  assertSafeOutputTarget,
+  assertSafeDiffInputPath,
   redactCredentialsForPrompt,
   buildReviewPrompt,
   withOutputLock,
@@ -1863,6 +1866,48 @@ async function main() {
           assert.ok(
             fs.readFileSync(path.join(unfetchedRefsDir, 'pr26.diff'), 'utf8').includes('+unfetched-feature-line')
           );
+
+          // 5. Unfetched git tag, refs/remotes/origin/<branch> spelling, and wildcard refspec rejection
+          assert.strictEqual(
+            spawnSync('git', ['tag', 'v1.0-unfetched', feat27Sha], { cwd: forkWork, env: gitEnv }).status,
+            0
+          );
+          assert.strictEqual(
+            spawnSync('git', ['push', 'origin', 'refs/tags/v1.0-unfetched'], { cwd: forkWork, env: gitEnv }).status,
+            0
+          );
+          const singleClone2 = fs.mkdtempSync(path.join(tmpRoot, 'wf-single-clone2-'));
+          assert.strictEqual(
+            spawnSync('git', ['clone', '--single-branch', '--no-tags', '--branch', 'master', originBare, singleClone2], {
+              env: gitEnv,
+            }).status,
+            0
+          );
+          const unfetchedTagDir = fs.mkdtempSync(path.join(tmpRoot, 'wf-unfetched-tag-'));
+          const pUnfetchedTag = spawnSync('bash', ['-c', diffGenScript], {
+            cwd: singleClone2,
+            env: {
+              ...gitEnv,
+              REVIEW_DIR: unfetchedTagDir,
+              BASE_REF: 'refs/remotes/origin/release/v1',
+              HEAD_REF: 'v1.0-unfetched',
+            },
+            encoding: 'utf8',
+          });
+          assert.strictEqual(pUnfetchedTag.status, 0, pUnfetchedTag.stderr);
+          assert.ok(
+            fs.readFileSync(path.join(unfetchedTagDir, 'pr26.diff'), 'utf8').includes('+unfetched-feature-line')
+          );
+
+          // Wildcard refspec in BASE_REF/HEAD_REF must be rejected without fetching wildcard branches
+          assert.strictEqual(
+            spawnSync('bash', ['-c', diffGenScript], {
+              cwd: singleClone2,
+              env: { ...gitEnv, REVIEW_DIR: unfetchedTagDir, BASE_REF: 'feat/*', HEAD_REF: 'HEAD' },
+              encoding: 'utf8',
+            }).status,
+            1
+          );
         });
       }
 
@@ -2648,6 +2693,214 @@ async function main() {
       const recoveredVal = await withOutputLock(staleLockTarget, async () => 'recovered-ok', 500);
       assert.strictEqual(recoveredVal, 'recovered-ok');
       assert.strictEqual(fs.existsSync(staleLockFile), false);
+    });
+
+    // ------------------ 9. Round-3 hardening regressions (JSON/YAML/URI/npm/GOCSPX/JWT/multiline secrets, tree/blob tag pushes, .node-version prefix, symlinked lock/diff, world-writable dir, timeout env scaling)
+    await checkAsync('round-3 regressions: JSON/YAML/URI/npm/GOCSPX/JWT/multiline secrets, tree/blob tag pre-push gating, exact .node-version NVM prefix, symlinked lock/diff & world-writable dir guards, and --allow-wsl-interop / timeout env scaling', async () => {
+      // 1. Quoted-key JSON secrets, Google OAuth GOCSPX, npm_, YAML unquoted, .npmrc _authToken, URI passwords, JWT Bearer, and multi-line assignments
+      const jsonKey1 = ['api', 'key'].join('_');
+      const jsonVal1 = ['ProdJsonSecret', 'Key987654321'].join('');
+      const jsonKey2 = ['client', 'secret'].join('_');
+      const gocspxVal = ['GOCSPX', 'RealGoogleOAuthSecret987654'].join('-');
+      const yamlVal = ['UnquotedYamlProd', 'Secret123456'].join('');
+      const npmVal = ['npm', 'A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8'].join('_');
+      const uriPass = ['SuperSecret', 'DbPass99'].join('');
+      const jwtSig = ['SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV', 'adQssw5c'].join('_');
+      const jwtVal = ['eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9', 'eyJzdWIiOiIxMjM0NTY3ODkwIn0', jwtSig].join('.');
+      const multiVal = ['MultiLineSecret', 'Value987654321'].join('');
+
+      const richSecretDiff = [
+        'diff --git a/secrets-fixture.txt b/secrets-fixture.txt',
+        '--- a/secrets-fixture.txt',
+        '+++ b/secrets-fixture.txt',
+        '@@ -0,0 +1,11 @@',
+        `+  "${jsonKey1}": "${jsonVal1}",`,
+        `+  "${jsonKey2}": "${gocspxVal}",`,
+        `+${jsonKey1}: ${yamlVal}`,
+        `+//registry.npmjs.org/:_authToken=${npmVal}`,
+        `+const db = "postgresql://admin:${uriPass}@db.internal:5432/prod";`,
+        `+Authorization: Bearer ${jwtVal}`,
+        '+const clientSecret =',
+        `+  "${multiVal}";`,
+        '+interface SafeTypes {',
+        '+  clientSecret: AuthenticationConfiguration',
+        '+}',
+      ].join('\n');
+
+      const redactedRich = buildReviewPrompt(richSecretDiff);
+      for (const secretPiece of [jsonVal1, gocspxVal, yamlVal, npmVal, uriPass, jwtSig, multiVal]) {
+        assert.ok(
+          !redactedRich.includes(secretPiece),
+          `Expected secret fragment "${secretPiece.slice(0, 8)}..." to be redacted from prompt`
+        );
+      }
+
+      const staticRich = staticSecurityReview(richSecretDiff);
+      assert.strictEqual(staticRich.verdict, 'REQUEST_CHANGES');
+      assert.strictEqual(
+        staticRich.issues.length,
+        7,
+        `Expected 7 secret issues (and 0 false positives on TypeScript interface), got ${JSON.stringify(
+          staticRich.issues
+        )}`
+      );
+
+      // 2. `--allow-wsl-interop` on pre-push-review.js and `resolveEffectiveTimeoutMs` env validation/scaling
+      assert.strictEqual(parsePrePushArgs(['--allow-wsl-interop']).allowWslInterop, true);
+      assert.strictEqual(
+        resolveEffectiveTimeoutMs(undefined, { REVIEWER_TIMEOUT_MS: '600000' }),
+        600000
+      );
+      assert.strictEqual(resolveEffectiveTimeoutMs(undefined, { AGY_TIMEOUT_MS: '480000' }), 480000);
+      assert.throws(
+        () => resolveEffectiveTimeoutMs(undefined, { REVIEWER_TIMEOUT_MS: 'not-a-number' }),
+        /Invalid REVIEWER_TIMEOUT_MS/
+      );
+
+      // 3. Symlinked lock file fails closed immediately (no timeout hang), symlinked diffPath rejected, world-writable non-sticky output dir rejected
+      if (process.platform !== 'win32') {
+        const symLockDir = fs.mkdtempSync(path.join(tmpRoot, 'sym-lock-'));
+        const symLockOut = path.join(symLockDir, 'out.json');
+        fs.symlinkSync(path.join(symLockDir, 'dangling'), path.join(symLockDir, '.out.json.lock'));
+        const tStart = Date.now();
+        await assert.rejects(
+          () => withOutputLock(symLockOut, async () => 'never', 5000),
+          /Refusing symlinked review output lock file/
+        );
+        assert.ok(
+          Date.now() - tStart < 1500,
+          'Symlinked lock file must fail closed immediately without spinning to lockTimeoutMs'
+        );
+
+        const realPatch = path.join(tmpRoot, 'real-empty.patch');
+        fs.writeFileSync(realPatch, '', 'utf8');
+        const symlinkPatch = path.join(tmpRoot, 'symlink.patch');
+        fs.symlinkSync(realPatch, symlinkPatch);
+        assert.throws(() => assertSafeDiffInputPath(symlinkPatch), /Refusing symlinked diff file/);
+        await assert.rejects(
+          () => runReview({ diffPath: symlinkPatch, outputPath: path.join(tmpRoot, 'sym-diff-out.json') }),
+          /Refusing symlinked diff file/
+        );
+        assert.strictEqual(assertSafeDiffInputPath('/dev/null'), '/dev/null');
+
+        const worldWritableDir = fs.mkdtempSync(path.join(tmpRoot, 'world-writable-'));
+        fs.chmodSync(worldWritableDir, 0o777);
+        assert.throws(
+          () => assertSafeOutputTarget(path.join(worldWritableDir, 'out.json')),
+          /world-writable non-sticky output directory/
+        );
+      }
+
+      // 4. Tree-tag & blob-tag pushes are diffed/gated (never silently skipped), invalid OIDs fail closed, and .node-version `20.1` ignores `v20.10.0`
+      if (haveCmd('git', '--version')) {
+        const tagRepo = fs.mkdtempSync(path.join(tmpRoot, 'tag-obj-repo-'));
+        const gitEnv = cleanGitEnv({
+          HOME: authHome,
+          GIT_AUTHOR_NAME: 'test',
+          GIT_AUTHOR_EMAIL: 'test@users.noreply.github.com',
+          GIT_COMMITTER_NAME: 'test',
+          GIT_COMMITTER_EMAIL: 'test@users.noreply.github.com',
+        });
+        assert.strictEqual(spawnSync('git', ['init', '-b', 'master'], { cwd: tagRepo, env: gitEnv }).status, 0);
+        const envKey = ['GEMINI', 'API', 'KEY'].join('_');
+        const leakedTreeVal = ['TreeBlobLeaked', 'Secret987654'].join('');
+        fs.writeFileSync(path.join(tagRepo, '.env'), `${envKey}=${leakedTreeVal}\n`, 'utf8');
+        assert.strictEqual(spawnSync('git', ['add', '.env'], { cwd: tagRepo, env: gitEnv }).status, 0);
+        const treeOid = spawnSync('git', ['write-tree'], {
+          cwd: tagRepo,
+          env: gitEnv,
+          encoding: 'utf8',
+        }).stdout.trim();
+        const blobOid = spawnSync('git', ['hash-object', '-w', path.join(tagRepo, '.env')], {
+          cwd: tagRepo,
+          env: gitEnv,
+          encoding: 'utf8',
+        }).stdout.trim();
+        assert.strictEqual(spawnSync('git', ['tag', '-a', 'tree-tag', treeOid, '-m', 'tree tag'], { cwd: tagRepo, env: gitEnv }).status, 0);
+        const treeTagOid = spawnSync('git', ['rev-parse', 'refs/tags/tree-tag'], {
+          cwd: tagRepo,
+          env: gitEnv,
+          encoding: 'utf8',
+        }).stdout.trim();
+
+        const treePushDiff = computePrePushDiff(tagRepo, {
+          remoteName: 'origin',
+          stdinText: `refs/tags/tree-tag ${treeTagOid} refs/tags/tree-tag ${'0'.repeat(40)}\n`,
+        });
+        assert.ok(treePushDiff.includes(leakedTreeVal), 'Pushed tree tag must produce unified diff');
+        assert.strictEqual(staticSecurityReview(treePushDiff).verdict, 'REQUEST_CHANGES');
+
+        const blobPushDiff = computePrePushDiff(tagRepo, {
+          remoteName: 'origin',
+          stdinText: `refs/tags/blob-tag ${blobOid} refs/tags/blob-tag ${'0'.repeat(40)}\n`,
+        });
+        assert.ok(blobPushDiff.includes(leakedTreeVal), 'Pushed blob tag must produce unified diff');
+        assert.strictEqual(staticSecurityReview(blobPushDiff).verdict, 'REQUEST_CHANGES');
+
+        assert.throws(
+          () =>
+            computePrePushDiff(tagRepo, {
+              remoteName: 'origin',
+              stdinText: `refs/heads/missing ${'f'.repeat(40)} refs/heads/missing ${'0'.repeat(40)}\n`,
+            }),
+          /Unable to resolve pushed git object/
+        );
+
+        // Exact .node-version prefix check (`20.1` must pick `v20.1.2`, NOT `v20.10.0`)
+        if (process.platform !== 'win32') {
+          const nvmPrefixDir = fs.mkdtempSync(path.join(tmpRoot, 'nvm-prefix-'));
+          const good201 = path.join(nvmPrefixDir, 'versions', 'node', 'v20.1.2', 'bin');
+          const wrong2010 = path.join(nvmPrefixDir, 'versions', 'node', 'v20.10.0', 'bin');
+          fs.mkdirSync(good201, { recursive: true });
+          fs.mkdirSync(wrong2010, { recursive: true });
+          fs.symlinkSync(process.execPath, path.join(good201, 'node'));
+          fs.writeFileSync(path.join(wrong2010, 'node'), '#!/bin/sh\nexit 88\n', { mode: 0o755 });
+
+          const hookRepo = fs.mkdtempSync(path.join(tmpRoot, 'hook-prefix-repo-'));
+          assert.strictEqual(spawnSync('git', ['init', '-b', 'master'], { cwd: hookRepo, env: gitEnv }).status, 0);
+          const hookScripts = path.join(hookRepo, 'scripts');
+          fs.mkdirSync(hookScripts, { recursive: true });
+          fs.copyFileSync(REVIEWER_PATH, path.join(hookScripts, 'reviewer.js'));
+          fs.copyFileSync(PRE_PUSH_PATH, path.join(hookScripts, 'pre-push-review.js'));
+          fs.writeFileSync(path.join(hookRepo, '.node-version'), '20.1\n', 'utf8');
+          const { hookPath } = installPrePushHook(hookRepo, { force: true });
+
+          const hookRun = spawnSync(hookPath, ['origin', 'https://example.invalid/repo.git'], {
+            cwd: hookRepo,
+            env: {
+              ...gitEnv,
+              PATH: '/usr/bin:/bin',
+              NVM_DIR: nvmPrefixDir,
+              REVIEW_DIR: fs.mkdtempSync(path.join(tmpRoot, 'hook-prefix-rev-')),
+            },
+            input: '',
+            encoding: 'utf8',
+          });
+          assert.strictEqual(
+            hookRun.status,
+            0,
+            `Expected .node-version=20.1 to select v20.1.2 instead of v20.10.0 (exit 88): ${hookRun.stderr}`
+          );
+        }
+
+        // Self-diff guard: our own branch diff against origin/master must trigger zero static false positives
+        const selfDiffRes = spawnSync('git', ['diff', 'origin/master', '--'], {
+          cwd: path.resolve(__dirname, '..'),
+          env: gitEnv,
+          encoding: 'utf8',
+          maxBuffer: 64 * 1024 * 1024,
+        });
+        if (selfDiffRes.status === 0 && selfDiffRes.stdout.trim() !== '') {
+          const selfStatic = staticSecurityReview(selfDiffRes.stdout);
+          assert.strictEqual(
+            selfStatic.verdict,
+            'APPROVE',
+            `Expected zero static false positives on metaplex branch diff, got: ${JSON.stringify(
+              selfStatic.issues
+            )}`
+          );
+        }
+      }
     });
   } finally {
     fs.rmSync(tmpRoot, { recursive: true, force: true });
