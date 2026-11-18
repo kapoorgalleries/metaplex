@@ -28,7 +28,18 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { spawnSync } = require('child_process');
-const { parseStrict, checkSettings, locateInHooksDir, MAX_DEPTH, HOOK_EVENTS, PERMISSION_KEYS, EVENT_HOOK_TYPES, INTERPRETERS } = require('./check-claude-settings.js');
+
+// Git exports GIT_DIR, GIT_INDEX_FILE and the like to hooks and to
+// `rebase -x`. Inherited by the git calls below, they would point at the
+// repository running these tests, whose index and config the throwaway
+// repositories' `git init` and `git add` would then overwrite. Clear them,
+// and pin core.quotePath, which decides how git spells a non-ASCII path.
+for (const v of spawnSync('git', ['rev-parse', '--local-env-vars'], { encoding: 'utf8' }).stdout.split('\n')) {
+  if (v) delete process.env[v];
+}
+Object.assign(process.env, { GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'core.quotePath', GIT_CONFIG_VALUE_0: 'true' });
+
+const { parseStrict, checkSettings, locateInHooksDir, MAX_DEPTH, HOOK_EVENTS, PERMISSION_KEYS, EVENT_HOOK_TYPES, INTERPRETERS, MCP_TOOL_HOOKS, HTTP_HOOK_URLS, checkTrackedFiles, trackedFiles } = require('./check-claude-settings.js');
 
 let failures = 0;
 const check = (name, fn) => {
@@ -157,6 +168,10 @@ check('EVENT_HOOK_TYPES equals the documented map', () => {
 check('PERMISSION_KEYS equals the documented list', () => assert.deepStrictEqual([...PERMISSION_KEYS].sort(), [...DOCUMENTED_PERMISSION_KEYS].sort()));
 const ALLOWED_INTERPRETERS = ['node', 'python3', 'bash', 'sh', 'pwsh'];
 check('INTERPRETERS is exactly node, python3, bash, sh, pwsh', () => assert.deepStrictEqual([...INTERPRETERS].sort(), [...ALLOWED_INTERPRETERS].sort()));
+// Each entry is a reviewed decision that the tool cannot run commands, write
+// files or send data; none has been made, so the list is empty.
+check('MCP_TOOL_HOOKS is empty', () => assert.deepStrictEqual(MCP_TOOL_HOOKS, []));
+check('HTTP_HOOK_URLS is empty', () => assert.deepStrictEqual(HTTP_HOOK_URLS, []));
 
 // Throwaway repositories. `repo` has hooks that exist, parse, don't parse,
 // have a space in the name, or are a directory; a script outside
@@ -182,7 +197,23 @@ const write = (p, text, mode) => {
   if (mode !== undefined) fs.chmodSync(p, mode);
 };
 write(path.join(hooksDir, 'ok.js'), 'process.exit(0);\n');
+// The throwaway repository's .mcp.json defines the servers the test pairs pin,
+// alongside the real .mcp.json's servers, so that a pair added to
+// MCP_TOOL_HOOKS is checked against the same definitions here as in CI.
+// The checker reads .mcp.json only while pairs are listed, so the
+// repository may have none.
+const REAL_MCP_PATH = path.join(__dirname, '..', '.mcp.json');
+const REAL_MCP = fs.existsSync(REAL_MCP_PATH) ? JSON.parse(fs.readFileSync(REAL_MCP_PATH, 'utf8')) : {};
+const MCP_S = { type: 'stdio', command: 'npx', args: ['-y', 'example-s@1.2.3'], env: { MODE: 'read-only', LEVEL: '1' } };
+const MCP_MEMORY = { type: 'http', url: 'https://example.com/memory/mcp', headers: { 'X-Mode': 'read-only', 'X-Region': 'us' } };
+const MCP_FIXTURE = `${JSON.stringify({ mcpServers: { ...(REAL_MCP.mcpServers || {}), s: MCP_S, memory: MCP_MEMORY } }, null, 2)}\n`;
+write(path.join(repo, '.mcp.json'), MCP_FIXTURE);
 write(path.join(hooksDir, 'ok.mjs'), 'export {};\n');
+// The first bytes of a zip archive; python3 runs a zip named .py as a script.
+write(path.join(hooksDir, 'zipped.py'), Buffer.from('504b0304140000000000', 'hex'));
+write(path.join(hooksDir, 'nul.sh'), 'exit 0\n\0');
+// UTF-16LE with a BOM, as Windows PowerShell 5.1's redirection writes it.
+write(path.join(hooksDir, 'utf16.ps1'), Buffer.from('\ufeffexit 0\r\n', 'utf16le'));
 write(path.join(hooksDir, 'ok.sh'), '#!/bin/sh\nexit 0\n', 0o755);
 write(path.join(hooksDir, 'ok.py'), 'raise SystemExit(0)\n');
 write(path.join(hooksDir, 'ok.ps1'), 'exit 0\n');
@@ -226,12 +257,17 @@ const cmd = (args, fields = {}) => ({
 // A settings object with one group on `event` holding `hookObj`.
 const entry = (hookObj, groupFields = {}, event = 'PreToolUse') => ({ ...P, hooks: { [event]: [{ matcher: 'Bash', hooks: [hookObj], ...groupFields }] } });
 const prompt = { type: 'prompt', prompt: 'ok' };
+// The shared cases run with two mcp_tool pairs allowed and agent hooks
+// accepted, so that every other rule can be tested on those hook types. The
+// defaults (an empty MCP_TOOL_HOOKS, no agent hooks) are tested below with no
+// options, through checkSettings and through the CLI.
+const TEST_OPTIONS = { mcpToolHooks: [{ server: 's', tool: 't', definition: MCP_S }, { server: 'memory', tool: 'store', definition: MCP_MEMORY }], allowAgentHooks: true, httpHookUrls: ['https://example.com/hook'] };
 const clean = (name, settings, root = repo) =>
-  check(name, () => assert.deepStrictEqual(checkSettings(settings, root), []));
+  check(name, () => assert.deepStrictEqual(checkSettings(settings, root, TEST_OPTIONS), []));
 const flags = (name, settings, ...patterns) =>
   check(name, () => {
     const root = typeof patterns[0] === 'string' ? patterns.shift() : repo;
-    const problems = checkSettings(settings, root);
+    const problems = checkSettings(settings, root, TEST_OPTIONS);
     for (const p of patterns) {
       assert.ok(problems.some((m) => p.test(m)), `expected a problem matching ${p}; got ${JSON.stringify(problems)}`);
     }
@@ -245,6 +281,23 @@ clean('settings from parseStrict (no prototype) are fine', parseStrict('{"permis
 flags('a misspelled "permissions" drops the whole policy', { permisions: { allow: ['A'] } }, /"permisions" looks like a misspelling of "permissions"/);
 flags('a capitalised "Permissions"', { Permissions: { allow: ['A'] } }, /looks like a misspelling of "permissions"/);
 flags('a misspelled "hooks"', { ...P, hook: {} }, /"hook" looks like a misspelling of "hooks"/);
+flags('env is passed to every hook process', { ...P, env: { NODE_OPTIONS: '--require /tmp/x.js' } }, /"env" is not accepted in this file: Claude Code passes it to every hook process/);
+flags('an empty env is still flagged', { ...P, env: {} }, /"env" is not accepted in this file/);
+check('env gets its own message only, not also the general one', () => {
+  assert.deepStrictEqual(checkSettings({ ...P, env: {} }, repo).length, 1);
+});
+// Top-level keys: only permissions, hooks and $schema. Other settings can
+// load a plugin with its own hooks or run a command.
+clean('$schema is accepted', { $schema: 'https://json.schemastore.org/claude-code-settings.json', ...P });
+for (const bad of [5, null, true, {}]) {
+  flags(`a non-string $schema (${JSON.stringify(bad)}) would make Claude Code skip the file`, { $schema: bad, ...P }, /"\$schema" must be a string: Claude Code skips a settings file that fails its schema/);
+}
+for (const key of ['enabledPlugins', 'extraKnownMarketplaces', 'additionalMarketplaces', 'apiKeyHelper', 'statusLine', 'awsAuthRefresh', 'awsCredentialExport', 'otelHeadersHelper', 'enableAllProjectMcpServers', 'enabledMcpjsonServers', 'model', 'outputStyle']) {
+  flags(`top-level "${key}" is not accepted`, { ...P, [key]: {} }, new RegExp(`"${key}" is not accepted in this file, which holds only "permissions", "hooks", "\\$schema": other settings can bring in code`));
+}
+check('a misspelling of permissions or hooks gets the misspelling message only', () => {
+  assert.deepStrictEqual(checkSettings({ ...P, hook: {} }, repo), ['"hook" looks like a misspelling of "hooks"; Claude Code does not read it, so nothing in it applies']);
+});
 flags('permissions must be an object', { permissions: [] }, /"permissions" must be an object/);
 flags('hooks must be an object', { ...P, hooks: [] }, /"hooks" must be an object/);
 flags('hooks must be an object (null)', { ...P, hooks: null }, /"hooks" must be an object/);
@@ -352,6 +405,181 @@ flags('continueOnBlock must be boolean', entry({ ...prompt, continueOnBlock: 'ye
 flags('agent hooks have no continueOnBlock', entry({ type: 'agent', prompt: 'ok', continueOnBlock: true }), /\.continueOnBlock is not a agent hook field/);
 flags('mcp_tool on Setup is skipped, with the reason', entry({ type: 'mcp_tool', server: 's', tool: 't' }, {}, 'Setup'), /Setup does not run mcp_tool hooks \(Setup fires before MCP servers are available\)/);
 clean('mcp_tool on SessionStart can run (after /clear or compaction)', { ...P, hooks: { SessionStart: [{ hooks: [{ type: 'mcp_tool', server: 's', tool: 't' }] }] } });
+// The mcp_tool allowlist: exact server/tool pairs only.
+const notListed = (server, tool) => new RegExp(`mcp_tool hook ${JSON.stringify(`${server}/${tool}`).replace(/[/]/g, '\\/')} is not in MCP_TOOL_HOOKS`);
+for (const event of DOCUMENTED_EVENTS.filter((e) => DOCUMENTED_EVENT_TYPES[e].includes('mcp_tool'))) {
+  const extra = TOOL_EVENTS.includes(event) ? { if: 'Bash(git *)' } : {};
+  for (const [label, hook] of [
+    ['a bare mcp_tool hook', { type: 'mcp_tool', server: 'supabase', tool: 'execute_sql' }],
+    ['an mcp_tool hook with input and timeout', { type: 'mcp_tool', server: 'supabase', tool: 'execute_sql', input: { query: '${tool_input.command}' }, timeout: 5, ...extra }],
+  ]) {
+    check(`${label} on ${event} is rejected by the real, empty MCP_TOOL_HOOKS`, () => {
+      const problems = checkSettings({ ...P, hooks: { [event]: [{ hooks: [hook] }] } }, repo);
+      assert.ok(problems.some((m) => notListed('supabase', 'execute_sql').test(m) && /cannot run commands, write files or send data/.test(m)), JSON.stringify(problems));
+    });
+  }
+}
+check('the default allows no pair at all, including the ones these tests allow', () => {
+  for (const [server, tool] of [['s', 't'], ['memory', 'store'], ['supabase', 'execute_sql'], ['github', 'get_me'], ['x', 'y']]) {
+    assert.ok(checkSettings(entry({ type: 'mcp_tool', server, tool }), repo).some((m) => notListed(server, tool).test(m)), `${server}/${tool}`);
+  }
+});
+check('the same tool name on another server is not allowed', () => {
+  assert.ok(checkSettings(entry({ type: 'mcp_tool', server: 'desktop-commander', tool: 'store' }), repo, TEST_OPTIONS).some((m) => notListed('desktop-commander', 'store').test(m)));
+});
+check('another tool on an allowed server is not allowed', () => {
+  assert.ok(checkSettings(entry({ type: 'mcp_tool', server: 'memory', tool: 'start_process' }), repo, TEST_OPTIONS).some((m) => notListed('memory', 'start_process').test(m)));
+});
+check('the match is exact (case, spacing, prefixes and parts)', () => {
+  for (const [server, tool] of [['Memory', 'store'], ['memory', 'Store'], ['memory ', 'store'], ['memory', 'store '], ['mem', 'store'], ['memory', 'sto'], ['emor', 'store'], ['memory', 'tor']]) {
+    assert.ok(checkSettings(entry({ type: 'mcp_tool', server, tool }), repo, TEST_OPTIONS).some((m) => /is not in MCP_TOOL_HOOKS/.test(m)), `${server}/${tool}`);
+  }
+});
+check('a missing or non-string server or tool is reported once, not also as unlisted', () => {
+  for (const hook of [{ server: 'memory' }, { tool: 't' }, { server: 5, tool: 't' }, { server: 's', tool: ['t'] }]) {
+    const problems = checkSettings(entry({ type: 'mcp_tool', ...hook }), repo);
+    assert.ok(problems.some((m) => /must be a non-empty string for a mcp_tool hook/.test(m)), JSON.stringify(problems));
+    assert.deepStrictEqual(problems.filter((m) => /MCP_TOOL_HOOKS/.test(m)), [], JSON.stringify(hook));
+  }
+});
+// Each pair pins its server's definition in the committed .mcp.json.
+check('pairs whose servers .mcp.json defines exactly as pinned pass', () => {
+  assert.deepStrictEqual(checkSettings(P, repo, TEST_OPTIONS), []);
+});
+check('key order inside a pinned definition does not matter, at any depth', () => {
+  const memory = { headers: { 'X-Region': 'us', 'X-Mode': 'read-only' }, url: MCP_MEMORY.url, type: 'http' };
+  const s = { env: { LEVEL: '1', MODE: 'read-only' }, args: MCP_S.args, command: 'npx', type: 'stdio' };
+  assert.deepStrictEqual(checkSettings(P, repo, { mcpToolHooks: [{ server: 'memory', tool: 'store', definition: memory }, { server: 's', tool: 't', definition: s }] }), []);
+});
+for (const [label, definition] of [
+  ['a changed url', { ...MCP_MEMORY, url: 'https://example.com/other/mcp' }],
+  ['a dropped header', { type: 'http', url: MCP_MEMORY.url }],
+  ['an added field', { ...MCP_MEMORY, oauth: {} }],
+  ['a changed argument', { ...MCP_S, args: ['-y', 'example-s@1.2.3', '--write'] }],
+  ['reordered arguments', { ...MCP_S, args: ['example-s@1.2.3', '-y'] }],
+  ['an added env variable', { ...MCP_S, env: { ...MCP_S.env, NODE_OPTIONS: '--require x' } }],
+  ['a changed env value', { ...MCP_S, env: { ...MCP_S.env, MODE: 'write' } }],
+  ['a value of another type', { ...MCP_S, env: { ...MCP_S.env, LEVEL: 1 } }],
+  ['no definition', undefined],
+]) {
+  check(`a pin that differs from .mcp.json (${label}) fails`, () => {
+    const server = /argument|env|type/.test(label) ? 's' : 'memory';
+    const problems = checkSettings(P, repo, { mcpToolHooks: [{ server, tool: 'x', definition }] });
+    assert.ok(problems.some((m) => new RegExp(`\\.mcp\\.json's definition of "${server}" differs from the one pinned with "${server}/x"`).test(m)), JSON.stringify(problems));
+  });
+}
+check('a pair whose server .mcp.json does not define fails', () => {
+  const problems = checkSettings(P, repo, { mcpToolHooks: [{ server: 'not-in-mcp-json', tool: 'get_me', definition: {} }] });
+  assert.ok(problems.some((m) => /pair "not-in-mcp-json\/get_me" names a server that the committed \.mcp\.json does not define/.test(m)), JSON.stringify(problems));
+});
+check('a pair with no .mcp.json in the repository fails', () => {
+  const problems = checkSettings(P, outside, TEST_OPTIONS);
+  assert.ok(problems.some((m) => /\.mcp\.json cannot be read, so no MCP_TOOL_HOOKS pair can be pinned/.test(m)), JSON.stringify(problems));
+});
+check('a .mcp.json with a duplicate key or no mcpServers fails', () => {
+  const dir = tmp('claude-settings-mcp-');
+  try {
+    fs.writeFileSync(path.join(dir, '.mcp.json'), '{"mcpServers":{"memory":{},"memory":{}}}\n');
+    assert.ok(checkSettings(P, dir, TEST_OPTIONS).some((m) => /\.mcp\.json cannot be read.*duplicate key "memory"/.test(m)));
+    fs.writeFileSync(path.join(dir, '.mcp.json'), '{"servers":{}}\n');
+    assert.ok(checkSettings(P, dir, TEST_OPTIONS).some((m) => /\.mcp\.json has no "mcpServers" object/.test(m)));
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+for (const [label, def] of [
+  ['in the url', { type: 'http', url: '${MEMORY_URL:-https://example.com/memory/mcp}' }],
+  ['in a header', { ...MCP_MEMORY, headers: { ...MCP_MEMORY.headers, Authorization: 'Bearer ${MEMORY_TOKEN}' } }],
+  ['in a stdio argument', { ...MCP_S, args: ['-y', '${PKG:-example-s@1.2.3}'] }],
+  ['in a stdio env value', { ...MCP_S, env: { ...MCP_S.env, MODE: '${MODE}' } }],
+]) {
+  check(`a pinned definition that uses \${...} expansion ${label} fails even when it matches`, () => {
+    const dir = tmp('claude-settings-mcp-');
+    try {
+      fs.writeFileSync(path.join(dir, '.mcp.json'), `${JSON.stringify({ mcpServers: { memory: def } })}\n`);
+      const problems = checkSettings(P, dir, { mcpToolHooks: [{ server: 'memory', tool: 'store', definition: def }] });
+      assert.ok(problems.some((m) => /pinned with "memory\/store" in MCP_TOOL_HOOKS uses \$\{\.\.\.\} expansion/.test(m)), JSON.stringify(problems));
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+}
+check('with no pairs listed, .mcp.json is not read at all', () => {
+  assert.deepStrictEqual(checkSettings(P, outside), []);
+});
+// http hooks: exact URLs from HTTP_HOOK_URLS only.
+for (const event of DOCUMENTED_EVENTS.filter((e) => DOCUMENTED_EVENT_TYPES[e].includes('http'))) {
+  check(`an http hook on ${event} is rejected by the real, empty HTTP_HOOK_URLS`, () => {
+    const problems = checkSettings({ ...P, hooks: { [event]: [{ hooks: [{ type: 'http', url: 'https://example.com/hook' }] }] } }, repo);
+    assert.ok(problems.some((m) => /http hook URL "https:\/\/example\.com\/hook" is not in HTTP_HOOK_URLS.*posts every hook input.*its reply can approve a tool call, change the call's input or add to Claude's context/.test(m)), JSON.stringify(problems));
+  });
+}
+check('an http hook URL must match a listed one exactly', () => {
+  for (const url of ['https://example.com/hook/', 'https://example.com/hook?x=1', 'HTTPS://example.com/hook', 'https://example.com/hoo', 'http://example.com/hook']) {
+    assert.ok(checkSettings(entry({ type: 'http', url }), repo, TEST_OPTIONS).some((m) => /is not in HTTP_HOOK_URLS/.test(m)), url);
+  }
+});
+check('a missing http hook url is reported once, not also as unlisted', () => {
+  const problems = checkSettings(entry({ type: 'http' }), repo);
+  assert.ok(problems.some((m) => /\.url must be a non-empty string for a http hook/.test(m)), JSON.stringify(problems));
+  assert.deepStrictEqual(problems.filter((m) => /HTTP_HOOK_URLS/.test(m)), []);
+});
+// Only the root .claude/settings.json may be tracked, compared ignoring case.
+check('tracked files: the committed layout passes', () => {
+  assert.deepStrictEqual(checkTrackedFiles(['.claude/settings.json', '.claude/README.md', '.claude/skills/x', '.mcp.json', 'js/web/.mcp.json', 'scripts/x.js']), []);
+});
+check('tracked files: a tracked settings.local.json fails, at the root or nested, in any case', () => {
+  for (const f of ['.claude/settings.local.json', 'js/web/.claude/settings.local.json', '.claude/Settings.local.json', '.CLAUDE/settings.local.json', 'js/.Claude/SETTINGS.LOCAL.JSON']) {
+    assert.ok(checkTrackedFiles([f]).some((m) => m.startsWith(`${f} is tracked: Claude Code treats a tracked settings.local.json as repository-supplied`)), f);
+  }
+});
+check('tracked files: a nested .claude/settings.json fails', () => {
+  assert.deepStrictEqual(checkTrackedFiles(['js/packages/web/.claude/settings.json']), ['js/packages/web/.claude/settings.json is tracked: Claude Code loads it for a session started in js/packages/web, and this check reads only the root .claude/settings.json. Keep the policy in the root file']);
+  for (const f of ['js/web/.Claude/settings.json', 'js/api/.claude/SETTINGS.JSON']) {
+    assert.ok(checkTrackedFiles([f]).some((m) => m.startsWith(`${f} is tracked: Claude Code loads it for a session started in ${f.split('/.')[0]},`)), f);
+  }
+});
+check('tracked files: a case variant of the root settings file fails', () => {
+  for (const f of ['.claude/Settings.json', '.CLAUDE/settings.json', '.Claude/SETTINGS.JSON']) {
+    assert.deepStrictEqual(checkTrackedFiles(['.claude/settings.json', f]), [`${f} is tracked: it differs from .claude/settings.json only in case, so on macOS and Windows Claude Code can open it in place of the file this check reads. Keep the policy in .claude/settings.json only`]);
+  }
+});
+check('tracked files: a path named .claude (a symlink or submodule) fails', () => {
+  for (const f of ['.claude', 'js/web/.claude', 'js/web/.Claude']) {
+    assert.deepStrictEqual(checkTrackedFiles([f]), [`${f} is tracked as a symlink or submodule: Claude Code reads .claude/settings.json and settings.local.json through it, and this check does not. Make it a real directory, or remove it`]);
+  }
+});
+check('tracked files: other files under .claude/ and lookalike names pass', () => {
+  assert.deepStrictEqual(checkTrackedFiles(['.claude/hooks/settings.json', 'x/claude/settings.json', '.claude/settings.json.bak', 'x.claude/settings.json', 'docs/.claude.md', 'a/b.claude']), []);
+});
+check('trackedFiles lists the index of a real git repository', () => {
+  const dir = tmp('claude-settings-git-');
+  try {
+    // git quotes a path with a non-ASCII byte unless asked for -z output;
+    // a quoted path would slip past the patterns in checkTrackedFiles.
+    for (const d of ['a', 'café']) {
+      fs.mkdirSync(path.join(dir, d, '.claude'), { recursive: true });
+      fs.writeFileSync(path.join(dir, d, '.claude', 'settings.json'), '{}\n');
+    }
+    fs.writeFileSync(path.join(dir, 'untracked.txt'), 'x\n');
+    assert.strictEqual(spawnSync('git', ['-C', dir, 'init', '-q']).status, 0);
+    assert.strictEqual(spawnSync('git', ['-C', dir, 'add', 'a', 'café']).status, 0);
+    assert.deepStrictEqual(trackedFiles(dir).sort(), ['a/.claude/settings.json', 'café/.claude/settings.json']);
+    assert.throws(() => trackedFiles(path.join(dir, 'missing')), /git ls-files failed/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+// Agent hooks: rejected unless a test opts in.
+for (const event of DOCUMENTED_EVENTS.filter((e) => DOCUMENTED_EVENT_TYPES[e].includes('agent'))) {
+  check(`an agent hook on ${event} is rejected by default`, () => {
+    const problems = checkSettings({ ...P, hooks: { [event]: [{ hooks: [{ type: 'agent', prompt: 'Call mcp__desktop-commander__start_process with command "x". $ARGUMENTS' }] }] } }, repo);
+    assert.ok(problems.some((m) => /agent hooks are not accepted in this file: the hook agent runs in dontAsk mode with every allow rule/.test(m)), JSON.stringify(problems));
+  });
+}
+check('a prompt hook, which has no tools, is still accepted by default', () => {
+  assert.deepStrictEqual(checkSettings(entry({ type: 'prompt', prompt: 'Is the task done? $ARGUMENTS' }), repo), []);
+});
 clean('fractional timeout in seconds', cmd([OK], { timeout: 2.5 }));
 clean('if, statusMessage, async, asyncRewake on a tool event', cmd([OK], { if: 'Bash(git *)', statusMessage: 'checking', async: true, asyncRewake: false }));
 for (const event of TOOL_EVENTS) {
@@ -437,6 +665,9 @@ flags('missing script', cmd(['${CLAUDE_PROJECT_DIR}/.claude/hooks/missing.js']),
 flags('a root with no .claude/hooks directory', cmd([OK]), outside, /ok\.js does not exist/);
 flags('a root that does not exist', cmd([OK]), path.join(outside, 'nope'), /ok\.js does not exist/);
 flags('a directory, not a file', cmd(['${CLAUDE_PROJECT_DIR}/.claude/hooks/sub']), /sub is not a file/);
+flags('a zip archive that python3 would run', entry({ type: 'command', command: 'python3', args: ['${CLAUDE_PROJECT_DIR}/.claude/hooks/zipped.py'] }), /zipped\.py contains a NUL byte, so git treats it as binary/);
+flags('a script with a NUL byte', entry({ type: 'command', command: 'sh', args: ['${CLAUDE_PROJECT_DIR}/.claude/hooks/nul.sh'] }), /nul\.sh contains a NUL byte/);
+flags('a UTF-16 PowerShell script, which git diffs as binary', entry({ type: 'command', command: 'pwsh', args: ['${CLAUDE_PROJECT_DIR}/.claude/hooks/utf16.ps1'] }), /utf16\.ps1 contains a NUL byte.*\(UTF-16 text: save it as UTF-8\)/);
 flags('a script that does not parse', cmd(['${CLAUDE_PROJECT_DIR}/.claude/hooks/bad.js']), /bad\.js does not parse/);
 flags('an ES module that does not parse', cmd(['${CLAUDE_PROJECT_DIR}/.claude/hooks/bad.mjs']), /bad\.mjs does not parse/);
 flags('the second of two scripts is checked too', cmd([OK, '${CLAUDE_PROJECT_DIR}/.claude/hooks/bad.js']), /bad\.js does not parse/);
@@ -539,6 +770,9 @@ if (caseInsensitive) {
   write(path.join(c, 'claude-real', 'hooks', 'ok.js'), 'process.exit(0);\n');
   fs.mkdirSync(path.join(d, '.claude', 'hooks'), { recursive: true });
   write(path.join(d, '.claude', 'hooks', 'real.js'), 'process.exit(0);\n');
+  // clean() pins TEST_OPTIONS' servers, which the checker looks up in the
+  // root's .mcp.json.
+  for (const root of [b, d]) write(path.join(root, '.mcp.json'), MCP_FIXTURE);
   clean('case-insensitive: a plain script in .Claude/Hooks on disk', cmd(['${CLAUDE_PROJECT_DIR}/.claude/hooks/plain.js']), b);
   clean('case-insensitive: the root in another case, a plain script', cmd(['${CLAUDE_PROJECT_DIR}/.claude/hooks/real.js']), D);
   try {
@@ -582,14 +816,32 @@ if (process.env.CHECK_SETTINGS_REQUIRE_CASE_TESTS) {
 
 // Run the checker as CI does, from a copy placed in a throwaway repository
 // whose .claude/settings.json holds the given text.
-function runCli(settingsText) {
+// The tree is a git repository holding the real .mcp.json, as a checkout is;
+// `extra` maps further paths to their contents, or to { symlink: target },
+// all tracked. With `git: false` the tree is not a repository. `env` adds
+// to the checker's environment.
+function runCli(settingsText, extra = {}, { git = true, env: extraEnv = {} } = {}) {
   const tree = tmp('claude-settings-cli-');
   try {
     fs.mkdirSync(path.join(tree, 'scripts'));
     fs.mkdirSync(path.join(tree, '.claude'));
     fs.copyFileSync(path.join(__dirname, 'check-claude-settings.js'), path.join(tree, 'scripts', 'check-claude-settings.js'));
+    if (fs.existsSync(REAL_MCP_PATH)) fs.copyFileSync(REAL_MCP_PATH, path.join(tree, '.mcp.json'));
     fs.writeFileSync(path.join(tree, '.claude', 'settings.json'), settingsText);
-    return spawnSync(process.execPath, [path.join(tree, 'scripts', 'check-claude-settings.js')], { encoding: 'utf8' });
+    for (const [rel, content] of Object.entries(extra)) {
+      fs.mkdirSync(path.dirname(path.join(tree, rel)), { recursive: true });
+      if (content.symlink) fs.symlinkSync(content.symlink, path.join(tree, rel));
+      else fs.writeFileSync(path.join(tree, rel), content);
+    }
+    if (git) {
+      for (const args of [['init', '-q'], ['add', '-A', '-f']]) {
+        const g = spawnSync('git', ['-C', tree, ...args], { encoding: 'utf8' });
+        assert.strictEqual(g.status, 0, `git ${args.join(' ')}: ${g.stderr}`);
+      }
+    }
+    // The ceiling keeps git from finding a repository that encloses the tree.
+    const env = { ...process.env, GIT_CEILING_DIRECTORIES: path.dirname(tree), ...extraEnv };
+    return spawnSync(process.execPath, [path.join(tree, 'scripts', 'check-claude-settings.js')], { encoding: 'utf8', env });
   } finally {
     fs.rmSync(tree, { recursive: true, force: true });
   }
@@ -598,6 +850,88 @@ check('CLI: a valid file exits 0 and prints the counts', () => {
   const r = runCli('{"permissions":{"allow":["A"],"ask":["B","C"],"deny":[]}}\n');
   assert.strictEqual(r.status, 0, r.stderr);
   assert.match(r.stdout, /^ok: .*allow 1, ask 2, deny 0, hook matchers 0/);
+});
+check('CLI: an mcp_tool hook not in MCP_TOOL_HOOKS exits 1', () => {
+  const r = runCli('{"permissions":{},"hooks":{"Stop":[{"hooks":[{"type":"mcp_tool","server":"supabase","tool":"execute_sql","input":{"query":"select 1"}}]}]}}\n');
+  assert.strictEqual(r.status, 1);
+  assert.match(r.stderr, /mcp_tool hook "supabase\/execute_sql" is not in MCP_TOOL_HOOKS/);
+});
+check('CLI: a tracked settings.local.json exits 1', () => {
+  const r = runCli('{"permissions":{}}\n', { '.claude/settings.local.json': '{"apiKeyHelper":"sh -c x"}\n' });
+  assert.strictEqual(r.status, 1);
+  assert.match(r.stderr, /\.claude\/settings\.local\.json is tracked/);
+});
+// A .gitattributes file can make git show a text hook script as binary, or
+// re-encode it on checkout.
+const SH_HOOK = '{"permissions":{},"hooks":{"Stop":[{"hooks":[{"type":"command","command":"sh","args":["${CLAUDE_PROJECT_DIR}/.claude/hooks/x.sh"]}]}]}}\n';
+for (const [name, files, pattern] of [
+  ['-diff beside it', { '.claude/hooks/.gitattributes': 'x.sh -diff\n' }, /x\.sh is marked -diff or binary by a \.gitattributes file/],
+  ['binary in the root .gitattributes', { '.gitattributes': '*.sh binary\n' }, /x\.sh is marked -diff or binary/],
+  ['a root macro that unsets diff', { '.gitattributes': '[attr]quiet -diff\n', '.claude/.gitattributes': 'hooks/x.sh quiet\n' }, /x\.sh is marked -diff or binary/],
+  ['working-tree-encoding, as git suggests for a .ps1', { '.claude/hooks/.gitattributes': 'x.sh working-tree-encoding=UTF-16LE\n', '.claude/hooks/x.sh': Buffer.from('exit 0\n', 'utf16le') }, /x\.sh has working-tree-encoding UTF-16LE from a \.gitattributes file/],
+  ['a symlink to a -diff file', { '.claude/hooks/x.sh': { symlink: 'payload.sh' }, '.claude/hooks/payload.sh': 'exit 0\n', '.claude/hooks/.gitattributes': 'payload.sh -diff\n' }, /x\.sh is marked -diff or binary/],
+]) {
+  check(`CLI: a hook script with ${name} exits 1`, () => {
+    const r = runCli(SH_HOOK, { '.claude/hooks/x.sh': 'exit 0\n', ...files });
+    assert.strictEqual(r.status, 1, r.stdout);
+    assert.match(r.stderr, pattern);
+  });
+}
+check('CLI: line-ending attributes and a diff driver on a hook script are accepted', () => {
+  const r = runCli(SH_HOOK, { '.claude/hooks/x.sh': 'exit 0\n', '.gitattributes': '*.sh text eol=lf diff=bash\n' });
+  assert.strictEqual(r.status, 0, r.stderr);
+});
+check('CLI: -diff on a symlink to a hook script is accepted, since git diffs a symlink as its target path', () => {
+  const r = runCli(SH_HOOK, { '.claude/hooks/x.sh': { symlink: 'payload.sh' }, '.claude/hooks/payload.sh': 'exit 0\n', '.gitattributes': 'x.sh -diff\n' });
+  assert.strictEqual(r.status, 0, r.stderr);
+});
+check('CLI: the global attributes file does not count', () => {
+  const home = tmp('claude-settings-xdg-');
+  try {
+    fs.mkdirSync(path.join(home, 'git'));
+    fs.writeFileSync(path.join(home, 'git', 'attributes'), '*.sh -diff\n');
+    const r = runCli(SH_HOOK, { '.claude/hooks/x.sh': 'exit 0\n' }, { env: { XDG_CONFIG_HOME: home } });
+    assert.strictEqual(r.status, 0, r.stderr);
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+check('CLI: a nested .claude/settings.json exits 1', () => {
+  const r = runCli('{"permissions":{}}\n', { 'js/web/.claude/settings.json': '{"permissions":{}}\n' });
+  assert.strictEqual(r.status, 1);
+  assert.match(r.stderr, /js\/web\/\.claude\/settings\.json is tracked/);
+});
+check('CLI: outside a git repository it exits 1, since it cannot list the tracked files', () => {
+  const r = runCli('{"permissions":{}}\n', {}, { git: false });
+  assert.strictEqual(r.status, 1);
+  assert.match(r.stderr, /cannot list the repository's tracked files, which this check needs: git ls-files failed/);
+});
+if (haveSymlink) {
+  check('CLI: a .claude symlinked to another settings file exits 1', () => {
+    const r = runCli('{"permissions":{}}\n', { 'ops/cfg/settings.json': '{"permissions":{},"apiKeyHelper":"sh -c id"}\n', 'js/web/.claude': { symlink: '../../ops/cfg' } });
+    assert.strictEqual(r.status, 1);
+    assert.match(r.stderr, /js\/web\/\.claude is tracked as a symlink or submodule/);
+  });
+}
+check('CLI: a nested .claude/settings.json in a non-ASCII directory exits 1', () => {
+  const r = runCli('{"permissions":{}}\n', { 'café/.claude/settings.json': '{"permissions":{}}\n' });
+  assert.strictEqual(r.status, 1);
+  assert.match(r.stderr, /café\/\.claude\/settings\.json is tracked/);
+});
+check('CLI: an http hook not in HTTP_HOOK_URLS exits 1', () => {
+  const r = runCli('{"permissions":{},"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"http","url":"https://hooks.example.com/ctx"}]}]}}\n');
+  assert.strictEqual(r.status, 1);
+  assert.match(r.stderr, /http hook URL "https:\/\/hooks\.example\.com\/ctx" is not in HTTP_HOOK_URLS/);
+});
+check('CLI: enabledPlugins exits 1', () => {
+  const r = runCli('{"permissions":{},"enabledPlugins":{"x@marketplace":true}}\n');
+  assert.strictEqual(r.status, 1);
+  assert.match(r.stderr, /"enabledPlugins" is not accepted in this file/);
+});
+check('CLI: an agent hook exits 1', () => {
+  const r = runCli('{"permissions":{},"hooks":{"Stop":[{"hooks":[{"type":"agent","prompt":"Verify the tests pass. $ARGUMENTS"}]}]}}\n');
+  assert.strictEqual(r.status, 1);
+  assert.match(r.stderr, /agent hooks are not accepted in this file/);
 });
 check('CLI: hook groups are counted', () => {
   const r = runCli('{"permissions":{},"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"prompt","prompt":"a"}]},{"matcher":"Edit","hooks":[{"type":"prompt","prompt":"b"}]}],"Stop":[{"hooks":[{"type":"prompt","prompt":"c"}]}]}}\n');
