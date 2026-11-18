@@ -398,10 +398,12 @@ fn claim_bid(app_matches: &ArgMatches, payer: Keypair, client: RpcClient) {
     transaction.sign(&signers, recent_blockhash);
     client.send_and_confirm_transaction(&transaction).unwrap();
 
+    // claim_bid_instruction takes (destination, authority). The auction authority is the payer,
+    // see create_auction above; the destination is the SPL account created just before this.
     let instructions = [instruction::claim_bid_instruction(
         program_key,
-        payer.pubkey(),
         destination.pubkey(),
+        payer.pubkey(),
         bidder.pubkey(),
         bidpot.bidder_pot,
         mint.pubkey(),
