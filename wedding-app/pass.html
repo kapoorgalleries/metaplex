@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="description" content="Your personal event pass for Priya & Sanjay's wedding." />
+  <meta name="robots" content="noindex, nofollow" />
+  <link rel="canonical" href="https://sanjaywedspriya.com/app/pass.html" />
+  <meta property="og:type" content="website" />
+  <meta property="og:site_name" content="Priya & Sanjay 2026" />
+  <meta property="og:title" content="Event Pass · Priya &amp; Sanjay" />
+  <meta property="og:description" content="Your personal event pass for Priya & Sanjay's wedding." />
+  <meta property="og:url" content="https://sanjaywedspriya.com/app/pass.html" />
+  <meta property="og:image" content="https://sanjaywedspriya.com/app/assets/og.jpg" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:title" content="Event Pass · Priya &amp; Sanjay" />
+  <meta name="twitter:description" content="Your personal event pass for Priya & Sanjay's wedding." />
+  <meta name="twitter:image" content="https://sanjaywedspriya.com/app/assets/og.jpg" />
+  <meta name="theme-color" content="#7A1F23" />
+  <title>Event Pass · Priya &amp; Sanjay</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,400;0,500;0,600;1,400&family=Marcellus&family=Jost:wght@300;400;500&family=Noto+Serif+Devanagari:wght@400;600&family=Noto+Serif+Kannada:wght@400;600&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="css/styles.css" />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🪔</text></svg>" />
+</head>
+<body>
+  <div id="site-header"></div>
+  <main class="page">
+    <section class="subhero">
+      <p class="subhero__kicker" data-i18n="sub.pass.kicker">Your digital pass</p>
+      <h1 data-i18n="title.pass">Event Pass</h1>
+      <p data-i18n="sub.pass.intro">Pull up your personal pass — your events, table, and a quick add-to-calendar.</p>
+    </section>
+
+    <section class="section">
+      <div class="passlookup" id="passLookup">
+        <label class="field"><span data-i18n="pass.label">The email you RSVP'd with</span>
+          <input type="email" id="passEmail" autocomplete="email" />
+        </label>
+        <button type="button" class="btn btn--solid" id="passBtn" data-i18n="pass.find">Get my pass</button>
+        <p class="rsvp__status" id="passStatus" role="status" aria-live="polite"></p>
+      </div>
+
+      <div class="pass" id="passCard" hidden>
+        <div class="pass__top">
+          <span class="pass__diya">🪔</span>
+          <span class="pass__couple">Priya <i>&amp;</i> Sanjay</span>
+          <span class="pass__date">November 6 &amp; 7, 2026 · New York City</span>
+        </div>
+        <div class="pass__perf">
+          <div class="pass__name" id="passName"></div>
+          <div class="pass__admits"><span data-i18n="pass.admits">Admits</span> <strong id="passAdmits">1</strong></div>
+        </div>
+        <div class="pass__row">
+          <span class="pass__label" id="passEventsLabel" data-i18n="pass.events">Your events</span>
+          <div class="pass__events" id="passEvents"></div>
+        </div>
+        <div class="pass__table">
+          <span class="pass__label" data-i18n="pass.table">Table</span>
+          <strong id="passTable">—</strong>
+        </div>
+        <div class="pass__stub">
+          <button class="btn btn--outline btn--sm" id="passCal" data-i18n="pass.addcal">＋ Add my events to calendar</button>
+          <p class="pass__hint" data-i18n="pass.savehint">Tip: screenshot this pass to keep it handy.</p>
+        </div>
+      </div>
+    </section>
+  </main>
+  <div id="site-footer"></div>
+  <script src="js/site.js"></script>
+  <script src="js/pass.js"></script>
+</body>
+</html>
