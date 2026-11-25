@@ -53,12 +53,15 @@ const {
   MIN_QUOTA_REMAINING_FRACTION,
   DEFAULT_TIMEOUT_MS,
   DEFAULT_MAX_DIFF_CHARS,
+  REVIEW_LOCK_TIMEOUT_CODE,
   SYSTEM_PROMPT,
   JSON_SCHEMA,
   ISOLATED_AGY_SETTINGS,
   SESSION_SETTINGS,
   TRIMURTI_TEXT_AGENT_NAME,
   DENY_ENV_PATTERN,
+  RM_SYNC_RETRY_OPTIONS,
+  resolveWslSafeTempDir,
   stripTerminalSpinnerPrefixes,
   assertAllowedReviewerModel,
   parseAvailableGeminiModels,
@@ -66,6 +69,12 @@ const {
   verifyIsolatedPermissionsOutput,
   parseArgs,
   resolveEffectiveTimeoutMs,
+  resolveEffectiveTotalTimeoutMs,
+  splitDiffIntoChunks,
+  mergeChunkVerdicts,
+  sanitizeLogText,
+  classifyReviewerUnavailable,
+  sweepOrphanedRunWorkspaces,
   resolveAgyBin,
   resolveAgyBinaries,
   isValidIssue,
@@ -97,10 +106,13 @@ const {
 
 const {
   MANAGED_HOOK_MARKER,
+  PINNED_DIR_NAME,
   DEFAULT_STDIN_TIMEOUT_MS,
+  buildHookScript,
   parsePrePushArgs,
   parsePrePushStdin,
   computePrePushDiff,
+  scanPrePushHistorySecrets,
   installPrePushHook,
   runPrePushReview,
   resolveStdinTimeoutMs,
@@ -3381,6 +3393,1413 @@ async function main() {
               { isTTY: false, stdinText: '' }
             );
             assert.strictEqual(badGitDirCode, 1, 'Invalid GIT_DIR must fail closed');
+
+            // 5g. Linked git worktree (`git --git-dir=<repo>/.git/worktrees/<wt> push`) from neutral CWD
+            // or untrusted `evilCwd` containing `evilCwd/scripts/pre-push-review.js` MUST NEVER execute
+            // `evilCwd/scripts/pre-push-review.js` and MUST block leaked secrets!
+            const wtLeakDir = path.join(tmpRoot, 'gd-wt-leak');
+            const evilCwd = fs.mkdtempSync(path.join(tmpRoot, 'gd-evil-cwd-'));
+            fs.mkdirSync(path.join(evilCwd, 'scripts'), { recursive: true });
+            fs.writeFileSync(
+              path.join(evilCwd, 'scripts', 'pre-push-review.js'),
+              'console.error("EVIL_CWD_EXECUTED"); process.exit(0);\n',
+              'utf8'
+            );
+            assert.strictEqual(
+              spawnSync('git', ['worktree', 'add', '-b', 'wt-secret-branch', wtLeakDir, 'main'], {
+                cwd: gdRepoA,
+                env: gitEnv,
+              }).status,
+              0
+            );
+            const wtTok = ['ghp', 'Z'.repeat(36)].join('_');
+            fs.writeFileSync(path.join(wtLeakDir, 'wt-leak.js'), `const t = "${wtTok}";\n`, 'utf8');
+            assert.strictEqual(spawnSync('git', ['add', 'wt-leak.js'], { cwd: wtLeakDir, env: gitEnv }).status, 0);
+            assert.strictEqual(
+              spawnSync('git', ['commit', '-m', 'add secret in linked worktree'], { cwd: wtLeakDir, env: gitEnv }).status,
+              0
+            );
+            const wtGitDir = path.join(gdRepoA, '.git', 'worktrees', 'gd-wt-leak');
+            for (const testCwd of [tmpRoot, evilCwd]) {
+              const wtPushRes = spawnSync(
+                'git',
+                [`--git-dir=${wtGitDir}`, 'push', 'origin', 'wt-secret-branch:refs/heads/wt-leaked'],
+                {
+                  cwd: testCwd,
+                  env: {
+                    ...gitEnv,
+                    HOME: authHome,
+                    PATH: childNodePath,
+                    REVIEW_DIR: fs.mkdtempSync(path.join(tmpRoot, 'wt-rev-')),
+                    AGY_BIN: slowApproveAgy,
+                  },
+                  encoding: 'utf8',
+                }
+              );
+              assert.notStrictEqual(
+                wtPushRes.status,
+                0,
+                `Expected linked worktree push from ${testCwd} to block secret, got 0: ${wtPushRes.stderr}`
+              );
+              assert(
+                !wtPushRes.stderr.includes('EVIL_CWD_EXECUTED'),
+                `Linked worktree push MUST NEVER execute untrusted CWD script: ${wtPushRes.stderr}`
+              );
+              assert(
+                wtPushRes.stderr.includes('Potential GitHub personal access token detected in added line.'),
+                `Expected linked worktree push to report wt-leak.js secret, got: ${wtPushRes.stderr}`
+              );
+            }
+            const wtPubCheck = spawnSync('git', ['rev-parse', '--verify', '--quiet', 'refs/heads/wt-leaked'], {
+              cwd: gdPubRemote,
+              env: gitEnv,
+              encoding: 'utf8',
+            });
+            assert.notStrictEqual(wtPubCheck.status, 0, 'gdPubRemote must NEVER receive wt-leaked branch');
+
+            // 5h. Multi-commit add-secret + delete-secret push (`netDiff === ""`) MUST fail closed on
+            // intermediate pushed commit history, while resolved merge conflict markers in history pass!
+            assert.strictEqual(
+              spawnSync('git', ['checkout', '-b', 'two-commit-secret-history', 'main'], {
+                cwd: gdRepoA,
+                env: gitEnv,
+              }).status,
+              0
+            );
+            const histTok = ['ghp', 'H'.repeat(36)].join('_');
+            fs.writeFileSync(path.join(gdRepoA, 'ephemeral-secret.js'), `const s = "${histTok}";\n`, 'utf8');
+            assert.strictEqual(spawnSync('git', ['add', 'ephemeral-secret.js'], { cwd: gdRepoA, env: gitEnv }).status, 0);
+            assert.strictEqual(spawnSync('git', ['commit', '-m', 'c1 add secret'], { cwd: gdRepoA, env: gitEnv }).status, 0);
+            fs.unlinkSync(path.join(gdRepoA, 'ephemeral-secret.js'));
+            assert.strictEqual(spawnSync('git', ['add', '-A'], { cwd: gdRepoA, env: gitEnv }).status, 0);
+            assert.strictEqual(
+              spawnSync('git', ['commit', '-m', 'c2 delete secret without squash'], { cwd: gdRepoA, env: gitEnv }).status,
+              0
+            );
+            const histPushRes = spawnSync('git', ['push', '-u', 'origin', 'two-commit-secret-history'], {
+              cwd: gdRepoA,
+              env: {
+                ...gitEnv,
+                HOME: authHome,
+                PATH: childNodePath,
+                REVIEW_DIR: fs.mkdtempSync(path.join(tmpRoot, 'hist-rev-')),
+                AGY_BIN: slowApproveAgy,
+              },
+              encoding: 'utf8',
+            });
+            assert.notStrictEqual(
+              histPushRes.status,
+              0,
+              `Expected two-commit add+delete secret push to fail closed, got 0: ${histPushRes.stderr}`
+            );
+            assert(
+              histPushRes.stderr.includes('(in pushed commit history)'),
+              `Expected pushed-commit-history diagnostic, got: ${histPushRes.stderr}`
+            );
+
+            // Resolved merge conflict marker in Commit 1 fixed in Commit 2 must still APPROVE
+            assert.strictEqual(
+              spawnSync('git', ['checkout', '-b', 'two-commit-resolved-conflict', 'main'], {
+                cwd: gdRepoA,
+                env: gitEnv,
+              }).status,
+              0
+            );
+            fs.writeFileSync(
+              path.join(gdRepoA, 'conflict-temp.txt'),
+              '<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> topic\n',
+              'utf8'
+            );
+            assert.strictEqual(spawnSync('git', ['add', 'conflict-temp.txt'], { cwd: gdRepoA, env: gitEnv }).status, 0);
+            assert.strictEqual(spawnSync('git', ['commit', '-m', 'c1 conflict'], { cwd: gdRepoA, env: gitEnv }).status, 0);
+            fs.writeFileSync(path.join(gdRepoA, 'conflict-temp.txt'), 'resolved cleanly\n', 'utf8');
+            assert.strictEqual(spawnSync('git', ['add', 'conflict-temp.txt'], { cwd: gdRepoA, env: gitEnv }).status, 0);
+            assert.strictEqual(spawnSync('git', ['commit', '-m', 'c2 resolve conflict'], { cwd: gdRepoA, env: gitEnv }).status, 0);
+            const resolvedConflictPush = spawnSync('git', ['push', '-u', 'origin', 'two-commit-resolved-conflict'], {
+              cwd: gdRepoA,
+              env: {
+                ...gitEnv,
+                HOME: authHome,
+                PATH: childNodePath,
+                REVIEW_DIR: fs.mkdtempSync(path.join(tmpRoot, 'res-conf-')),
+                AGY_BIN: slowApproveAgy,
+              },
+              encoding: 'utf8',
+            });
+            assert.strictEqual(
+              resolvedConflictPush.status,
+              0,
+              `Expected resolved conflict marker in intermediate commit to pass push: ${resolvedConflictPush.stderr}`
+            );
+
+            // Evil-merge commit (`git merge --no-commit` injecting a secret, deleted in next commit)
+            // MUST be caught via `git log -m` in `scanPrePushHistorySecrets`!
+            assert.strictEqual(
+              spawnSync('git', ['checkout', '-b', 'evil-merge-side', 'main'], { cwd: gdRepoA, env: gitEnv }).status,
+              0
+            );
+            fs.writeFileSync(path.join(gdRepoA, 'side.txt'), 'clean side branch\n', 'utf8');
+            assert.strictEqual(spawnSync('git', ['add', 'side.txt'], { cwd: gdRepoA, env: gitEnv }).status, 0);
+            assert.strictEqual(spawnSync('git', ['commit', '-m', 'clean side'], { cwd: gdRepoA, env: gitEnv }).status, 0);
+
+            assert.strictEqual(
+              spawnSync('git', ['checkout', '-b', 'evil-merge-main', 'main'], { cwd: gdRepoA, env: gitEnv }).status,
+              0
+            );
+            fs.writeFileSync(path.join(gdRepoA, 'main-note.txt'), 'clean base note\n', 'utf8');
+            assert.strictEqual(spawnSync('git', ['add', 'main-note.txt'], { cwd: gdRepoA, env: gitEnv }).status, 0);
+            assert.strictEqual(spawnSync('git', ['commit', '-m', 'clean note'], { cwd: gdRepoA, env: gitEnv }).status, 0);
+
+            assert.strictEqual(
+              spawnSync('git', ['merge', '--no-ff', '--no-commit', 'evil-merge-side'], { cwd: gdRepoA, env: gitEnv }).status,
+              0
+            );
+            const evilMergeTok = ['ghp', 'M'.repeat(36)].join('_');
+            fs.writeFileSync(path.join(gdRepoA, 'evil-merge-secret.js'), `const m = "${evilMergeTok}";\n`, 'utf8');
+            assert.strictEqual(spawnSync('git', ['add', 'evil-merge-secret.js'], { cwd: gdRepoA, env: gitEnv }).status, 0);
+            assert.strictEqual(spawnSync('git', ['commit', '-m', 'evil merge with secret'], { cwd: gdRepoA, env: gitEnv }).status, 0);
+
+            fs.unlinkSync(path.join(gdRepoA, 'evil-merge-secret.js'));
+            assert.strictEqual(spawnSync('git', ['add', '-A'], { cwd: gdRepoA, env: gitEnv }).status, 0);
+            assert.strictEqual(spawnSync('git', ['commit', '-m', 'delete evil merge secret'], { cwd: gdRepoA, env: gitEnv }).status, 0);
+
+            const evilMergePush = spawnSync('git', ['push', '-u', 'origin', 'evil-merge-main'], {
+              cwd: gdRepoA,
+              env: {
+                ...gitEnv,
+                HOME: authHome,
+                PATH: childNodePath,
+                REVIEW_DIR: fs.mkdtempSync(path.join(tmpRoot, 'evil-merge-rev-')),
+                AGY_BIN: slowApproveAgy,
+              },
+              encoding: 'utf8',
+            });
+            assert.notStrictEqual(
+              evilMergePush.status,
+              0,
+              `Expected evil-merge intermediate secret push to fail closed, got 0: ${evilMergePush.stderr}`
+            );
+            assert(
+              evilMergePush.stderr.includes('(in pushed commit history)'),
+              `Expected evil-merge secret caught in pushed commit history, got: ${evilMergePush.stderr}`
+            );
+
+            // Separated gitdir not named `.git` (`--git-dir=/path/to/sep.git --work-tree=/path/to/sep-wt`)
+            // MUST resolve `GIT_WORK_TREE/scripts/pre-push-review.js` and block leaked secrets!
+            const sepGitDir = path.join(tmpRoot, 'separated-repo.git');
+            const sepWorkTree = path.join(tmpRoot, 'separated-wt');
+            fs.mkdirSync(sepWorkTree, { recursive: true });
+            assert.strictEqual(
+              spawnSync('git', [`--git-dir=${sepGitDir}`, `--work-tree=${sepWorkTree}`, 'init', '-b', 'main'], {
+                cwd: tmpRoot,
+                env: gitEnv,
+              }).status,
+              0
+            );
+            assert.strictEqual(
+              spawnSync('git', [`--git-dir=${sepGitDir}`, 'config', 'user.name', 'Test'], { cwd: tmpRoot, env: gitEnv }).status,
+              0
+            );
+            assert.strictEqual(
+              spawnSync('git', [`--git-dir=${sepGitDir}`, 'config', 'user.email', 'test@example.com'], { cwd: tmpRoot, env: gitEnv }).status,
+              0
+            );
+            assert.strictEqual(
+              spawnSync('git', [`--git-dir=${sepGitDir}`, 'remote', 'add', 'origin', gdPubRemote], { cwd: tmpRoot, env: gitEnv }).status,
+              0
+            );
+            fs.mkdirSync(path.join(sepWorkTree, 'scripts'), { recursive: true });
+            fs.copyFileSync(REVIEWER_PATH, path.join(sepWorkTree, 'scripts', 'reviewer.js'));
+            fs.copyFileSync(PRE_PUSH_PATH, path.join(sepWorkTree, 'scripts', 'pre-push-review.js'));
+            const sepTok = ['ghp', 'S'.repeat(36)].join('_');
+            fs.writeFileSync(path.join(sepWorkTree, 'sep-leak.js'), `const s = "${sepTok}";\n`, 'utf8');
+            assert.strictEqual(
+              spawnSync('git', [`--git-dir=${sepGitDir}`, `--work-tree=${sepWorkTree}`, 'add', '.'], { cwd: tmpRoot, env: gitEnv }).status,
+              0
+            );
+            assert.strictEqual(
+              spawnSync('git', [`--git-dir=${sepGitDir}`, `--work-tree=${sepWorkTree}`, 'commit', '-m', 'sep leak'], {
+                cwd: tmpRoot,
+                env: gitEnv,
+              }).status,
+              0
+            );
+            installPrePushHook(sepWorkTree, { force: true, gitDir: sepGitDir, workTree: sepWorkTree, env: gitEnv });
+            const sepPushRes = spawnSync(
+              'git',
+              [`--git-dir=${sepGitDir}`, `--work-tree=${sepWorkTree}`, 'push', '-u', 'origin', 'main:refs/heads/sep-leak-branch'],
+              {
+                cwd: tmpRoot,
+                env: {
+                  ...gitEnv,
+                  HOME: authHome,
+                  PATH: childNodePath,
+                  REVIEW_DIR: fs.mkdtempSync(path.join(tmpRoot, 'sep-rev-')),
+                  AGY_BIN: slowApproveAgy,
+                },
+                encoding: 'utf8',
+              }
+            );
+            assert.notStrictEqual(
+              sepPushRes.status,
+              0,
+              `Expected separated --git-dir=repo.git --work-tree=... push to block secret: ${sepPushRes.stderr}`
+            );
+            assert(
+              sepPushRes.stderr.includes('Potential GitHub personal access token detected in added line.'),
+              `Expected separated gitdir push to catch sep-leak.js secret, got: ${sepPushRes.stderr}`
+            );
+          }
+        }
+
+        // 5i. /boost regressions: hunk-counted `--- `/`+++ `, multiline secret rotation, YAML continuation,
+        // split PEM comment lines, RM_SYNC_RETRY_OPTIONS maxRetries, and WSLENV HOME/XDG scrubbing!
+        {
+          const kName = ['api', 'key'].join('_');
+          const sqlSecVal = ['ProdSqlApi', '9876543210abcdef'].join('');
+          const ppSecVal = ['AddedPlusPlus', 'LiveVal987654'].join('');
+          const pemBeginHdr = ['-----BEGIN RSA', 'PRIVATE KEY-----'].join(' ');
+          const pemBodyChunk = ['MIIEpAIBAAKCAQEA7VJTUt9Us8cKjMzEfYyjiWA4', 'R4dM2bN8pQ9rS0tU1vW2xY3z'].join('');
+          const oldRotVal = ['OldProdVal', '1234567890abcdef'].join('');
+          const newRotVal = ['NewProdVal', '9876543210fedcba'].join('');
+          const yamlContVal = ['LiveYamlVal', '9876543210_prod'].join('_');
+
+          // In-hunk removed `-- ...` (`--- `) and added `++ ...` (`+++ `)
+          const sqlDashDiff = [
+            'diff --git a/query.sql b/query.sql',
+            'index 1111111..2222222 100644',
+            '--- a/query.sql',
+            '+++ b/query.sql',
+            '@@ -1,2 +1,3 @@',
+            ' SELECT 1;',
+            `--- old config: ${kName} = "${sqlSecVal}"`,
+            '+-- new note',
+            `+-- tok = "${['ghp', 'B'.repeat(36)].join('_')}"`,
+            '',
+          ].join('\n');
+          const sqlPrompt = buildReviewPrompt(sqlDashDiff);
+          assert(
+            !sqlPrompt.includes(sqlSecVal),
+            'Removed in-hunk `--- ` line secret MUST be redacted from prompt'
+          );
+          const sqlStatic = staticSecurityReview(sqlDashDiff);
+          assert.strictEqual(sqlStatic.verdict, 'REQUEST_CHANGES');
+          assert.strictEqual(sqlStatic.issues.length, 1);
+
+          const addedPlusPlusDiff = [
+            'diff --git a/doc.adoc b/doc.adoc',
+            'index 1111111..2222222 100644',
+            '--- a/doc.adoc',
+            '+++ b/doc.adoc',
+            '@@ -1,2 +1,5 @@',
+            ' title',
+            `+++ ${kName} = "${ppSecVal}"`,
+            '+<<<<<<< HEAD',
+            `+const gh = "${['ghp', 'C'.repeat(36)].join('_')}";`,
+            ' end',
+            '',
+          ].join('\n');
+          const ppPrompt = buildReviewPrompt(addedPlusPlusDiff);
+          assert(
+            !ppPrompt.includes(ppSecVal),
+            'Added in-hunk `+++ ` line secret MUST be redacted from prompt'
+          );
+          const ppStatic = staticSecurityReview(addedPlusPlusDiff);
+          assert.strictEqual(ppStatic.verdict, 'REQUEST_CHANGES');
+          assert(
+            ppStatic.issues.length >= 3,
+            `Expected in-hunk +++ diff to catch secret, conflict marker, and PAT; got: ${JSON.stringify(ppStatic.issues)}`
+          );
+
+          // Split PEM private key with in-hunk `--- ` comment line
+          const pemSplitDiff = [
+            'diff --git a/key.sql b/key.sql',
+            'index 1111111..2222222 100644',
+            '--- a/key.sql',
+            '+++ b/key.sql',
+            '@@ -1,5 +1,1 @@',
+            `-const k = "${pemBeginHdr}`,
+            '--- sql comment inside/adjacent',
+            `-${pemBodyChunk}`,
+            '-end"',
+            ' keep',
+            '',
+          ].join('\n');
+          const pemPrompt = buildReviewPrompt(pemSplitDiff);
+          assert(
+            !pemPrompt.includes(pemBodyChunk),
+            'PEM body following in-hunk `--- ` comment MUST be redacted'
+          );
+
+          // Multi-line secret rotation (` const api_key =` + `- "old"` + `+ "new"`)
+          const rotatedMultilineDiff = [
+            'diff --git a/config.js b/config.js',
+            'index 1111111..2222222 100644',
+            '--- a/config.js',
+            '+++ b/config.js',
+            '@@ -1,3 +1,3 @@',
+            ` const ${kName} =`,
+            `-  "${oldRotVal}";`,
+            `+  "${newRotVal}";`,
+            '',
+          ].join('\n');
+          const rotPrompt = buildReviewPrompt(rotatedMultilineDiff);
+          assert(!rotPrompt.includes(oldRotVal), 'Old rotated multiline secret must be redacted');
+          assert(!rotPrompt.includes(newRotVal), 'New rotated multiline secret must be redacted');
+          const rotStatic = staticSecurityReview(rotatedMultilineDiff);
+          assert.strictEqual(rotStatic.verdict, 'REQUEST_CHANGES');
+
+          // Negative control: removed secret key replaced by safe non-secret key
+          const replacedWithSafeKeyDiff = [
+            'diff --git a/config.js b/config.js',
+            'index 1111111..2222222 100644',
+            '--- a/config.js',
+            '+++ b/config.js',
+            '@@ -1,2 +1,2 @@',
+            `-const ${kName} =`,
+            `-  "${oldRotVal}";`,
+            '+const display_banner =',
+            '+  "WelcomeToKapoorGalleriesCatalog";',
+            '',
+          ].join('\n');
+          assert.strictEqual(staticSecurityReview(replacedWithSafeKeyDiff).verdict, 'APPROVE');
+
+          // Unquoted YAML multi-line secret continuation
+          const yamlMultilineDiff = [
+            'diff --git a/secret.yaml b/secret.yaml',
+            'new file mode 100644',
+            '--- /dev/null',
+            '+++ b/secret.yaml',
+            '@@ -0,0 +1,2 @@',
+            `+${kName}:`,
+            `+  ${yamlContVal}`,
+            '',
+          ].join('\n');
+          const yamlPrompt = buildReviewPrompt(yamlMultilineDiff);
+          assert(!yamlPrompt.includes(yamlContVal), 'YAML multiline secret must be redacted');
+          assert.strictEqual(staticSecurityReview(yamlMultilineDiff).verdict, 'REQUEST_CHANGES');
+
+          // 3-parent octopus combined diff (`diff --cc` with `@@@@`) where space-indented added/removed
+          // lines start with `+++ ` and `--- `!
+          const combOldSec = ['OctopusOldVal', '1234567890abcdef'].join('');
+          const combNewSec = ['OctopusNewVal', '9876543210fedcba'].join('');
+          const octopusCombinedDiff = [
+            'diff --cc config/octopus.js',
+            'index 1111111,2222222,3333333..4444444',
+            '--- a/config/octopus.js',
+            '+++ b/config/octopus.js',
+            '@@@@ -1,2 -1,2 -1,2 +1,4 @@@@',
+            '   const header = 1;',
+            `---  const ${kName} = "${combOldSec}";`,
+            `+++  const ${kName} = "${combNewSec}";`,
+            '+++<<<<<<< HEAD',
+            `+++  const gh = "${['ghp', 'E'.repeat(36)].join('_')}";`,
+            '',
+          ].join('\n');
+          const octoPrompt = buildReviewPrompt(octopusCombinedDiff);
+          assert(!octoPrompt.includes(combOldSec), '3-parent combined `--- ` secret must be redacted');
+          assert(!octoPrompt.includes(combNewSec), '3-parent combined `+++ ` secret must be redacted');
+          const octoStatic = staticSecurityReview(octopusCombinedDiff);
+          assert.strictEqual(octoStatic.verdict, 'REQUEST_CHANGES');
+          assert(
+            octoStatic.issues.length >= 3,
+            `Expected 3-parent combined diff to catch secret, conflict, and PAT; got: ${JSON.stringify(octoStatic.issues)}`
+          );
+
+          // RM_SYNC_RETRY_OPTIONS & WSLENV HOME/XDG scrubbing & resolveWslSafeTempDir guard
+          assert(RM_SYNC_RETRY_OPTIONS && RM_SYNC_RETRY_OPTIONS.maxRetries >= 5);
+          assert(RM_SYNC_RETRY_OPTIONS.retryDelay >= 100);
+
+          let observedRmOptions = null;
+          const origRmSync = fs.rmSync;
+          const wsCheckRoot = fs.mkdtempSync(path.join(tmpRoot, 'rm-retry-check-'));
+          try {
+            const ws = createIsolatedRunWorkspace({
+              agyBin: '/mnt/c/Users/sanja/AppData/Local/agy/bin/agy.exe',
+              platform: 'linux',
+              env: {
+                ...process.env,
+                UNLISTED_SECRET_VAR: 'never-inherit',
+                REVIEWER_AGY_ENV_ALLOW: 'CUSTOM_KEEP',
+                WSLENV: 'HOME/u:XDG_CONFIG_HOME/p:UNLISTED_SECRET_VAR/u:CUSTOM_KEEP/u',
+              },
+              sourceHome: authHome,
+              tempRoot: wsCheckRoot,
+              requireAuthFiles: true,
+            });
+            assert(
+              !ws.childEnv.WSLENV.includes('HOME/u') &&
+                !ws.childEnv.WSLENV.includes('XDG_CONFIG_HOME/p') &&
+                !ws.childEnv.WSLENV.includes('UNLISTED_SECRET_VAR/u'),
+              `Expected HOME, XDG_CONFIG_HOME, and unlisted vars stripped from WSLENV, got: ${ws.childEnv.WSLENV}`
+            );
+            assert(!('UNLISTED_SECRET_VAR' in ws.childEnv), 'Unlisted env var must not enter childEnv');
+            assert(ws.childEnv.WSLENV.includes('CUSTOM_KEEP/u'));
+            fs.rmSync = (target, opts) => {
+              if (target === ws.runRoot) observedRmOptions = opts;
+              return origRmSync(target, opts);
+            };
+            ws.cleanup();
+          } finally {
+            fs.rmSync = origRmSync;
+          }
+          assert(
+            observedRmOptions && observedRmOptions.maxRetries >= 5 && observedRmOptions.retryDelay >= 100,
+            `Expected cleanup() to pass RM_SYNC_RETRY_OPTIONS, got: ${JSON.stringify(observedRmOptions)}`
+          );
+          assert.notStrictEqual(
+            resolveWslSafeTempDir({ TRIMURTI_WIN_TEMP_ROOT: '', WIN_USERNAME: 'nonexistent_usr_999' }),
+            '/mnt/c/Windows/Temp',
+            'resolveWslSafeTempDir MUST NEVER fall back to system-wide /mnt/c/Windows/Temp'
+          );
+        }
+
+        // 5j. PR #42 + Bugbot #1/#2 + PR #40 follow-ups:
+        //   - Multi-chunk diff review (no silent tail truncation) + REVIEWER_MAX_CHUNKS overflow guard
+        //   - Partial-chunk REQUEST_CHANGES preservation when a later chunk hits 429 / ETIMEDOUT
+        //   - Multi-chunk timeout scaling (workflow 45m/40m/38m hierarchy + resolveEffectiveTotalTimeoutMs)
+        //   - Paid-overage & metered-plan independence when REVIEWER_CHECK_QUOTA=0
+        //   - Pinned pre-push hook (.trimurti-review), REVIEWER_SKIP/REVIEWER_OFFLINE, outage fail-open vs history-secret block
+        //   - workflow_dispatch PR_TITLE resolution via GitHub REST API + hostile model output sanitization
+        //   - SIGTERM emergency cleanup of both isolated runRoot AND detached agy grandchild + stale lock age eviction
+        {
+          const mkFileDiff = (fname, addedLines) =>
+            [
+              `diff --git a/${fname} b/${fname}`,
+              'new file mode 100644',
+              '--- /dev/null',
+              `+++ b/${fname}`,
+              `@@ -0,0 +1,${addedLines.length} @@`,
+              ...addedLines.map((l) => `+${l}`),
+              '',
+            ].join('\n');
+
+          // 1. splitDiffIntoChunks: multi-file, huge single file with repeated header, combined diff, and emoji pairs
+          const bigSingle = mkFileDiff(
+            'big-single.js',
+            Array.from({ length: 240 }, (_, i) => `const row_${i} = "${'q'.repeat(60)}";`)
+          );
+          const midFile = mkFileDiff('mid.js', ['const MID_MARKER = 1;']);
+          const tailFile = mkFileDiff('tail.js', ['const TAIL_MARKER = 2;']);
+          const splitParts = splitDiffIntoChunks(bigSingle + midFile + tailFile, 2400);
+          assert(splitParts.length >= 3, `Expected >= 3 chunks, got ${splitParts.length}`);
+          assert(splitParts.every((c) => c.length <= 2400), 'Every chunk must fit <= maxChars');
+          const rejoined = splitParts.join('\n');
+          assert(rejoined.includes('MID_MARKER') && rejoined.includes('TAIL_MARKER'));
+          for (let i = 0; i < 240; i += 1) {
+            assert(rejoined.includes(`const row_${i} =`), `Missing row_${i} after chunking`);
+          }
+          assert(
+            splitParts
+              .filter((c) => c.includes('const row_'))
+              .every((c) => c.includes('diff --git a/big-single.js b/big-single.js')),
+            'Split pieces of a single file must repeat its diff --git header'
+          );
+          const emojiLine = `+${'\u{1F680}'.repeat(1500)}\n`;
+          const emojiChunks = splitDiffIntoChunks(
+            `diff --git a/e.txt b/e.txt\n--- a/e.txt\n+++ b/e.txt\n@@ -0,0 +1 @@\n${emojiLine}`,
+            800
+          );
+          assert(emojiChunks.every((c) => c.length <= 800));
+          assert.strictEqual((emojiChunks.join('').match(/\u{1F680}/gu) || []).length, 1500);
+
+          // 2. reviewDiff > 400,000 chars reviews tail chunk & catches tail finding; overflow > maxChunks downgrades
+          const chunkAgyDir = fs.mkdtempSync(path.join(tmpRoot, 'chunk-agy-'));
+          const chunkCallLog = path.join(chunkAgyDir, 'chunk-calls.jsonl');
+          const hugeLines = Array.from({ length: 4200 }, (_, i) => `const pad_${i} = "${'z'.repeat(82)}";`);
+          const over400kDiff =
+            mkFileDiff('front.js', hugeLines) +
+            mkFileDiff('middle.js', hugeLines.slice(0, 200)) +
+            mkFileDiff('tail-bug.js', ['const TAIL_SQL_BUG = true;']);
+          assert(over400kDiff.length > 400000, `Expected >400k diff, got ${over400kDiff.length}`);
+
+          const tailBugAgy = makeFakeAgy(
+            chunkAgyDir,
+            `
+            let prompt = "";
+            process.stdin.setEncoding("utf8");
+            process.stdin.on("data", (d) => { prompt += d; });
+            process.stdin.on("end", () => {
+              _fs.appendFileSync(${JSON.stringify(chunkCallLog)}, JSON.stringify({ len: prompt.length, tail: prompt.includes("TAIL_SQL_BUG") }) + "\\n");
+              const hasTail = prompt.includes("TAIL_SQL_BUG");
+              process.stdout.write(JSON.stringify({
+                conversation_id: "c-chunk",
+                status: "SUCCESS",
+                structured_output: hasTail
+                  ? { verdict: "REQUEST_CHANGES", summary: "Tail defect caught.", issues: [{ file: "tail-bug.js", line: 1, message: "Bug in tail chunk" }] }
+                  : { verdict: "APPROVE", summary: "Chunk clean.", issues: [] }
+              }) + "\\n");
+            });
+            `,
+            { name: 'tail-bug-agy.js' }
+          );
+          const tailVerdict = await reviewDiff(over400kDiff, {
+            sourceHome: authHome,
+            agyBin: tailBugAgy,
+            tempRoot: tmpRoot,
+          });
+          const recordedCalls = fs
+            .readFileSync(chunkCallLog, 'utf8')
+            .trim()
+            .split('\n')
+            .map((l) => JSON.parse(l));
+          assert(recordedCalls.length >= 2, `Expected >=2 chunk calls, got ${recordedCalls.length}`);
+          assert.strictEqual(tailVerdict.verdict, 'REQUEST_CHANGES');
+          assert(tailVerdict.issues.some((iss) => iss.file === 'tail-bug.js'));
+
+          // Overflow > maxChunks returns REQUEST_CHANGES (never APPROVE with unreviewed tail)
+          const approveAllChunksAgy = makeFakeAgy(
+            chunkAgyDir,
+            `
+            process.stdin.resume();
+            process.stdin.on("end", () => {
+              process.stdout.write(JSON.stringify({
+                conversation_id: "c-ok",
+                status: "SUCCESS",
+                structured_output: { verdict: "APPROVE", summary: "Chunk ok.", issues: [] }
+              }) + "\\n");
+            });
+            `,
+            { name: 'approve-chunks-agy.js' }
+          );
+          const overflowVerdict = await reviewDiff(over400kDiff, {
+            sourceHome: authHome,
+            agyBin: approveAllChunksAgy,
+            tempRoot: tmpRoot,
+            maxChunks: 1,
+          });
+          assert.strictEqual(overflowVerdict.verdict, 'REQUEST_CHANGES');
+          assert(overflowVerdict.issues.some((i) => i.file === '(diff)' && /Review incomplete/.test(i.message)));
+
+          // 3. Bugbot #2: Partial-chunk REQUEST_CHANGES preservation when Chunk 2 hits 429 quota exhaustion!
+          const chunkCounterFile = path.join(chunkAgyDir, 'chunk-seq.txt');
+          fs.writeFileSync(chunkCounterFile, '0', 'utf8');
+          const chunk1FailChunk2QuotaAgy = makeFakeAgy(
+            chunkAgyDir,
+            `
+            process.stdin.resume();
+            process.stdin.on("end", () => {
+              const cur = Number(_fs.readFileSync(${JSON.stringify(chunkCounterFile)}, "utf8") || "0") + 1;
+              _fs.writeFileSync(${JSON.stringify(chunkCounterFile)}, String(cur), "utf8");
+              if (cur === 1) {
+                process.stdout.write(JSON.stringify({
+                  conversation_id: "c-part-1",
+                  status: "SUCCESS",
+                  structured_output: {
+                    verdict: "REQUEST_CHANGES",
+                    summary: "Critical auth bypass in chunk 1.",
+                    issues: [{ file: "front.js", line: 3, message: "Missing auth guard in chunk 1" }]
+                  }
+                }) + "\\n");
+                return;
+              }
+              process.stderr.write("HTTP 429 RESOURCE_EXHAUSTED: rate limit on chunk 2\\n");
+              process.exit(1);
+            });
+            `,
+            { name: 'partial-429-agy.js' }
+          );
+          const partialPreserved = await reviewDiff(over400kDiff, {
+            sourceHome: authHome,
+            agyBin: chunk1FailChunk2QuotaAgy,
+            tempRoot: tmpRoot,
+          });
+          assert.strictEqual(partialPreserved.verdict, 'REQUEST_CHANGES');
+          assert(
+            partialPreserved.issues.some(
+              (i) => i.file === 'front.js' && i.message.includes('Missing auth guard in chunk 1')
+            ),
+            `Expected Chunk 1 finding preserved on Chunk 2 429, got: ${JSON.stringify(partialPreserved)}`
+          );
+          assert(
+            partialPreserved.issues.some((i) => i.file === '(diff)' && /Review interrupted/.test(i.message))
+          );
+
+          // Prove pre-push hook WITH failOpen: true ALSO blocks when Chunk 1 found REQUEST_CHANGES before Chunk 2 429!
+          const partialPushRepo = fs.mkdtempSync(path.join(tmpRoot, 'partial-push-repo-'));
+          assert.strictEqual(spawnSync('git', ['init', '-b', 'master'], { cwd: partialPushRepo, env: gitEnv }).status, 0);
+          fs.writeFileSync(path.join(partialPushRepo, 'base.txt'), 'base\n', 'utf8');
+          assert.strictEqual(spawnSync('git', ['add', '.'], { cwd: partialPushRepo, env: gitEnv }).status, 0);
+          assert.strictEqual(spawnSync('git', ['commit', '-m', 'base'], { cwd: partialPushRepo, env: gitEnv }).status, 0);
+          const baseOidP = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: partialPushRepo, env: gitEnv, encoding: 'utf8' }).stdout.trim();
+          fs.writeFileSync(path.join(partialPushRepo, 'front.js'), hugeLines.slice(0, 120).join('\n') + '\n', 'utf8');
+          fs.writeFileSync(path.join(partialPushRepo, 'tail.js'), 'const x = 1;\n', 'utf8');
+          assert.strictEqual(spawnSync('git', ['add', '.'], { cwd: partialPushRepo, env: gitEnv }).status, 0);
+          assert.strictEqual(spawnSync('git', ['commit', '-m', 'two files'], { cwd: partialPushRepo, env: gitEnv }).status, 0);
+          const tipOidP = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: partialPushRepo, env: gitEnv, encoding: 'utf8' }).stdout.trim();
+
+          fs.writeFileSync(chunkCounterFile, '0', 'utf8');
+          const partialPrePushRes = await runPrePushReview({
+            repoRoot: partialPushRepo,
+            reviewDir: fs.mkdtempSync(path.join(tmpRoot, 'partial-pp-rev-')),
+            stdinText: `refs/heads/master ${tipOidP} refs/heads/master ${baseOidP}\n`,
+            maxDiffChars: 6000,
+            failOpen: true,
+            agyBin: chunk1FailChunk2QuotaAgy,
+            env: { ...gitEnv, HOME: authHome },
+          });
+          assert.strictEqual(
+            partialPrePushRes.exitCode,
+            1,
+            'failOpen pre-push MUST NOT discard Chunk 1 REQUEST_CHANGES when Chunk 2 hits 429!'
+          );
+          assert.strictEqual(partialPrePushRes.verdict, 'REQUEST_CHANGES');
+          assert(partialPrePushRes.issues.some((i) => i.file === 'front.js'));
+
+          // Contrast control: if Chunk 1 APPROVED and Chunk 2 hits 429, reviewDiff throws (never approves partial)
+          // while failOpen pre-push warns & returns SKIPPED (exitCode 0) when static + history secret floors are clean!
+          const chunk1ApproveCounter = path.join(chunkAgyDir, 'chunk-ok-seq.txt');
+          fs.writeFileSync(chunk1ApproveCounter, '0', 'utf8');
+          const chunk1OkChunk2QuotaAgy = makeFakeAgy(
+            chunkAgyDir,
+            `
+            process.stdin.resume();
+            process.stdin.on("end", () => {
+              const cur = Number(_fs.readFileSync(${JSON.stringify(chunk1ApproveCounter)}, "utf8") || "0") + 1;
+              _fs.writeFileSync(${JSON.stringify(chunk1ApproveCounter)}, String(cur), "utf8");
+              if (cur === 1) {
+                process.stdout.write(JSON.stringify({
+                  conversation_id: "c-ok-1",
+                  status: "SUCCESS",
+                  structured_output: { verdict: "APPROVE", summary: "Chunk 1 clean.", issues: [] }
+                }) + "\\n");
+                return;
+              }
+              process.stderr.write("HTTP 429 RESOURCE_EXHAUSTED on chunk 2\\n");
+              process.exit(1);
+            });
+            `,
+            { name: 'ok1-429-agy.js' }
+          );
+          await assert.rejects(
+            () =>
+              reviewDiff(over400kDiff, {
+                sourceHome: authHome,
+                agyBin: chunk1OkChunk2QuotaAgy,
+                tempRoot: tmpRoot,
+              }),
+            /429|RESOURCE_EXHAUSTED|quota/
+          );
+          fs.writeFileSync(chunk1ApproveCounter, '0', 'utf8');
+          const cleanOutagePrePush = await runPrePushReview({
+            repoRoot: partialPushRepo,
+            reviewDir: fs.mkdtempSync(path.join(tmpRoot, 'ok1-pp-rev-')),
+            stdinText: `refs/heads/master ${tipOidP} refs/heads/master ${baseOidP}\n`,
+            maxDiffChars: 6000,
+            failOpen: true,
+            agyBin: chunk1OkChunk2QuotaAgy,
+            env: { ...gitEnv, HOME: authHome },
+          });
+          assert.strictEqual(cleanOutagePrePush.exitCode, 0);
+          assert.strictEqual(cleanOutagePrePush.verdict, 'SKIPPED');
+          assert.strictEqual(cleanOutagePrePush.unavailableReason, 'quota');
+
+          // 4. Bugbot #1: Multi-chunk timeout scaling & workflow timeout hierarchy
+          const sixChunkBudgetMs = resolveEffectiveTotalTimeoutMs({}, {}, 6, 360000, 20000);
+          assert(
+            sixChunkBudgetMs > 6 * 360000,
+            '6-chunk total timeout budget must exceed 6 * perChunkTimeoutMs'
+          );
+          const wfTotalMatch = workflowText.match(/REVIEWER_TOTAL_TIMEOUT_MS:\s*"(\d+)"/);
+          assert(
+            /timeout-minutes:\s*50\b/.test(workflowText) &&
+              /timeout-minutes:\s*45\b/.test(workflowText) &&
+              wfTotalMatch &&
+              Number(wfTotalMatch[1]) >= sixChunkBudgetMs,
+            `ai-reviewer.yml must configure 50m/45m/REVIEWER_TOTAL_TIMEOUT_MS (>=${sixChunkBudgetMs}) hierarchy`
+          );
+
+          // 5. M4: REVIEWER_CHECK_QUOTA=0 skips ONLY the 5% reserve, NEVER paid-overage or metered-plan guards!
+          const overageEnvelope = buildHealthyUsageEnvelope();
+          overageEnvelope.command.data.overage_info = { enabled: true };
+          const overageBin = makeFakeAgy(
+            chunkAgyDir,
+            `
+            const a = process.argv.slice(2);
+            if (a.includes("/permissions")) {
+              process.stdout.write(${JSON.stringify(JSON.stringify(buildHealthyPermissionsEnvelope()))} + "\\n");
+              process.exit(0);
+            }
+            if (a.includes("/usage")) {
+              process.stdout.write(${JSON.stringify(JSON.stringify(overageEnvelope))} + "\\n");
+              process.exit(0);
+            }
+            process.exit(99);
+            `,
+            { name: 'overage-guard.js', rawScript: true }
+          );
+          await assert.rejects(
+            () =>
+              reviewDiff(SAMPLE_DIFF, {
+                sourceHome: authHome,
+                agyBin: overageBin,
+                tempRoot: tmpRoot,
+                checkQuota: false,
+                env: { ...gitEnv, HOME: authHome, REVIEWER_CHECK_QUOTA: '0' },
+              }),
+            /Paid overage billing/
+          );
+          const lowReserveEnvelope = buildHealthyUsageEnvelope(0.02, 0.03);
+          const lowReserveBin = makeFakeAgy(
+            chunkAgyDir,
+            `
+            const a = process.argv.slice(2);
+            if (a.includes("/permissions")) {
+              process.stdout.write(${JSON.stringify(JSON.stringify(buildHealthyPermissionsEnvelope()))} + "\\n");
+              process.exit(0);
+            }
+            if (a.includes("/usage")) {
+              process.stdout.write(${JSON.stringify(JSON.stringify(lowReserveEnvelope))} + "\\n");
+              process.exit(0);
+            }
+            if (a.includes("models")) {
+              process.stdout.write(${JSON.stringify(JSON.stringify(buildHealthyModelsEnvelope()))} + "\\n");
+              process.exit(0);
+            }
+            process.stdin.resume();
+            process.stdin.on("end", () => {
+              process.stdout.write(JSON.stringify({
+                conversation_id: "c-low",
+                status: "SUCCESS",
+                structured_output: { verdict: "APPROVE", summary: "Reserve skipped cleanly.", issues: [] }
+              }) + "\\n");
+            });
+            `,
+            { name: 'low-reserve.js', rawScript: true }
+          );
+          await assert.rejects(
+            () => reviewDiff(SAMPLE_DIFF, { sourceHome: authHome, agyBin: lowReserveBin, tempRoot: tmpRoot }),
+            /reserve|exhausted/
+          );
+          const lowReserveAllowed = await reviewDiff(SAMPLE_DIFF, {
+            sourceHome: authHome,
+            agyBin: lowReserveBin,
+            tempRoot: tmpRoot,
+            env: { ...gitEnv, HOME: authHome, REVIEWER_CHECK_QUOTA: '0' },
+          });
+          assert.strictEqual(lowReserveAllowed.verdict, 'APPROVE');
+
+          // 6. Pinned pre-push hook (.trimurti-review), branch without scripts/, malicious branch script ignored,
+          //    REVIEWER_SKIP=1, REVIEWER_OFFLINE=1 (clean passes, leaked secret blocked), and history-secret blocked on 429 outage!
+          if (process.platform !== 'win32') {
+            const pinRemote = fs.mkdtempSync(path.join(tmpRoot, 'pin-remote-'));
+            const pinRepo = fs.mkdtempSync(path.join(tmpRoot, 'pin-repo-'));
+            assert.strictEqual(spawnSync('git', ['init', '--bare', '-b', 'master'], { cwd: pinRemote, env: gitEnv }).status, 0);
+            assert.strictEqual(spawnSync('git', ['init', '-b', 'master'], { cwd: pinRepo, env: gitEnv }).status, 0);
+            assert.strictEqual(spawnSync('git', ['remote', 'add', 'origin', pinRemote], { cwd: pinRepo, env: gitEnv }).status, 0);
+            fs.writeFileSync(path.join(pinRepo, 'README.md'), 'init\n', 'utf8');
+            assert.strictEqual(spawnSync('git', ['add', '.'], { cwd: pinRepo, env: gitEnv }).status, 0);
+            assert.strictEqual(spawnSync('git', ['commit', '-m', 'init'], { cwd: pinRepo, env: gitEnv }).status, 0);
+            assert.strictEqual(spawnSync('git', ['push', '-u', 'origin', 'master'], { cwd: pinRepo, env: gitEnv }).status, 0);
+
+            const pinInstalled = installPrePushHook(pinRepo, { force: true });
+            assert(pinInstalled.pinnedDir && pinInstalled.pinnedDir.endsWith(PINNED_DIR_NAME));
+            assert(!buildHookScript().includes('\u2014'), 'Hook script must use ASCII hyphens');
+
+            const evilMarker = path.join(tmpRoot, 'branch-evil-ran');
+            assert.strictEqual(spawnSync('git', ['checkout', '-b', 'evil-branch', 'master'], { cwd: pinRepo, env: gitEnv }).status, 0);
+            fs.mkdirSync(path.join(pinRepo, 'scripts'), { recursive: true });
+            fs.writeFileSync(
+              path.join(pinRepo, 'scripts', 'pre-push-review.js'),
+              `require("fs").writeFileSync(${JSON.stringify(evilMarker)}, "pwn"); process.exit(0);\n`,
+              'utf8'
+            );
+            fs.writeFileSync(path.join(pinRepo, 'scripts', 'reviewer.js'), 'process.exit(0);\n', 'utf8');
+            const branchLeakTok = ['ghp', 'P'.repeat(36)].join('_');
+            fs.writeFileSync(path.join(pinRepo, 'secret.js'), `const k = "${branchLeakTok}";\n`, 'utf8');
+            assert.strictEqual(spawnSync('git', ['add', '.'], { cwd: pinRepo, env: gitEnv }).status, 0);
+            assert.strictEqual(spawnSync('git', ['commit', '-m', 'evil branch with secret'], { cwd: pinRepo, env: gitEnv }).status, 0);
+
+            // Even with REVIEWER_OFFLINE=1 AND a malicious branch scripts/pre-push-review.js, pinned hook blocks the secret!
+            const offlineBlocked = spawnSync('git', ['push', 'origin', 'evil-branch'], {
+              cwd: pinRepo,
+              env: {
+                ...gitEnv,
+                HOME: fs.mkdtempSync(path.join(tmpRoot, 'no-auth-')),
+                PATH: `${path.dirname(process.execPath)}:/usr/bin:/bin`,
+                REVIEW_DIR: fs.mkdtempSync(path.join(tmpRoot, 'pin-rev1-')),
+                REVIEWER_OFFLINE: '1',
+              },
+              encoding: 'utf8',
+            });
+            assert.strictEqual(fs.existsSync(evilMarker), false, 'Malicious branch pre-push-review.js must NEVER run');
+            assert.notStrictEqual(offlineBlocked.status, 0, 'REVIEWER_OFFLINE=1 must still block leaked secrets via static floor');
+
+            // Clean branch WITHOUT scripts/ succeeds under REVIEWER_OFFLINE=1 and under 429 outage (and blocks with REVIEWER_FAIL_CLOSED=1)
+            assert.strictEqual(spawnSync('git', ['checkout', '-b', 'no-scripts-clean', 'master'], { cwd: pinRepo, env: gitEnv }).status, 0);
+            fs.writeFileSync(path.join(pinRepo, 'clean.js'), 'module.exports = 1;\n', 'utf8');
+            assert.strictEqual(spawnSync('git', ['add', '.'], { cwd: pinRepo, env: gitEnv }).status, 0);
+            assert.strictEqual(spawnSync('git', ['commit', '-m', 'clean without scripts'], { cwd: pinRepo, env: gitEnv }).status, 0);
+
+            const offlineClean = spawnSync('git', ['push', 'origin', 'no-scripts-clean'], {
+              cwd: pinRepo,
+              env: {
+                ...gitEnv,
+                HOME: fs.mkdtempSync(path.join(tmpRoot, 'no-auth2-')),
+                PATH: `${path.dirname(process.execPath)}:/usr/bin:/bin`,
+                REVIEW_DIR: fs.mkdtempSync(path.join(tmpRoot, 'pin-rev2-')),
+                REVIEWER_OFFLINE: '1',
+              },
+              encoding: 'utf8',
+            });
+            assert.strictEqual(offlineClean.status, 0, offlineClean.stderr);
+            assert(/REVIEWER_OFFLINE is set/.test(offlineClean.stderr));
+
+            // Multi-commit add+delete secret (`netDiff === ""`) STILL blocks even when agy fails with 429!
+            const always429Agy = makeFakeAgy(
+              chunkAgyDir,
+              'process.stderr.write("HTTP 429 RESOURCE_EXHAUSTED\\n"); process.exit(1);',
+              { name: 'always-429.js' }
+            );
+            assert.strictEqual(spawnSync('git', ['checkout', '-b', 'hist-429-leak', 'master'], { cwd: pinRepo, env: gitEnv }).status, 0);
+            fs.writeFileSync(path.join(pinRepo, 'temp-sec.js'), `const s = "${branchLeakTok}";\n`, 'utf8');
+            assert.strictEqual(spawnSync('git', ['add', '.'], { cwd: pinRepo, env: gitEnv }).status, 0);
+            assert.strictEqual(spawnSync('git', ['commit', '-m', 'c1 leak'], { cwd: pinRepo, env: gitEnv }).status, 0);
+            fs.unlinkSync(path.join(pinRepo, 'temp-sec.js'));
+            assert.strictEqual(spawnSync('git', ['add', '-A'], { cwd: pinRepo, env: gitEnv }).status, 0);
+            assert.strictEqual(spawnSync('git', ['commit', '-m', 'c2 remove'], { cwd: pinRepo, env: gitEnv }).status, 0);
+
+            const hist429Push = spawnSync('git', ['push', 'origin', 'hist-429-leak'], {
+              cwd: pinRepo,
+              env: {
+                ...gitEnv,
+                HOME: authHome,
+                PATH: `${path.dirname(process.execPath)}:/usr/bin:/bin`,
+                REVIEW_DIR: fs.mkdtempSync(path.join(tmpRoot, 'pin-rev3-')),
+                AGY_BIN: always429Agy,
+              },
+              encoding: 'utf8',
+            });
+            assert.notStrictEqual(
+              hist429Push.status,
+              0,
+              'Intermediate commit history secret MUST block push even when agy hits 429 outage!'
+            );
+            assert(hist429Push.stderr.includes('(in pushed commit history)'));
+          }
+
+          // 7. workflow_dispatch PR_TITLE resolution via GitHub REST API + hostile model output sanitization
+          if (
+            process.platform !== 'win32' &&
+            haveCmd('bash', '--version') &&
+            haveCmd('curl', '--version') &&
+            haveCmd('openssl', 'version')
+          ) {
+            const wfCert = path.join(tmpRoot, 'wf42-cert.pem');
+            const wfKey = path.join(tmpRoot, 'wf42-key.pem');
+            assert.strictEqual(
+              spawnSync(
+                'openssl',
+                [
+                  'req',
+                  '-x509',
+                  '-newkey',
+                  'rsa:2048',
+                  '-nodes',
+                  '-keyout',
+                  wfKey,
+                  '-out',
+                  wfCert,
+                  '-days',
+                  '1',
+                  '-subj',
+                  '/CN=127.0.0.1',
+                  '-addext',
+                  'subjectAltName=IP:127.0.0.1',
+                ],
+                { encoding: 'utf8' }
+              ).status,
+              0
+            );
+            const captured42 = [];
+            const { server: srv42, port: port42 } = await listenHttpsServer(
+              fs.readFileSync(wfCert, 'utf8'),
+              fs.readFileSync(wfKey, 'utf8'),
+              (req, res) => {
+                if (req.method === 'GET' && req.url === '/repos/kapoorgalleries/metaplex/pulls/42') {
+                  res.writeHead(200, { 'Content-Type': 'application/json' });
+                  res.end(
+                    JSON.stringify({
+                      title: 'Harden reviewer <!channel> @here <script>',
+                      html_url: 'https://github.com/kapoorgalleries/metaplex/pull/42',
+                    })
+                  );
+                  return;
+                }
+                let b = '';
+                req.on('data', (c) => {
+                  b += c.toString();
+                });
+                req.on('end', () => {
+                  captured42.push({ url: req.url, body: b });
+                  res.writeHead(req.url === '/v3/mail/send' ? 202 : 200, { 'Content-Type': 'application/json' });
+                  res.end(req.url === '/v3/mail/send' ? '' : '{"ok":true}');
+                });
+              }
+            );
+            try {
+              const notifyRunScript = extractYamlRunBlock(workflowText, 'Send Notifications');
+              const recordRunScript = extractYamlRunBlock(workflowText, 'Record review summary');
+              const hostileText = 'Alert <!channel> <@U123> @everyone @alice <script>x</script> [link](https://evil.invalid)';
+
+              const recDir42 = fs.mkdtempSync(path.join(tmpRoot, 'rec42-'));
+              const sumPath42 = path.join(recDir42, 'summary.md');
+              const outPath42 = path.join(recDir42, 'output.txt');
+              fs.writeFileSync(sumPath42, '', 'utf8');
+              fs.writeFileSync(outPath42, '', 'utf8');
+              fs.writeFileSync(
+                path.join(recDir42, 'review_result.json'),
+                JSON.stringify({
+                  verdict: 'REQUEST_CHANGES',
+                  summary: hostileText,
+                  issues: [{ file: 'src/x.js', line: 5, message: hostileText }],
+                }),
+                'utf8'
+              );
+              const recRes42 = spawnSync('bash', ['-c', recordRunScript], {
+                env: cleanWorkflowEnv({
+                  REVIEW_DIR: recDir42,
+                  REVIEWER_OUTCOME: 'failure',
+                  GITHUB_STEP_SUMMARY: sumPath42,
+                  GITHUB_OUTPUT: outPath42,
+                }),
+                encoding: 'utf8',
+              });
+              assert.strictEqual(recRes42.status, 1);
+              const summaryMd = fs.readFileSync(sumPath42, 'utf8');
+              assert(summaryMd.includes('AI-generated advisory output'));
+              assert(!summaryMd.includes('<script>') && !summaryMd.includes('<!channel>'));
+              assert(summaryMd.includes('\\[link\\]'));
+
+              const notifyRes42 = await runBashAsync(notifyRunScript, {
+                PATH: process.env.PATH,
+                HOME: tmpRoot,
+                CURL_CA_BUNDLE: wfCert,
+                GITHUB_API_URL: `https://127.0.0.1:${port42}`,
+                GITHUB_TOKEN: 'gh-test-tok',
+                TRIMURTI_WEBHOOK_URL: `https://127.0.0.1:${port42}/trimurti`,
+                SLACK_WEBHOOK_URL: `https://127.0.0.1:${port42}/slack`,
+                EMAIL_API_KEY: 'sg-test-tok',
+                SENDGRID_API_URL: `https://127.0.0.1:${port42}/v3/mail/send`,
+                PR_NUMBER: '42',
+                PR_TITLE: '',
+                PR_URL: '',
+                REPO_FULL_NAME: 'kapoorgalleries/metaplex',
+                RUN_URL: 'https://github.com/kapoorgalleries/metaplex/actions/runs/77',
+                REVIEW_VERDICT: 'REQUEST_CHANGES',
+                REVIEW_SUMMARY: hostileText,
+                REVIEW_ISSUES_JSON: JSON.stringify([{ file: 'src/x.js', line: 5, message: hostileText }]),
+              });
+              assert.strictEqual(notifyRes42.status, 0, `${notifyRes42.stdout}\n${notifyRes42.stderr}`);
+              assert.strictEqual(captured42.length, 3);
+
+              const slackJson = JSON.parse(captured42.find((c) => c.url === '/slack').body);
+              assert.strictEqual(slackJson.unfurl_links, false);
+              assert.strictEqual(slackJson.unfurl_media, false);
+              assert(slackJson.text.includes('Harden reviewer'), 'Expected workflow_dispatch PR_TITLE resolved from REST API');
+              assert(!/<!channel>|<@U123>|@everyone|@here|<script>/.test(slackJson.text));
+
+              const mailJson = JSON.parse(captured42.find((c) => c.url === '/v3/mail/send').body);
+              assert(mailJson.subject.includes('Harden reviewer'));
+              assert(!/[<>]/.test(mailJson.content[0].value));
+
+              const hookJson = JSON.parse(captured42.find((c) => c.url === '/trimurti').body);
+              assert.strictEqual(hookJson.ai_generated, true);
+              assert.strictEqual(hookJson.pull_request.url, 'https://github.com/kapoorgalleries/metaplex/pull/42');
+            } finally {
+              await closeServer(srv42);
+            }
+          }
+
+          // 8. sanitizeLogText, withOutputLock age eviction, and SIGTERM cleanup of runRoot + detached agy child
+          const dirtyLog = `\u001b[31merr\u001b[0m\n::error::inject\n##[add-mask]x\ntok=${['ghp', 'L'.repeat(36)].join('_')}\n${'y'.repeat(2500)}`;
+          const cleanLog = sanitizeLogText(dirtyLog);
+          assert(!cleanLog.includes('\u001b') && !cleanLog.includes('LLLLLLLLLLLL'));
+          assert(cleanLog.split('\n').every((l) => !/^\s*(?:::|##\[)/.test(l)));
+
+          const ageLockDir = fs.mkdtempSync(path.join(tmpRoot, 'age-lock-'));
+          const ageTarget = path.join(ageLockDir, 'res.json');
+          fs.writeFileSync(
+            path.join(ageLockDir, '.res.json.lock'),
+            JSON.stringify({ pid: process.ppid, token: 'old', startedAt: Date.now() - 60000 }),
+            'utf8'
+          );
+          assert.strictEqual(
+            await withOutputLock(ageTarget, async () => 'evicted-aged-lock', 2000, { staleLockMaxAgeMs: 500 }),
+            'evicted-aged-lock'
+          );
+          fs.writeFileSync(
+            path.join(ageLockDir, '.res.json.lock'),
+            JSON.stringify({ pid: process.ppid, token: 'fresh', startedAt: Date.now() }),
+            'utf8'
+          );
+          await assert.rejects(
+            () => withOutputLock(ageTarget, async () => 'never', 200, { staleLockMaxAgeMs: 60000 }),
+            (err) => err.code === REVIEW_LOCK_TIMEOUT_CODE
+          );
+
+          if (process.platform !== 'win32') {
+            const sigDir = fs.mkdtempSync(path.join(tmpRoot, 'sig-clean-'));
+            const pidRecord = path.join(sigDir, 'grandchild.pid');
+            const hangAgySig = makeFakeAgy(
+              sigDir,
+              `
+              const { spawn } = require("child_process");
+              const gc = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+              _fs.writeFileSync(${JSON.stringify(pidRecord)}, String(gc.pid), "utf8");
+              setInterval(() => {}, 1000);
+              `,
+              { name: 'sig-hang-agy.js' }
+            );
+            const sigRunner = spawn(
+              process.execPath,
+              [
+                '-e',
+                `
+                const rev = require(${JSON.stringify(REVIEWER_PATH)});
+                rev.reviewDiff(${JSON.stringify(SAMPLE_DIFF)}, {
+                  sourceHome: ${JSON.stringify(authHome)},
+                  agyBin: ${JSON.stringify(hangAgySig)},
+                  tempRoot: ${JSON.stringify(sigDir)},
+                }).catch(() => {});
+                `,
+              ],
+              { stdio: ['ignore', 'pipe', 'pipe'] }
+            );
+            const deadlineSig = Date.now() + 8000;
+            while (!fs.existsSync(pidRecord) && Date.now() < deadlineSig) {
+              await new Promise((r) => setTimeout(r, 40));
+            }
+            assert(fs.existsSync(pidRecord), 'Expected mock agy grandchild to start before SIGTERM');
+            const gcPid = Number(fs.readFileSync(pidRecord, 'utf8').trim());
+            const runDirsBefore = fs
+              .readdirSync(sigDir)
+              .filter((n) => n.startsWith('trimurti-agy-run-'));
+            assert(runDirsBefore.length >= 1, 'Expected active isolated runRoot directory');
+
+            const sigExit = new Promise((resolve) => sigRunner.on('close', (code, sig) => resolve({ code, sig })));
+            sigRunner.kill('SIGTERM');
+            await sigExit;
+            await new Promise((r) => setTimeout(r, 100));
+
+            const runDirsAfter = fs
+              .readdirSync(sigDir)
+              .filter((n) => n.startsWith('trimurti-agy-run-'));
+            assert.deepStrictEqual(runDirsAfter, [], 'SIGTERM must remove active isolated OAuth runRoot');
+            let gcAlive = false;
+            try {
+              process.kill(gcPid, 0);
+              gcAlive = true;
+            } catch (_) {}
+            assert.strictEqual(gcAlive, false, 'SIGTERM must terminate detached agy process group');
+          }
+        }
+
+        // 5k. Verification-round adversarial regressions:
+        //   1. Multi-model fallback preserves Chunk 1 REQUEST_CHANGES and resumes at Chunk 2 without re-running Chunk 1
+        //   2. Mid-run settings.json tampering & inter-chunk Paid overage billing fail CLOSED (never swallowed by partial verdict)
+        //   3. splitDiffIntoChunks emits continuation @@ -old +new @@ headers and preserves split long-line diff prefixes
+        //   4. scanPrePushHistorySecrets (--cc) passes clean `git merge origin/master` even if branch already had an older pushed token
+        //   5. Workflow Trimurti webhook & Email subject sanitize >5-nested mentions, <script>, @user, and HTML entity boundaries
+        {
+          const advDir = fs.mkdtempSync(path.join(tmpRoot, 'adv-5k-'));
+          const advDiff =
+            [
+              'diff --git a/a.js b/a.js',
+              '--- a/a.js',
+              '+++ b/a.js',
+              '@@ -0,0 +1,60 @@',
+              ...Array.from({ length: 60 }, (_, i) => `+const a_${i} = "${'x'.repeat(40)}";`),
+              'diff --git a/b.js b/b.js',
+              '--- a/b.js',
+              '+++ b/b.js',
+              '@@ -0,0 +1,60 @@',
+              ...Array.from({ length: 60 }, (_, i) => `+const b_${i} = "${'y'.repeat(40)}";`),
+              '',
+            ].join('\n');
+
+          // 1. Model 1 finds REQUEST_CHANGES on chunk 1, hits 503 on chunk 2; Model 2 approves remaining chunks
+          const fbLogFile = path.join(advDir, 'fb-calls.jsonl');
+          const fbSeqFile = path.join(advDir, 'fb-seq.txt');
+          fs.writeFileSync(fbSeqFile, '0', 'utf8');
+          const fbPreserveBin = makeFakeAgy(
+            advDir,
+            `
+            const mIdx = _argv.indexOf("--model");
+            const model = mIdx >= 0 ? _argv[mIdx + 1] : "";
+            let stdin = "";
+            process.stdin.setEncoding("utf8");
+            process.stdin.on("data", (d) => { stdin += d; });
+            process.stdin.on("end", () => {
+              const n = Number(_fs.readFileSync(${JSON.stringify(fbSeqFile)}, "utf8")) + 1;
+              _fs.writeFileSync(${JSON.stringify(fbSeqFile)}, String(n), "utf8");
+              _fs.appendFileSync(${JSON.stringify(fbLogFile)}, JSON.stringify({ n, model, part1: stdin.includes("reviewing part 1 of ") }) + "\\n");
+              if (model === "gemini-4-carbon-high") {
+                if (n === 1) {
+                  process.stdout.write(JSON.stringify({
+                    conversation_id: "c-m1",
+                    status: "SUCCESS",
+                    structured_output: {
+                      verdict: "REQUEST_CHANGES",
+                      summary: "Critical auth bypass in chunk 1.",
+                      issues: [{ file: "a.js", line: 1, message: "Auth bypass caught by primary model" }]
+                    }
+                  }) + "\\n");
+                  return;
+                }
+                process.stderr.write("503 Service Unavailable: model is overloaded\\n");
+                process.exit(1);
+              }
+              process.stdout.write(JSON.stringify({
+                conversation_id: "c-m2",
+                status: "SUCCESS",
+                structured_output: { verdict: "APPROVE", summary: "Remaining chunk clean.", issues: [] }
+              }) + "\\n");
+            });
+            `,
+            { name: 'fb-preserve-agy.js' }
+          );
+          const fbVerdict = await reviewDiff(advDiff, {
+            sourceHome: authHome,
+            agyBin: fbPreserveBin,
+            tempRoot: tmpRoot,
+            maxDiffChars: 3500,
+            models: ['gemini-4-carbon-high', 'gemini-4-argon-high'],
+          });
+          assert.strictEqual(
+            fbVerdict.verdict,
+            'REQUEST_CHANGES',
+            'Fallback model APPROVE must NEVER overwrite primary model Chunk 1 REQUEST_CHANGES!'
+          );
+          assert(
+            fbVerdict.issues.some((i) => i.file === 'a.js' && i.message.includes('Auth bypass')),
+            `Expected Chunk 1 issue preserved across model fallback, got: ${JSON.stringify(fbVerdict)}`
+          );
+          assert.strictEqual(fbVerdict._meta.partial, false, 'Expected all chunks reviewed after fallback');
+          const fbLogged = fs
+            .readFileSync(fbLogFile, 'utf8')
+            .trim()
+            .split('\n')
+            .map((l) => JSON.parse(l));
+          assert.strictEqual(
+            fbLogged.filter((c) => c.part1).length,
+            1,
+            'Fallback model must resume at Chunk 2 instead of re-running already-completed Chunk 1'
+          );
+
+          // 2. Post-run settings.json tampering (1-chunk) & inter-chunk Paid overage billing (2-chunk) MUST fail closed!
+          const tamperBin = makeFakeAgy(
+            advDir,
+            `
+            process.stdin.resume();
+            process.stdin.on("end", () => {
+              const sPath = _path.join(process.env.HOME, ".gemini", "antigravity-cli", "settings.json");
+              _fs.writeFileSync(sPath, JSON.stringify({ useG1Credits: true }));
+              process.stdout.write(JSON.stringify({
+                conversation_id: "c-tamper",
+                status: "SUCCESS",
+                structured_output: { verdict: "APPROVE", summary: "Tampered", issues: [] }
+              }) + "\\n");
+            });
+            `,
+            { name: 'tamper-settings-agy.js' }
+          );
+          await assert.rejects(
+            () =>
+              reviewDiff(SAMPLE_DIFF, {
+                sourceHome: authHome,
+                agyBin: tamperBin,
+                tempRoot: tmpRoot,
+                recordPostRunQuota: false,
+              }),
+            /useG1Credits: true|settings\.json failed integrity/,
+            'Post-run settings.json tampering on 1-chunk diff must fail closed'
+          );
+
+          const interOverageSeq = path.join(advDir, 'inter-overage-seq.txt');
+          fs.writeFileSync(interOverageSeq, '0', 'utf8');
+          const healthyEnv5k = buildHealthyUsageEnvelope();
+          const overageEnv5k = buildHealthyUsageEnvelope();
+          overageEnv5k.command.data.overage_info = { enabled: true };
+          const interOverageBin = makeFakeAgy(
+            advDir,
+            `
+            const fs = require("fs");
+            const argv = process.argv.slice(2);
+            if (argv.includes("/permissions")) {
+              process.stdout.write(${JSON.stringify(JSON.stringify(buildHealthyPermissionsEnvelope()))} + "\\n");
+              process.exit(0);
+            }
+            if (argv.includes("/usage")) {
+              const c = Number(fs.readFileSync(${JSON.stringify(interOverageSeq)}, "utf8")) + 1;
+              fs.writeFileSync(${JSON.stringify(interOverageSeq)}, String(c), "utf8");
+              process.stdout.write((c === 1 ? ${JSON.stringify(JSON.stringify(healthyEnv5k))} : ${JSON.stringify(JSON.stringify(overageEnv5k))}) + "\\n");
+              process.exit(0);
+            }
+            if (argv.includes("models")) {
+              process.stdout.write(${JSON.stringify(JSON.stringify(buildHealthyModelsEnvelope()))} + "\\n");
+              process.exit(0);
+            }
+            process.stdin.resume();
+            process.stdin.on("end", () => {
+              process.stdout.write(JSON.stringify({
+                conversation_id: "c-p1",
+                status: "SUCCESS",
+                structured_output: {
+                  verdict: "REQUEST_CHANGES",
+                  summary: "Chunk 1 defect",
+                  issues: [{ file: "a.js", line: 2, message: "Defect" }]
+                }
+              }) + "\\n");
+            });
+            `,
+            { name: 'inter-overage-agy.js', rawScript: true }
+          );
+          await assert.rejects(
+            () =>
+              reviewDiff(advDiff, {
+                sourceHome: authHome,
+                agyBin: interOverageBin,
+                tempRoot: tmpRoot,
+                maxDiffChars: 3500,
+              }),
+            /Paid overage billing/,
+            'Inter-chunk Paid overage billing must NEVER be swallowed into partial verdict'
+          );
+
+          // 3. splitDiffIntoChunks continuation hunk header + ultra-long line `+` prefix preservation
+          const singleHunkBig =
+            [
+              'diff --git a/big.js b/big.js',
+              '--- a/big.js',
+              '+++ b/big.js',
+              '@@ -10,0 +20,80 @@',
+              ...Array.from({ length: 80 }, (_, i) => `+const line_${i + 20} = "${'z'.repeat(40)}";`),
+              '',
+            ].join('\n');
+          const hunkSplit = splitDiffIntoChunks(singleHunkBig, 2000);
+          assert(hunkSplit.length >= 2);
+          assert(hunkSplit.every((c) => c.length <= 2000));
+          const secondChunkLines = hunkSplit[1].split('\n');
+          const contHunkLine = secondChunkLines.find((l) => l.startsWith('@@ '));
+          assert(
+            contHunkLine && /^@@ -10 \+\d+ @@$/.test(contHunkLine),
+            `Expected continuation chunk to carry synthetic @@ -old +new @@ header, got: ${JSON.stringify(secondChunkLines.slice(0, 5))}`
+          );
+          const firstCodeAfterCont = secondChunkLines[secondChunkLines.indexOf(contHunkLine) + 1];
+          const expectedStartLine = Number(contHunkLine.match(/\+(\d+)/)[1]);
+          assert(
+            firstCodeAfterCont.startsWith(`+const line_${expectedStartLine} =`),
+            `Expected synthetic hunk line +${expectedStartLine} to match ${firstCodeAfterCont}`
+          );
+
+          const longAddedLineDiff = `diff --git a/min.js b/min.js\n--- a/min.js\n+++ b/min.js\n@@ -0,0 +1,1 @@\n+const m = "${'w'.repeat(1200)}";\n`;
+          const longSlices = splitDiffIntoChunks(longAddedLineDiff, 500);
+          assert(longSlices.length >= 3 && longSlices.every((c) => c.length <= 500));
+          assert(
+            longSlices.every((c) => /\n\+/.test(c)),
+            'Every continuation slice of a split added line must retain its `+` diff prefix'
+          );
+
+          // 4. Clean `git merge origin/master` push on a branch whose already-pushed commit had a token
+          const mergeCleanRemote = fs.mkdtempSync(path.join(advDir, 'mc-remote-'));
+          const mergeCleanRepo = fs.mkdtempSync(path.join(advDir, 'mc-repo-'));
+          assert.strictEqual(spawnSync('git', ['init', '--bare', '-b', 'master'], { cwd: mergeCleanRemote, env: gitEnv }).status, 0);
+          assert.strictEqual(spawnSync('git', ['init', '-b', 'master'], { cwd: mergeCleanRepo, env: gitEnv }).status, 0);
+          assert.strictEqual(spawnSync('git', ['remote', 'add', 'origin', mergeCleanRemote], { cwd: mergeCleanRepo, env: gitEnv }).status, 0);
+          fs.writeFileSync(path.join(mergeCleanRepo, 'base.txt'), 'base\n', 'utf8');
+          assert.strictEqual(spawnSync('git', ['add', '.'], { cwd: mergeCleanRepo, env: gitEnv }).status, 0);
+          assert.strictEqual(spawnSync('git', ['commit', '-m', 'base'], { cwd: mergeCleanRepo, env: gitEnv }).status, 0);
+          assert.strictEqual(spawnSync('git', ['push', '-u', 'origin', 'master'], { cwd: mergeCleanRepo, env: gitEnv }).status, 0);
+
+          assert.strictEqual(spawnSync('git', ['checkout', '-b', 'feat-mc'], { cwd: mergeCleanRepo, env: gitEnv }).status, 0);
+          const preExistingTok = ['ghp', 'K'.repeat(36)].join('_');
+          fs.writeFileSync(path.join(mergeCleanRepo, 'already-on-remote.js'), `const k = "${preExistingTok}";\n`, 'utf8');
+          assert.strictEqual(spawnSync('git', ['add', '.'], { cwd: mergeCleanRepo, env: gitEnv }).status, 0);
+          assert.strictEqual(spawnSync('git', ['commit', '-m', 'already pushed with REVIEWER_SKIP'], { cwd: mergeCleanRepo, env: gitEnv }).status, 0);
+          const alreadyPushedOid = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: mergeCleanRepo, env: gitEnv, encoding: 'utf8' }).stdout.trim();
+          assert.strictEqual(spawnSync('git', ['push', '-u', 'origin', 'feat-mc'], { cwd: mergeCleanRepo, env: gitEnv }).status, 0);
+
+          assert.strictEqual(spawnSync('git', ['checkout', 'master'], { cwd: mergeCleanRepo, env: gitEnv }).status, 0);
+          fs.writeFileSync(path.join(mergeCleanRepo, 'upstream.md'), 'clean upstream doc\n', 'utf8');
+          assert.strictEqual(spawnSync('git', ['add', '.'], { cwd: mergeCleanRepo, env: gitEnv }).status, 0);
+          assert.strictEqual(spawnSync('git', ['commit', '-m', 'clean upstream'], { cwd: mergeCleanRepo, env: gitEnv }).status, 0);
+          assert.strictEqual(spawnSync('git', ['push', 'origin', 'master'], { cwd: mergeCleanRepo, env: gitEnv }).status, 0);
+
+          assert.strictEqual(spawnSync('git', ['checkout', 'feat-mc'], { cwd: mergeCleanRepo, env: gitEnv }).status, 0);
+          assert.strictEqual(
+            spawnSync('git', ['merge', '--no-ff', '-m', 'Merge master into feat-mc', 'origin/master'], {
+              cwd: mergeCleanRepo,
+              env: gitEnv,
+            }).status,
+            0
+          );
+          const cleanMergeOid = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: mergeCleanRepo, env: gitEnv, encoding: 'utf8' }).stdout.trim();
+          const mcRanges = [];
+          const mcDiff = computePrePushDiff(mergeCleanRepo, {
+            remoteName: 'origin',
+            stdinText: `refs/heads/feat-mc ${cleanMergeOid} refs/heads/feat-mc ${alreadyPushedOid}\n`,
+            _commitRangesOut: mcRanges,
+          });
+          assert(mcDiff.includes('+clean upstream doc'));
+          assert.deepStrictEqual(
+            scanPrePushHistorySecrets(mergeCleanRepo, mcRanges, { env: gitEnv }),
+            [],
+            'Clean merge of origin/master must NOT falsely flag files already pushed on origin/feat-mc'
+          );
+
+          // 5. Workflow Trimurti webhook & Email subject with 6-deep nested <!channel>, @user, <script>, and & boundary
+          if (process.platform !== 'win32' && haveCmd('bash', '--version')) {
+            const fakeCurlDir = fs.mkdtempSync(path.join(advDir, 'curl-bin-'));
+            const capOutDir = fs.mkdtempSync(path.join(advDir, 'curl-cap-'));
+            fs.writeFileSync(
+              path.join(fakeCurlDir, 'curl'),
+              [
+                '#!/bin/bash',
+                'set -eu',
+                'cfg=""; data=""',
+                'while [ $# -gt 0 ]; do',
+                '  case "$1" in',
+                '    --config) cfg="$2"; shift 2 ;;',
+                '    --data-binary) data="${2#@}"; shift 2 ;;',
+                '    *) shift ;;',
+                '  esac',
+                'done',
+                'name="$(grep -o \'url = .*\' "$cfg" | head -1 | sed \'s#.*/##; s#"##g\')"',
+                `cp "$data" "${capOutDir}/$name.json"`,
+                '',
+              ].join('\n'),
+              { mode: 0o755 }
+            );
+            const deepHostile = '<<<<<<!x>!x>!x>!x>!x>!channel> @<<<<<!x>!x>!x>!x>!x>everyone @alice <script>alert(1)</script>';
+            const boundaryTitle = `${'A'.repeat(78)}&B`;
+            const notifyScript5k = extractYamlRunBlock(workflowText, 'Send Notifications');
+            const wfRun5k = spawnSync('bash', ['-c', notifyScript5k], {
+              encoding: 'utf8',
+              env: {
+                PATH: `${fakeCurlDir}:${path.dirname(process.execPath)}:/usr/bin:/bin`,
+                HOME: advDir,
+                TRIMURTI_WEBHOOK_URL: 'https://hooks.invalid/trimurti',
+                SLACK_WEBHOOK_URL: 'https://hooks.invalid/slack',
+                EMAIL_API_KEY: 'sg-key',
+                SENDGRID_API_URL: 'https://hooks.invalid/send',
+                PR_NUMBER: '42',
+                PR_TITLE: boundaryTitle,
+                REPO_FULL_NAME: 'kapoorgalleries/metaplex',
+                REVIEW_VERDICT: 'REQUEST_CHANGES',
+                REVIEW_SUMMARY: deepHostile,
+                REVIEW_ISSUES_JSON: JSON.stringify([{ file: 'src/a.js', line: 1, message: deepHostile }]),
+              },
+            });
+            assert.strictEqual(wfRun5k.status, 0, wfRun5k.stderr);
+            const trimJson5k = JSON.parse(fs.readFileSync(path.join(capOutDir, 'trimurti.json'), 'utf8'));
+            assert(!/<!channel>|@everyone|@alice|<script>/.test(JSON.stringify(trimJson5k)), 'Trimurti webhook must strip 6-deep mentions, @user, and raw <script>');
+            assert(trimJson5k.summary.includes('&lt;script&gt;'));
+            const sendJson5k = JSON.parse(fs.readFileSync(path.join(capOutDir, 'send.json'), 'utf8'));
+            assert(
+              sendJson5k.subject.endsWith('AA&amp;B'),
+              `Email subject must slice before HTML entity escaping (never cutting &amp; into &a), got: ${sendJson5k.subject}`
+            );
           }
         }
 

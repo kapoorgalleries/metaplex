@@ -30,18 +30,43 @@ const tty = require('tty');
 const { spawnSync } = require('child_process');
 
 const {
+  REVIEW_LOCK_TIMEOUT_CODE,
   assertAllowedReviewerModel,
   assertSafeOutputTarget,
+  classifyReviewerUnavailable,
   resolveEffectiveTimeoutMs,
+  resolveEffectiveTotalTimeoutMs,
+  resolveMaxReviewChunks,
   runReview,
+  sanitizeLogText,
+  staticSecurityReview,
   withOutputLock,
 } = require('./reviewer');
 
 const MANAGED_HOOK_MARKER = '# Managed by scripts/pre-push-review.js';
+const PINNED_DIR_NAME = '.trimurti-review';
+const PINNED_SCRIPT_NAMES = Object.freeze(['pre-push-review.js', 'reviewer.js']);
 const GIT_MAX_BUFFER = 64 * 1024 * 1024;
 const MAX_TIMEOUT_MS = 2147483647;
 const HEX_OID_RE = /^[0-9a-f]{40,64}$/i;
 const ZERO_OID_RE = /^0+$/;
+
+function isTruthyEnvFlag(env, name) {
+  const raw = env && typeof env[name] === 'string' ? env[name].trim().toLowerCase() : '';
+  return raw === '1' || raw === 'true' || raw === 'yes' || raw === 'on';
+}
+
+function resolveDefaultFallbackRepoRoot(scriptDir = __dirname) {
+  if (path.basename(scriptDir) === PINNED_DIR_NAME) {
+    const hooksDir = path.dirname(scriptDir);
+    const maybeGitDir = path.dirname(hooksDir);
+    if (path.basename(hooksDir) === 'hooks' && path.basename(maybeGitDir) === '.git') {
+      return path.dirname(maybeGitDir);
+    }
+    return null;
+  }
+  return path.resolve(scriptDir, '..');
+}
 
 function parsePositiveSafeInt(raw, label, maxValue = Number.MAX_SAFE_INTEGER) {
   const str = String(raw ?? '');
@@ -61,6 +86,15 @@ function defaultReviewDir(env = process.env, platform = process.platform) {
   }
   if (platform === 'win32') {
     return path.join(os.tmpdir(), 'gemini');
+  }
+  if (typeof process.getuid === 'function') {
+    const myUid = process.getuid();
+    try {
+      const st = fs.lstatSync('/tmp/gemini');
+      if (st.isSymbolicLink() || (st.uid !== myUid && st.uid !== 0)) {
+        return `/tmp/gemini-${myUid}`;
+      }
+    } catch (_) {}
   }
   return '/tmp/gemini';
 }
@@ -102,7 +136,7 @@ function parsePrePushArgs(argv = process.argv.slice(2)) {
     }
     if (!endOfOptions && (arg === '--range' || arg.startsWith('--range='))) {
       const val = arg === '--range' ? argv[++i] : arg.slice('--range='.length);
-      if (!val || val.startsWith('-')) {
+      if (!val || val.startsWith('-') || val.startsWith('^') || /[\s\0]/.test(val)) {
         throw new Error('Invalid or missing revision range for --range');
       }
       range = val;
@@ -225,6 +259,25 @@ function resolveRepoRoot(cwd = process.cwd(), fallbackDir = null, options = {}) 
   throw new Error(`Not inside a git repository: ${cwd}`);
 }
 
+function resolveLinkedWorktreeRootFromGitDir(gitDir) {
+  try {
+    const gitdirLinkFile = path.join(gitDir, 'gitdir');
+    const lst = fs.lstatSync(gitdirLinkFile);
+    if (!lst.isFile() || lst.isSymbolicLink() || lst.size <= 0 || lst.size > 4096) {
+      return null;
+    }
+    const rawTarget = fs.readFileSync(gitdirLinkFile, 'utf8').trim();
+    if (!rawTarget || rawTarget.includes('\0')) return null;
+    const resolvedDotGit = path.resolve(gitDir, rawTarget);
+    const wtRoot = path.dirname(resolvedDotGit);
+    const wtStat = fs.existsSync(wtRoot) ? fs.lstatSync(wtRoot) : null;
+    if (wtStat && wtStat.isDirectory() && !wtStat.isSymbolicLink()) {
+      return wtRoot;
+    }
+  } catch (_) {}
+  return null;
+}
+
 function resolveTargetGitContext(explicitRepoRoot, fallbackRepoRoot = null, env = process.env) {
   if (explicitRepoRoot) {
     return {
@@ -266,22 +319,30 @@ function resolveTargetGitContext(explicitRepoRoot, fallbackRepoRoot = null, env 
       }
       return { repoRoot: workTree, gitDir, workTree };
     }
+    // Never call `git rev-parse --show-toplevel` when GIT_DIR is set without GIT_WORK_TREE:
+    // Git echoes `baseCwd` ($PWD), which may be an unrelated or untrusted directory.
+    const linkedWtRoot = resolveLinkedWorktreeRootFromGitDir(gitDir);
+    if (linkedWtRoot) {
+      return { repoRoot: linkedWtRoot, gitDir, workTree: null };
+    }
     if (path.basename(gitDir) === '.git' && fs.existsSync(path.dirname(gitDir))) {
       return { repoRoot: path.dirname(gitDir), gitDir, workTree: null };
     }
-    const topRes = spawnSync('git', ['rev-parse', '--show-toplevel'], {
-      cwd: baseCwd,
+    const commonRes = spawnSync('git', ['rev-parse', '--git-common-dir'], {
+      cwd: gitDir,
       env: probeEnv,
       encoding: 'utf8',
       maxBuffer: GIT_MAX_BUFFER,
       windowsHide: true,
     });
-    const topDir =
-      !topRes.error && topRes.status === 0 && topRes.stdout.trim()
-        ? path.resolve(baseCwd, topRes.stdout.trim())
-        : baseCwd;
+    if (!commonRes.error && commonRes.status === 0 && commonRes.stdout.trim()) {
+      const commonDir = path.resolve(gitDir, commonRes.stdout.trim());
+      if (path.basename(commonDir) === '.git' && fs.existsSync(path.dirname(commonDir))) {
+        return { repoRoot: path.dirname(commonDir), gitDir, workTree: null };
+      }
+    }
     return {
-      repoRoot: fs.existsSync(topDir) ? topDir : os.tmpdir(),
+      repoRoot: fs.existsSync(gitDir) ? gitDir : os.tmpdir(),
       gitDir,
       workTree: null,
     };
@@ -498,7 +559,13 @@ function computePrePushDiff(repoRoot, options = {}) {
   };
 
   if (options.range) {
-    if (options.range.startsWith('-')) {
+    if (
+      typeof options.range !== 'string' ||
+      options.range.trim() === '' ||
+      options.range.startsWith('-') ||
+      options.range.startsWith('^') ||
+      /[\s\0]/.test(options.range)
+    ) {
       throw new Error(`Invalid revision range "${options.range}"`);
     }
     const diffRes = runGit(
@@ -612,6 +679,8 @@ function computePrePushDiff(repoRoot, options = {}) {
       : null;
 
     let fromOid = null;
+    let isFastForward = false;
+    let rangeDefaultBase = null;
     if (remoteCommit) {
       if (remoteCommit === localCommit) {
         continue;
@@ -619,6 +688,22 @@ function computePrePushDiff(repoRoot, options = {}) {
       if (isAncestor(repoRoot, remoteCommit, localCommit, gitOptions)) {
         // Fast-forward push: review strictly the newly pushed commits.
         fromOid = remoteCommit;
+        isFastForward = true;
+        if (
+          update.remoteRef !== 'refs/heads/master' &&
+          update.remoteRef !== 'refs/heads/main'
+        ) {
+          rangeDefaultBase = resolveDefaultBaseCommit(
+            repoRoot,
+            remoteName,
+            {
+              localRef: update.localRef,
+              remoteRef: update.remoteRef,
+              allowLocalHeads: false,
+            },
+            gitOptions
+          );
+        }
       } else {
         // Non-fast-forward force-push (rebase, amend, ancestor rewind, or orphan rewrite):
         // prefer merge-base against the remote's default branch so rebased PR branches
@@ -634,6 +719,7 @@ function computePrePushDiff(repoRoot, options = {}) {
           },
           gitOptions
         );
+        rangeDefaultBase = defaultBase;
         const mbDefault = defaultBase
           ? getMergeBase(repoRoot, defaultBase, localCommit, gitOptions)
           : null;
@@ -656,6 +742,7 @@ function computePrePushDiff(repoRoot, options = {}) {
         },
         gitOptions
       );
+      rangeDefaultBase = defaultBase;
       if (defaultBase) {
         const mb = getMergeBase(repoRoot, defaultBase, localCommit, gitOptions);
         if (mb) {
@@ -687,6 +774,16 @@ function computePrePushDiff(repoRoot, options = {}) {
     }
     seenPairs.add(pairKey);
 
+    if (Array.isArray(options._commitRangesOut)) {
+      options._commitRangesOut.push({
+        fromOid,
+        localCommit,
+        isFromEmptyTree: Boolean(emptyTreeOid && fromOid === emptyTreeOid),
+        isFastForward,
+        defaultBase: rangeDefaultBase,
+      });
+    }
+
     const diffRes = runGit(
       repoRoot,
       ['diff', '--no-ext-diff', '--no-color', fromOid, localCommit, '--'],
@@ -703,6 +800,62 @@ function computePrePushDiff(repoRoot, options = {}) {
   }
 
   return chunks.map((c) => (c.endsWith('\n') ? c : `${c}\n`)).join('');
+}
+
+function scanPrePushHistorySecrets(repoRoot, commitRanges = [], gitOptions = {}) {
+  if (!Array.isArray(commitRanges) || commitRanges.length === 0) {
+    return [];
+  }
+  const found = [];
+  const seen = new Set();
+
+  for (const range of commitRanges) {
+    if (!range || !range.localCommit) continue;
+    const revLabel = range.isFromEmptyTree
+      ? range.localCommit
+      : `${range.fromOid}..${range.localCommit}`;
+    const logArgs = ['log', '--cc', '--no-ext-diff', '--no-color', '--format=', '-p'];
+    if (range.isFromEmptyTree) {
+      logArgs.push(range.localCommit, '--');
+    } else {
+      const notRevs = [range.fromOid];
+      if (
+        range.isFastForward &&
+        range.defaultBase &&
+        range.defaultBase !== range.localCommit &&
+        range.defaultBase !== range.fromOid
+      ) {
+        notRevs.push(range.defaultBase);
+      }
+      logArgs.push(range.localCommit, '--not', ...notRevs, '--');
+    }
+    const logRes = runGit(repoRoot, logArgs, gitOptions);
+    if (logRes.status !== 0) {
+      throw new Error(
+        `git log secret scan failed for ${revLabel}: ${(logRes.stderr || '').trim()}`
+      );
+    }
+    if (!logRes.stdout || logRes.stdout.trim() === '') {
+      continue;
+    }
+    const historyStatic = staticSecurityReview(logRes.stdout);
+    for (const issue of historyStatic.issues || []) {
+      if (!issue || typeof issue.message !== 'string') continue;
+      // Resolved merge conflict markers in intermediate commits do not leak secrets if
+      // the pushed tip tree is clean; credentials/keys in intermediate commits DO leak.
+      if (issue.message.includes('merge conflict marker')) continue;
+      const key = `${issue.file}:${issue.line || 1}:${issue.message}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        found.push({
+          file: issue.file,
+          line: issue.line || 1,
+          message: issue.message,
+        });
+      }
+    }
+  }
+  return found;
 }
 
 function prepareSecureReviewDir(workDir) {
@@ -730,26 +883,97 @@ function prepareSecureReviewDir(workDir) {
 function buildHookScript() {
   return [
     '#!/bin/sh',
-    `${MANAGED_HOOK_MARKER} — Trimurti local pre-push AI review gate.`,
+    `${MANAGED_HOOK_MARKER} - Trimurti local pre-push AI review gate.`,
     'set -eu',
+    '',
+    'warn_allow() {',
+    '  echo "Trimurti pre-push AI review SKIPPED, push allowed: $1" >&2',
+    '  exit 0',
+    '}',
+    '',
+    'fail_or_warn() {',
+    '  case "${REVIEWER_FAIL_CLOSED:-}" in',
+    '    1|true|TRUE|True|yes|YES|Yes|on|ON|On)',
+    '      echo "Trimurti pre-push AI review failed closed: $1" >&2',
+    '      exit 1',
+    '      ;;',
+    '  esac',
+    '  warn_allow "$1"',
+    '}',
+    '',
+    'case "${REVIEWER_SKIP:-}" in',
+    '  1|true|TRUE|True|yes|YES|Yes|on|ON|On) warn_allow "REVIEWER_SKIP is set." ;;',
+    'esac',
+    '',
+    'HOOK_DIR="$(cd "$(dirname "$0")" 2>/dev/null && pwd -P || dirname "$0")"',
+    `PINNED_DIR="$HOOK_DIR/${PINNED_DIR_NAME}"`,
     '',
     'HOOK_GIT_DIR="$(git rev-parse --git-dir 2>/dev/null || true)"',
     'if [ -n "$HOOK_GIT_DIR" ] && [ -d "$HOOK_GIT_DIR" ]; then',
     '  HOOK_GIT_DIR="$(cd "$HOOK_GIT_DIR" 2>/dev/null && pwd || printf \'%s\' "$HOOK_GIT_DIR")"',
     'fi',
+    'HOOK_COMMON_DIR="$(git rev-parse --git-common-dir 2>/dev/null || true)"',
+    'if [ -n "$HOOK_COMMON_DIR" ] && [ -d "$HOOK_COMMON_DIR" ]; then',
+    '  HOOK_COMMON_DIR="$(cd "$HOOK_COMMON_DIR" 2>/dev/null && pwd || printf \'%s\' "$HOOK_COMMON_DIR")"',
+    'fi',
+    'HOOK_WORK_TREE=""',
+    'if [ -n "${GIT_WORK_TREE:-}" ] && [ -d "$GIT_WORK_TREE" ]; then',
+    '  HOOK_WORK_TREE="$(cd "$GIT_WORK_TREE" 2>/dev/null && pwd -P || printf \'%s\' "$GIT_WORK_TREE")"',
+    'fi',
     '',
-    'REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"',
-    'if [ -z "${GIT_WORK_TREE:-}" ] && [ -n "${GIT_DIR:-}" ] && [ -n "$HOOK_GIT_DIR" ]; then',
-    '  if [ "$(basename "$HOOK_GIT_DIR")" = ".git" ]; then',
-    '    CAND_ROOT="$(dirname "$HOOK_GIT_DIR")"',
-    '    if [ -d "$CAND_ROOT" ] && [ -f "$CAND_ROOT/scripts/pre-push-review.js" ]; then',
-    '      REPO_ROOT="$CAND_ROOT"',
+    'REPO_ROOT=""',
+    'if [ -z "${GIT_DIR:-}" ] && [ -z "${GIT_WORK_TREE:-}" ]; then',
+    '  REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"',
+    'else',
+    '  if [ -n "$HOOK_GIT_DIR" ] && [ -f "$HOOK_GIT_DIR/gitdir" ] && [ ! -L "$HOOK_GIT_DIR/gitdir" ]; then',
+    '    WT_DOTGIT="$(tr -d \'\\r\\n\' < "$HOOK_GIT_DIR/gitdir" 2>/dev/null || true)"',
+    '    if [ -n "$WT_DOTGIT" ]; then',
+    '      case "$WT_DOTGIT" in',
+    '        /*|[A-Za-z]:/*|[A-Za-z]:\\\\*) WT_CAND="$(dirname "$WT_DOTGIT")" ;;',
+    '        *)  WT_CAND="$(dirname "$HOOK_GIT_DIR/$WT_DOTGIT")" ;;',
+    '      esac',
+    '      if [ -d "$WT_CAND" ] && [ ! -L "$WT_CAND" ]; then',
+    '        REPO_ROOT="$(cd "$WT_CAND" 2>/dev/null && pwd -P || true)"',
+    '      fi',
     '    fi',
     '  fi',
+    '  if [ -z "$REPO_ROOT" ] && [ -n "$HOOK_GIT_DIR" ] && [ "$(basename "$HOOK_GIT_DIR")" = ".git" ]; then',
+    '    CAND_ROOT="$(dirname "$HOOK_GIT_DIR")"',
+    '    if [ -d "$CAND_ROOT" ] && [ ! -L "$CAND_ROOT" ]; then',
+    '      REPO_ROOT="$(cd "$CAND_ROOT" 2>/dev/null && pwd -P || true)"',
+    '    fi',
+    '  fi',
+    '  if [ -z "$REPO_ROOT" ] && [ -n "$HOOK_COMMON_DIR" ] && [ "$(basename "$HOOK_COMMON_DIR")" = ".git" ]; then',
+    '    COMMON_ROOT="$(dirname "$HOOK_COMMON_DIR")"',
+    '    if [ -d "$COMMON_ROOT" ] && [ ! -L "$COMMON_ROOT" ]; then',
+    '      REPO_ROOT="$(cd "$COMMON_ROOT" 2>/dev/null && pwd -P || true)"',
+    '    fi',
+    '  fi',
+    '  if [ -z "$REPO_ROOT" ] && [ -n "$HOOK_GIT_DIR" ]; then',
+    '    CFG_WT="$(git --git-dir="$HOOK_GIT_DIR" config --get core.worktree 2>/dev/null || true)"',
+    '    if [ -n "$CFG_WT" ]; then',
+    '      case "$CFG_WT" in',
+    '        /*|[A-Za-z]:/*|[A-Za-z]:\\\\*) CFG_CAND="$CFG_WT" ;;',
+    '        *)  CFG_CAND="$HOOK_GIT_DIR/$CFG_WT" ;;',
+    '      esac',
+    '      if [ -d "$CFG_CAND" ] && [ ! -L "$CFG_CAND" ]; then',
+    '        REPO_ROOT="$(cd "$CFG_CAND" 2>/dev/null && pwd -P || true)"',
+    '      fi',
+    '    fi',
+    '  fi',
+    '  if [ -z "$REPO_ROOT" ] && [ -n "$HOOK_WORK_TREE" ]; then',
+    '    REPO_ROOT="$HOOK_WORK_TREE"',
+    '  fi',
     'fi',
-    'if [ -z "$REPO_ROOT" ] || [ ! -f "$REPO_ROOT/scripts/pre-push-review.js" ]; then',
-    '  echo "Trimurti pre-push AI review failed closed: scripts/pre-push-review.js not found." >&2',
-    '  exit 1',
+    '',
+    'SCRIPT=""',
+    'if [ ! -L "$PINNED_DIR" ] && [ -f "$PINNED_DIR/pre-push-review.js" ] && [ ! -L "$PINNED_DIR/pre-push-review.js" ] && [ -f "$PINNED_DIR/reviewer.js" ] && [ ! -L "$PINNED_DIR/reviewer.js" ]; then',
+    '  SCRIPT="$PINNED_DIR/pre-push-review.js"',
+    'elif [ -n "$REPO_ROOT" ] && [ ! -L "$REPO_ROOT" ] && [ -f "$REPO_ROOT/scripts/pre-push-review.js" ] && [ ! -L "$REPO_ROOT/scripts/pre-push-review.js" ] && [ -f "$REPO_ROOT/scripts/reviewer.js" ] && [ ! -L "$REPO_ROOT/scripts/reviewer.js" ]; then',
+    '  echo "Trimurti pre-push AI review: pinned copy missing; using checkout scripts. Re-run: node scripts/pre-push-review.js --install-hook" >&2',
+    '  SCRIPT="$REPO_ROOT/scripts/pre-push-review.js"',
+    'else',
+    '  fail_or_warn "reviewer scripts not found (branch predates them or pinned scripts missing)."',
     'fi',
     '',
     'NODE_BIN=""',
@@ -758,7 +982,7 @@ function buildHookScript() {
     'else',
     '  NVM_BASE="${NVM_DIR:-$HOME/.nvm}/versions/node"',
     '  if [ -d "$NVM_BASE" ]; then',
-    '    if [ -f "$REPO_ROOT/.node-version" ]; then',
+    '    if [ -n "$REPO_ROOT" ] && [ -f "$REPO_ROOT/.node-version" ] && [ ! -L "$REPO_ROOT/.node-version" ]; then',
     '      WANT_VER="$(tr -d \'[:space:]\' < "$REPO_ROOT/.node-version")"',
     '      WANT_VER="${WANT_VER#v}"',
     '      WANT_VER="${WANT_VER#V}"',
@@ -798,21 +1022,78 @@ function buildHookScript() {
     'fi',
     '',
     'if [ -z "$NODE_BIN" ]; then',
-    '  echo "Trimurti pre-push AI review failed closed: node executable not found in PATH or NVM." >&2',
-    '  exit 1',
+    '  fail_or_warn "node executable not found in PATH or NVM."',
     'fi',
     '',
     'if [ -n "${GIT_DIR:-}" ] && [ -n "$HOOK_GIT_DIR" ]; then',
     '  export GIT_DIR="$HOOK_GIT_DIR"',
     'fi',
-    'if [ -n "${GIT_WORK_TREE:-}" ] && [ -d "$REPO_ROOT" ]; then',
-    '  export GIT_WORK_TREE="$REPO_ROOT"',
+    'if [ -n "${GIT_WORK_TREE:-}" ] && [ -n "$HOOK_WORK_TREE" ]; then',
+    '  export GIT_WORK_TREE="$HOOK_WORK_TREE"',
     'fi',
     'export PATH="$(dirname "$NODE_BIN"):$PATH"',
-    'cd "$REPO_ROOT"',
-    'exec "$NODE_BIN" "$REPO_ROOT/scripts/pre-push-review.js" "$@"',
+    'if [ -z "${GIT_DIR:-}" ] && [ -z "${GIT_WORK_TREE:-}" ] && [ -n "$REPO_ROOT" ] && [ -d "$REPO_ROOT" ] && [ ! -L "$REPO_ROOT" ]; then',
+    '  cd "$REPO_ROOT"',
+    'fi',
+    'exec "$NODE_BIN" "$SCRIPT" "$@"',
     '',
   ].join('\n');
+}
+
+function writePinnedFileAtomically(targetPath, content, mode) {
+  const tmpPath = path.join(
+    path.dirname(targetPath),
+    `.${path.basename(targetPath)}.${process.pid}.${crypto.randomBytes(4).toString('hex')}.tmp`
+  );
+  try {
+    if (fs.existsSync(targetPath)) {
+      try {
+        fs.chmodSync(targetPath, 0o600);
+      } catch (_) {}
+    }
+    fs.writeFileSync(tmpPath, content, { mode });
+    if (process.platform !== 'win32') {
+      fs.chmodSync(tmpPath, mode);
+    }
+    fs.renameSync(tmpPath, targetPath);
+  } catch (err) {
+    try {
+      if (fs.existsSync(tmpPath)) {
+        fs.unlinkSync(tmpPath);
+      }
+    } catch (_) {}
+    throw err;
+  }
+}
+
+function installPinnedScripts(hooksDir, sourceDir = __dirname) {
+  const pinnedDir = path.join(hooksDir, PINNED_DIR_NAME);
+  if (fs.existsSync(pinnedDir) && fs.lstatSync(pinnedDir).isSymbolicLink()) {
+    throw new Error(`Refusing symlinked pinned reviewer directory: ${pinnedDir}`);
+  }
+  const contents = PINNED_SCRIPT_NAMES.map((name) => {
+    const src = path.join(sourceDir, name);
+    const st = fs.lstatSync(src);
+    if (st.isSymbolicLink() || !st.isFile()) {
+      throw new Error(`Refusing to pin non-regular reviewer script: ${src}`);
+    }
+    return [name, fs.readFileSync(src)];
+  });
+  fs.mkdirSync(pinnedDir, { recursive: true, mode: 0o700 });
+  if (process.platform !== 'win32') {
+    try {
+      fs.chmodSync(pinnedDir, 0o700);
+    } catch (_) {}
+  }
+  const fileMode = process.platform === 'win32' ? 0o600 : 0o444;
+  for (const [name, buf] of contents) {
+    const dst = path.join(pinnedDir, name);
+    if (fs.existsSync(dst) && fs.lstatSync(dst).isSymbolicLink()) {
+      throw new Error(`Refusing symlinked pinned reviewer script: ${dst}`);
+    }
+    writePinnedFileAtomically(dst, buf, fileMode);
+  }
+  return pinnedDir;
 }
 
 function installPrePushHook(repoRoot, options = {}) {
@@ -858,6 +1139,8 @@ function installPrePushHook(repoRoot, options = {}) {
     }
   }
 
+  const pinnedDir = installPinnedScripts(hooksDir, options.sourceDir || __dirname);
+
   const tmpHook = path.join(
     hooksDir,
     `.pre-push.${process.pid}.${crypto.randomBytes(4).toString('hex')}.tmp`
@@ -868,7 +1151,7 @@ function installPrePushHook(repoRoot, options = {}) {
   }
   fs.renameSync(tmpHook, hookPath);
 
-  return { hookPath, backupPath };
+  return { hookPath, backupPath, pinnedDir };
 }
 
 function writeDiffAtomically(diffPath, diffContent) {
@@ -895,6 +1178,81 @@ function writeDiffAtomically(diffPath, diffContent) {
   }
 }
 
+function mergeHistorySecretIssues(baseResult, historySecretIssues = []) {
+  if (!Array.isArray(historySecretIssues) || historySecretIssues.length === 0) {
+    return baseResult;
+  }
+  const mergedIssues = Array.isArray(baseResult.issues) ? baseResult.issues.slice() : [];
+  let addedHistoryCount = 0;
+  for (const hIssue of historySecretIssues) {
+    const alreadyPresent = mergedIssues.some(
+      (existing) => existing.file === hIssue.file && existing.message === hIssue.message
+    );
+    if (!alreadyPresent) {
+      mergedIssues.push({
+        file: hIssue.file,
+        line: hIssue.line,
+        message: `${hIssue.message} (in pushed commit history)`,
+      });
+      addedHistoryCount += 1;
+    }
+  }
+  const historyNote =
+    addedHistoryCount > 0
+      ? `Pre-push commit-history scan detected ${addedHistoryCount} credential/secret issue(s) in intermediate pushed commit(s).`
+      : '';
+  return {
+    verdict: 'REQUEST_CHANGES',
+    summary: historyNote ? `${baseResult.summary} ${historyNote}`.trim() : baseResult.summary,
+    issues: mergedIssues,
+  };
+}
+
+function failOpenResult({
+  diffContent,
+  historySecretIssues = [],
+  reason,
+  err,
+  diffPath,
+  outputPath,
+}) {
+  let floor = staticSecurityReview(diffContent);
+  floor = mergeHistorySecretIssues(floor, historySecretIssues);
+  const diffBytes = Buffer.byteLength(diffContent, 'utf8');
+  if (floor.verdict !== 'APPROVE') {
+    const blockedResult = {
+      verdict: floor.verdict,
+      summary: `${floor.summary} (reviewer unavailable: ${reason}; static security floor only)`,
+      issues: floor.issues,
+    };
+    if (outputPath) {
+      try {
+        writeDiffAtomically(outputPath, JSON.stringify(blockedResult, null, 2) + '\n');
+      } catch (_) {}
+    }
+    return {
+      exitCode: 1,
+      verdict: blockedResult.verdict,
+      summary: blockedResult.summary,
+      issues: blockedResult.issues,
+      diffBytes,
+      diffPath,
+      outputPath,
+    };
+  }
+  const errMsg = err && err.message ? err.message : String(err || reason);
+  return {
+    exitCode: 0,
+    verdict: 'SKIPPED',
+    summary: `reviewer unavailable (${reason}): ${sanitizeLogText(errMsg, 400)}`,
+    issues: [],
+    unavailableReason: reason,
+    diffBytes,
+    diffPath,
+    outputPath,
+  };
+}
+
 async function runPrePushReview(options = {}) {
   const env = options.env || process.env;
   const targetCtx = resolveTargetGitContext(
@@ -916,50 +1274,147 @@ async function runPrePushReview(options = {}) {
     path.join(workDir, 'pre-push-review_result.json');
   const pipelineLockTarget = path.join(workDir, '.pre-push-pipeline');
   const effectiveTimeoutMs = resolveEffectiveTimeoutMs(options.timeoutMs, env);
-  const pipelineLockTimeoutMs = Math.max(420000, effectiveTimeoutMs + 60000);
-
-  return withOutputLock(
-    pipelineLockTarget,
-    async () => {
-      for (const artifactPath of [diffPath, outputPath]) {
-        assertSafeOutputTarget(artifactPath);
-      }
-
-      const diffContent = computePrePushDiff(repoRoot, {
-        remoteName: options.remoteName,
-        stdinText: options.stdinText,
-        range: options.range,
-        env,
-        gitDir: targetCtx.gitDir,
-        workTree: targetCtx.workTree,
-      });
-
-      writeDiffAtomically(diffPath, diffContent);
-
-      const result = await runReview({
-        diffPath,
-        outputPath,
-        models: options.models,
-        timeoutMs: effectiveTimeoutMs,
-        maxDiffChars: options.maxDiffChars,
-        allowWslInterop: options.allowWslInterop,
-        agyBin: options.agyBin,
-        settingsPaths: options.settingsPaths,
-        env,
-      });
-
-      return {
-        exitCode: result.verdict === 'APPROVE' ? 0 : 1,
-        verdict: result.verdict,
-        summary: result.summary,
-        issues: result.issues,
-        diffBytes: Buffer.byteLength(diffContent, 'utf8'),
-        diffPath,
-        outputPath,
-      };
-    },
-    pipelineLockTimeoutMs
+  const maxChunks = resolveMaxReviewChunks(options, env);
+  const MAX_HOOK_LOCK_WAIT_MS = 420000;
+  const scaledTotalTimeoutMs = resolveEffectiveTotalTimeoutMs(
+    options,
+    env,
+    maxChunks,
+    effectiveTimeoutMs
   );
+  const defaultLockWaitMs = Math.min(
+    MAX_TIMEOUT_MS,
+    Math.max(MAX_HOOK_LOCK_WAIT_MS, scaledTotalTimeoutMs + 60000)
+  );
+  const pipelineLockTimeoutMs =
+    Number.isFinite(options.lockWaitMs) && options.lockWaitMs > 0
+      ? options.lockWaitMs
+      : options.failOpen
+        ? Math.min(defaultLockWaitMs, MAX_HOOK_LOCK_WAIT_MS)
+        : defaultLockWaitMs;
+
+  const computeDiffAndHistorySecrets = () => {
+    const commitRanges = [];
+    const diffContent = computePrePushDiff(repoRoot, {
+      remoteName: options.remoteName,
+      stdinText: options.stdinText,
+      range: options.range,
+      env,
+      gitDir: targetCtx.gitDir,
+      workTree: targetCtx.workTree,
+      _commitRangesOut: commitRanges,
+    });
+    const historySecretIssues = scanPrePushHistorySecrets(repoRoot, commitRanges, {
+      env,
+      gitDir: targetCtx.gitDir,
+      workTree: targetCtx.workTree,
+    });
+    return { diffContent, historySecretIssues };
+  };
+
+  const runLocked = () =>
+    withOutputLock(
+      pipelineLockTarget,
+      async () => {
+        for (const artifactPath of [diffPath, outputPath]) {
+          assertSafeOutputTarget(artifactPath);
+        }
+
+        const { diffContent, historySecretIssues } = computeDiffAndHistorySecrets();
+        writeDiffAtomically(diffPath, diffContent);
+
+        if (options.offline) {
+          let floor = staticSecurityReview(diffContent);
+          floor = mergeHistorySecretIssues(floor, historySecretIssues);
+          const diffBytes = Buffer.byteLength(diffContent, 'utf8');
+          if (floor.verdict !== 'APPROVE') {
+            writeDiffAtomically(outputPath, JSON.stringify(floor, null, 2) + '\n');
+            return {
+              exitCode: 1,
+              verdict: floor.verdict,
+              summary: floor.summary,
+              issues: floor.issues,
+              diffBytes,
+              diffPath,
+              outputPath,
+            };
+          }
+          return {
+            exitCode: 0,
+            verdict: 'SKIPPED',
+            summary: 'REVIEWER_OFFLINE is set (agy not contacted).',
+            issues: [],
+            unavailableReason: 'offline',
+            diffBytes,
+            diffPath,
+            outputPath,
+          };
+        }
+
+        let result;
+        try {
+          result = await runReview({
+            diffPath,
+            outputPath,
+            models: options.models,
+            timeoutMs: effectiveTimeoutMs,
+            lockTimeoutMs: options.lockWaitMs,
+            maxDiffChars: options.maxDiffChars,
+            maxChunks: options.maxChunks,
+            allowWslInterop: options.allowWslInterop,
+            agyBin: options.agyBin,
+            settingsPaths: options.settingsPaths,
+            env,
+          });
+        } catch (err) {
+          const reason = options.failOpen ? classifyReviewerUnavailable(err) : null;
+          if (!reason) {
+            throw err;
+          }
+          return failOpenResult({
+            diffContent,
+            historySecretIssues,
+            reason,
+            err,
+            diffPath,
+            outputPath,
+          });
+        }
+
+        if (historySecretIssues.length > 0) {
+          result = mergeHistorySecretIssues(result, historySecretIssues);
+          writeDiffAtomically(outputPath, JSON.stringify(result, null, 2) + '\n');
+        }
+
+        return {
+          exitCode: result.verdict === 'APPROVE' ? 0 : 1,
+          verdict: result.verdict,
+          summary: result.summary,
+          issues: result.issues,
+          diffBytes: Buffer.byteLength(diffContent, 'utf8'),
+          diffPath,
+          outputPath,
+        };
+      },
+      pipelineLockTimeoutMs
+    );
+
+  try {
+    return await runLocked();
+  } catch (err) {
+    if (!options.failOpen || !err || err.code !== REVIEW_LOCK_TIMEOUT_CODE) {
+      throw err;
+    }
+    const { diffContent, historySecretIssues } = computeDiffAndHistorySecrets();
+    return failOpenResult({
+      diffContent,
+      historySecretIssues,
+      reason: 'lock-timeout',
+      err,
+      diffPath,
+      outputPath,
+    });
+  }
 }
 
 const MAX_STDIN_BYTES = 16 * 1024 * 1024;
@@ -1187,18 +1642,19 @@ async function runCli(argv = process.argv.slice(2), env = process.env, io = {}) 
   }
 
   const explicitRepoRoot = io.repoRoot || undefined;
-  const fallbackRepoRoot = explicitRepoRoot ? null : path.resolve(__dirname, '..');
+  const fallbackRepoRoot = explicitRepoRoot ? null : resolveDefaultFallbackRepoRoot(__dirname);
 
   if (opts.installHook) {
     try {
       const targetCtx = resolveTargetGitContext(explicitRepoRoot, fallbackRepoRoot, env);
-      const { hookPath, backupPath } = installPrePushHook(targetCtx.repoRoot, {
+      const { hookPath, backupPath, pinnedDir } = installPrePushHook(targetCtx.repoRoot, {
         force: opts.force,
         env,
         gitDir: targetCtx.gitDir,
         workTree: targetCtx.workTree,
       });
       console.log(`Installed Trimurti pre-push AI review hook at ${hookPath}`);
+      console.log(`Pinned reviewer scripts at ${pinnedDir} (re-run --install-hook to update them)`);
       if (backupPath) {
         console.log(`Backed up previous pre-push hook to ${backupPath}`);
       }
@@ -1207,6 +1663,11 @@ async function runCli(argv = process.argv.slice(2), env = process.env, io = {}) 
       console.error(`Error installing pre-push hook: ${err.message}`);
       return 1;
     }
+  }
+
+  if (isTruthyEnvFlag(env, 'REVIEWER_SKIP')) {
+    console.error('[Trimurti Pre-Push Review] SKIPPED, push allowed: REVIEWER_SKIP is set.');
+    return 0;
   }
 
   const isTty =
@@ -1236,7 +1697,7 @@ async function runCli(argv = process.argv.slice(2), env = process.env, io = {}) 
       );
     } catch (err) {
       console.error(
-        `[Trimurti Pre-Push Review] ERROR (fail-closed): Failed to read pre-push stdin: ${err.message}`
+        `[Trimurti Pre-Push Review] ERROR (fail-closed): Failed to read pre-push stdin: ${sanitizeLogText(err.message)}`
       );
       return 1;
     }
@@ -1253,6 +1714,12 @@ async function runCli(argv = process.argv.slice(2), env = process.env, io = {}) 
     stdinText = undefined;
   }
 
+  const isHookInvocation = !opts.range && stdinText !== undefined;
+  const offlineMode = isTruthyEnvFlag(env, 'REVIEWER_OFFLINE');
+  const failOpenMode =
+    isHookInvocation &&
+    !isTruthyEnvFlag(env, 'REVIEWER_FAIL_CLOSED');
+
   try {
     const res = await runPrePushReview({
       repoRoot: explicitRepoRoot,
@@ -1265,23 +1732,38 @@ async function runCli(argv = process.argv.slice(2), env = process.env, io = {}) 
       timeoutMs: opts.timeoutMs,
       maxDiffChars: opts.maxDiffChars,
       allowWslInterop: opts.allowWslInterop,
+      offline: offlineMode,
+      failOpen: failOpenMode,
       env,
     });
 
-    if (res.verdict === 'APPROVE') {
-      console.error(`[Trimurti Pre-Push Review] APPROVE: ${res.summary}`);
+    if (res.verdict === 'SKIPPED') {
+      if (res.unavailableReason === 'offline') {
+        console.error(
+          '[Trimurti Pre-Push Review] SKIPPED, push allowed: REVIEWER_OFFLINE is set (agy not contacted).'
+        );
+      } else {
+        console.error(
+          `[Trimurti Pre-Push Review] WARNING: push allowed without AI review, ${res.summary}. Set REVIEWER_FAIL_CLOSED=1 to block instead.`
+        );
+      }
       return 0;
     }
 
-    console.error(`[Trimurti Pre-Push Review] REQUEST_CHANGES: ${res.summary}`);
+    if (res.verdict === 'APPROVE') {
+      console.error(`[Trimurti Pre-Push Review] APPROVE: ${sanitizeLogText(res.summary)}`);
+      return 0;
+    }
+
+    console.error(`[Trimurti Pre-Push Review] REQUEST_CHANGES: ${sanitizeLogText(res.summary)}`);
     for (const issue of res.issues) {
       const loc = issue.line ? `${issue.file}:${issue.line}` : issue.file;
-      console.error(`  - ${loc}: ${issue.message}`);
+      console.error(`  - ${sanitizeLogText(loc)}: ${sanitizeLogText(issue.message)}`);
     }
     console.error(`Saved review verdict artifact: ${res.outputPath}`);
     return 1;
   } catch (err) {
-    console.error(`[Trimurti Pre-Push Review] ERROR (fail-closed): ${err.message}`);
+    console.error(`[Trimurti Pre-Push Review] ERROR (fail-closed): ${sanitizeLogText(err.message)}`);
     return 1;
   }
 }
@@ -1298,13 +1780,17 @@ if (require.main === module) {
 
 module.exports = {
   MANAGED_HOOK_MARKER,
+  PINNED_DIR_NAME,
   MAX_STDIN_BYTES,
   DEFAULT_STDIN_TIMEOUT_MS,
   MAX_TIMEOUT_MS,
   defaultReviewDir,
+  buildHookScript,
+  failOpenResult,
   parsePrePushArgs,
   parsePrePushStdin,
   computePrePushDiff,
+  scanPrePushHistorySecrets,
   installPrePushHook,
   runPrePushReview,
   resolveTargetGitContext,
