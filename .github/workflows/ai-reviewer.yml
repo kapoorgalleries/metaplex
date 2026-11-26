@@ -29,6 +29,7 @@ on:
 
 permissions:
   contents: read
+  pull-requests: read
 
 concurrency:
   group: ai-reviewer-${{ github.workflow }}-${{ inputs.pr_number || github.ref }}
@@ -41,7 +42,9 @@ jobs:
     # OAuth is explicitly authorized via repository variable `AI_REVIEWER_RUNS_ON`
     # (supports either a JSON array like `["self-hosted","linux","trimurti"]` or a single label).
     runs-on: ${{ (startsWith(vars.AI_REVIEWER_RUNS_ON, '[') && fromJSON(vars.AI_REVIEWER_RUNS_ON)) || vars.AI_REVIEWER_RUNS_ON || 'ubuntu-latest' }}
-    timeout-minutes: 12
+    # Sized above the 6-chunk review ceiling (40m reviewer deadline < 45m step timeout < 50m job timeout)
+    # so multi-chunk runs never cancel the job or skip record_verdict / notify_failure.
+    timeout-minutes: 50
     env:
       REVIEW_DIR: /tmp/gemini
     outputs:
@@ -145,12 +148,16 @@ jobs:
             local prefer_origin="${3:-1}"
 
             if [ -z "$candidate" ]; then
-              if git rev-parse --verify --quiet origin/main >/dev/null 2>&1; then
-                printf 'origin/main'
+              if git rev-parse --verify --quiet "refs/remotes/origin/HEAD^{commit}" >/dev/null 2>&1; then
+                printf 'refs/remotes/origin/HEAD'
                 return
               fi
               if git rev-parse --verify --quiet origin/master >/dev/null 2>&1; then
                 printf 'origin/master'
+                return
+              fi
+              if git rev-parse --verify --quiet origin/main >/dev/null 2>&1; then
+                printf 'origin/main'
                 return
               fi
               if git fetch --no-tags origin "+refs/heads/master:refs/remotes/origin/master" >/dev/null 2>&1 && \
@@ -168,7 +175,7 @@ jobs:
             fi
 
             case "$candidate" in
-              -*|*..*|*[[:space:]]*|*:*|*\\*)
+              -*|^*|*..*|*[[:space:]]*|*:*|*\\*)
                 echo "::error::Invalid ${role} value: $candidate" >&2
                 exit 1
                 ;;
@@ -252,7 +259,10 @@ jobs:
       # --- Stage 3: run_reviewer (allow_failure; gate enforced in report_verdict) ---
       - name: Run Trimurti AI Reviewer
         id: run_reviewer
+        timeout-minutes: 45
         continue-on-error: true
+        env:
+          REVIEWER_TOTAL_TIMEOUT_MS: "2400000"
         run: |
           set -euo pipefail
           WORK_DIR="${REVIEW_DIR:-/tmp/gemini}"
@@ -296,7 +306,11 @@ jobs:
             }
 
             function singleLine(val) {
-              return String(val ?? "").replace(/[\r\n]+/g, " ").trim();
+              return String(val ?? "")
+                .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b\[[0-9;?]*[ -/]*[@-~]/g, "")
+                .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]+/g, " ")
+                .replace(/[\r\n]+/g, " ")
+                .trim();
             }
 
             const resultPath = process.env.RESULT_PATH;
@@ -329,7 +343,7 @@ jobs:
                 totalIssuesCount = data.issues.length;
                 for (const item of data.issues.slice(0, 25)) {
                   if (!item || typeof item !== "object" || Array.isArray(item)) continue;
-                  const file = typeof item.file === "string" ? singleLine(item.file) : "";
+                  const file = typeof item.file === "string" ? singleLine(item.file).slice(0, 500) : "";
                   const message = typeof item.message === "string" ? singleLine(item.message).slice(0, 300) : "";
                   if (!file || !message) continue;
                   const entry = { file, message };
@@ -387,16 +401,54 @@ jobs:
             }
 
             if (process.env.GITHUB_STEP_SUMMARY) {
+              const safeSlice = (str, maxLen) => {
+                if (str.length <= maxLen) return str;
+                const cut = str.slice(0, maxLen);
+                const last = cut.charCodeAt(cut.length - 1);
+                return last >= 0xd800 && last <= 0xdbff ? cut.slice(0, -1) : cut;
+              };
+              const stripMentions = (val) => {
+                let cur = String(val ?? "").replace(
+                  /[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]+/g,
+                  " "
+                );
+                while (true) {
+                  const next = cur
+                    .replace(/<![^>]*>/g, "")
+                    .replace(/<[@#][^>]*>/g, "")
+                    .replace(/@(?:channel|here|everyone)\b/gi, "")
+                    .replace(/(^|[^A-Za-z0-9_.\/-])@[A-Za-z0-9_][A-Za-z0-9_.\/-]*/g, "$1")
+                    .replace(/^@[A-Za-z0-9_][A-Za-z0-9_.\/-]*/, "");
+                  if (next === cur) break;
+                  cur = next;
+                }
+                return cur.replace(/@(?=[A-Za-z0-9_])/g, "(at)").replace(/\s+/g, " ").trim();
+              };
+              const safeMdInline = (val, maxLen = 500) =>
+                safeSlice(stripMentions(val), maxLen)
+                  .replace(/&/g, "&amp;")
+                  .replace(/</g, "&lt;")
+                  .replace(/>/g, "&gt;")
+                  .replace(/\\/g, "\\\\")
+                  .replace(/`/g, "\x27")
+                  .replace(/\[/g, "\\[")
+                  .replace(/\]/g, "\\]")
+                  .replace(/!(?=\\\[)/g, "\\!")
+                  .replace(/\|/g, "\\|");
               const lines = [
                 `### Trimurti AI Review: ${verdict}`,
                 "",
-                summary || "No summary provided.",
+                "> **AI-generated advisory output.** Unverified model output; verify findings against the pull request diff.",
+                "",
+                safeMdInline(summary, 500) || "No summary provided.",
               ];
               if (cleanIssues.length > 0) {
-                lines.push("", "#### Issues", "");
+                lines.push("", "#### Issues (AI-generated, unverified)", "");
                 for (const issue of cleanIssues) {
-                  const loc = issue.line ? `${issue.file}:${issue.line}` : issue.file;
-                  lines.push(`- \`${loc}\`: ${issue.message}`);
+                  const rawLoc = issue.line ? `${issue.file}:${issue.line}` : issue.file;
+                  const loc = safeMdInline(rawLoc, 520);
+                  const msg = safeMdInline(issue.message, 300);
+                  lines.push(`- \`${loc}\`: ${msg}`);
                 }
                 if (totalIssuesCount > cleanIssues.length) {
                   lines.push("", `_Showing first ${cleanIssues.length} of ${totalIssuesCount} issues._`);
@@ -448,6 +500,8 @@ jobs:
           EMAIL_API_KEY: ${{ secrets.EMAIL_API_KEY }}
           EMAIL_TO: ${{ secrets.EMAIL_TO || vars.EMAIL_TO || 'sanjay@kapoors.com' }}
           EMAIL_FROM: ${{ secrets.EMAIL_FROM || vars.EMAIL_FROM || 'info@kapoors.com' }}
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_API_URL: ${{ github.api_url }}
           PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number || '' }}
           PR_URL: ${{ github.event.pull_request.html_url || (inputs.pr_number && format('{0}/{1}/pull/{2}', github.server_url, github.repository, inputs.pr_number)) || '' }}
           PR_TITLE: ${{ github.event.pull_request.title || '' }}
@@ -467,7 +521,79 @@ jobs:
           SLACK_URL_CLEAN="$(printf '%s' "${SLACK_WEBHOOK_URL:-}" | tr -d '\r\n' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
           TRIMURTI_URL_CLEAN="$(printf '%s' "${TRIMURTI_WEBHOOK_URL:-}" | tr -d '\r\n' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
           EMAIL_KEY_CLEAN="$(printf '%s' "${EMAIL_API_KEY:-}" | tr -d '\r\n' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+          GH_TOKEN_CLEAN="$(printf '%s' "${GITHUB_TOKEN:-}" | tr -d '\r\n' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+          GH_API_CLEAN="$(printf '%s' "${GITHUB_API_URL:-}" | tr -d '\r\n' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's|/*$||')"
           SENDGRID_API_URL="${SENDGRID_API_URL:-https://api.sendgrid.com/v3/mail/send}"
+
+          # Strictly validate PR_NUMBER and PR_URL so malformed workflow_dispatch inputs
+          # that failed diff generation cannot inject newlines, Slack mentions, or bad URLs.
+          RAW_PR_NUM="$(printf '%s' "${PR_NUMBER:-}" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+          if printf '%s' "$RAW_PR_NUM" | grep -Eq '^[1-9][0-9]*$'; then
+            export PR_NUMBER="$RAW_PR_NUM"
+          else
+            export PR_NUMBER=""
+            export PR_URL=""
+          fi
+          if [ -n "${PR_URL:-}" ]; then
+            if ! printf '%s' "$PR_URL" | grep -Eq '^https://[^[:space:]<>|"`'\'']+$'; then
+              export PR_URL=""
+            fi
+          fi
+
+          # Under workflow_dispatch, github.event.pull_request.title is empty; resolve PR title
+          # (and canonical html_url if absent) from GitHub REST API when PR_NUMBER is valid.
+          if [ -z "${PR_TITLE:-}" ] && [ -n "${PR_NUMBER:-}" ] && [ -n "$GH_API_CLEAN" ] && \
+             printf '%s' "$GH_API_CLEAN" | grep -Eq '^https://[^[:space:]<>|"`'\'']+$' && \
+             ( [ -n "$TRIMURTI_URL_CLEAN" ] || [ -n "$SLACK_URL_CLEAN" ] || [ -n "$EMAIL_KEY_CLEAN" ] ) && \
+             printf '%s' "${REPO_FULL_NAME:-}" | grep -Eq '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$'; then
+            PR_META_CFG="$TMP_CURL_DIR/gh_pr.cfg"
+            PR_META_JSON="$TMP_CURL_DIR/gh_pr.json"
+            GH_PR_API_ENDPOINT="${GH_API_CLEAN}/repos/${REPO_FULL_NAME}/pulls/${PR_NUMBER}"
+            GH_PR_API_ENDPOINT="$GH_PR_API_ENDPOINT" GH_TOKEN_CLEAN="$GH_TOKEN_CLEAN" PR_META_CFG="$PR_META_CFG" node -e '
+              const fs = require("fs");
+              const lines = [
+                `url = ${JSON.stringify(process.env.GH_PR_API_ENDPOINT)}`,
+                `header = "Accept: application/vnd.github+json"`,
+                `header = "X-GitHub-Api-Version: 2022-11-28"`,
+              ];
+              if (process.env.GH_TOKEN_CLEAN) {
+                lines.push(`header = ${JSON.stringify("Authorization: Bearer " + process.env.GH_TOKEN_CLEAN)}`);
+              }
+              fs.writeFileSync(process.env.PR_META_CFG, lines.join("\n") + "\n", "utf8");
+            '
+            if curl --proto '=https' --tlsv1.2 -fsS --max-time 10 \
+              --config "$PR_META_CFG" \
+              --output "$PR_META_JSON" 2>/dev/null; then
+              RESOLVED_PR_ENV="$TMP_CURL_DIR/gh_pr_resolved.txt"
+              PR_META_JSON="$PR_META_JSON" RESOLVED_PR_ENV="$RESOLVED_PR_ENV" node -e '
+                const fs = require("fs");
+                try {
+                  const data = JSON.parse(fs.readFileSync(process.env.PR_META_JSON, "utf8"));
+                  const cleanLine = (v) =>
+                    typeof v === "string"
+                      ? v
+                          .replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]+/g, " ")
+                          .trim()
+                          .slice(0, 300)
+                      : "";
+                  const title = cleanLine(data && data.title);
+                  const htmlUrl =
+                    data && typeof data.html_url === "string" && /^https:\/\/[^\s<>|"\x27`]+$/.test(data.html_url.trim())
+                      ? data.html_url.trim()
+                      : "";
+                  fs.writeFileSync(process.env.RESOLVED_PR_ENV, JSON.stringify({ title, htmlUrl }), "utf8");
+                } catch (_) {}
+              '
+              if [ -f "$RESOLVED_PR_ENV" ]; then
+                PR_TITLE="$(RESOLVED_PR_ENV="$RESOLVED_PR_ENV" node -e 'const d=JSON.parse(require("fs").readFileSync(process.env.RESOLVED_PR_ENV,"utf8")); process.stdout.write(d.title||"");')"
+                export PR_TITLE
+                if [ -z "${PR_URL:-}" ]; then
+                  PR_URL="$(RESOLVED_PR_ENV="$RESOLVED_PR_ENV" node -e 'const d=JSON.parse(require("fs").readFileSync(process.env.RESOLVED_PR_ENV,"utf8")); process.stdout.write(d.htmlUrl||"");')"
+                  export PR_URL
+                fi
+              fi
+            fi
+          fi
 
           notify_rc=0
           configured_count=0
@@ -479,29 +605,78 @@ jobs:
             TRIMURTI_BODY="$TMP_CURL_DIR/trimurti.json"
             TRIMURTI_URL_CLEAN="$TRIMURTI_URL_CLEAN" TRIMURTI_CFG="$TRIMURTI_CFG" TRIMURTI_BODY="$TRIMURTI_BODY" node -e '
               const fs = require("fs");
+              const safeSlice = (str, maxLen) => {
+                if (str.length <= maxLen) return str;
+                const cut = str.slice(0, maxLen);
+                const last = cut.charCodeAt(cut.length - 1);
+                return last >= 0xd800 && last <= 0xdbff ? cut.slice(0, -1) : cut;
+              };
+              const stripMentions = (val) => {
+                let cur = String(val ?? "").replace(
+                  /[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]+/g,
+                  " "
+                );
+                while (true) {
+                  const next = cur
+                    .replace(/<![^>]*>/g, "")
+                    .replace(/<[@#][^>]*>/g, "")
+                    .replace(/@(?:channel|here|everyone)\b/gi, "")
+                    .replace(/(^|[^A-Za-z0-9_.\/-])@[A-Za-z0-9_][A-Za-z0-9_.\/-]*/g, "$1")
+                    .replace(/^@[A-Za-z0-9_][A-Za-z0-9_.\/-]*/, "");
+                  if (next === cur) break;
+                  cur = next;
+                }
+                return cur.replace(/@(?=[A-Za-z0-9_])/g, "(at)").replace(/\s+/g, " ").trim();
+              };
+              const cleanSingleLine = (val, maxLen = 500) =>
+                safeSlice(stripMentions(val), maxLen)
+                  .replace(/&/g, "&amp;")
+                  .replace(/</g, "&lt;")
+                  .replace(/>/g, "&gt;");
               let issues = [];
               try {
                 const parsed = JSON.parse(process.env.REVIEW_ISSUES_JSON || "[]");
-                if (Array.isArray(parsed)) issues = parsed;
+                if (Array.isArray(parsed)) {
+                  issues = parsed
+                    .filter((it) => it && typeof it === "object" && !Array.isArray(it))
+                    .slice(0, 25)
+                    .map((it) => {
+                      const out = {
+                        file: cleanSingleLine(it.file || "unknown", 500) || "unknown",
+                        message: cleanSingleLine(it.message || "", 300),
+                      };
+                      if (typeof it.line === "number" && Number.isInteger(it.line) && it.line >= 1) {
+                        out.line = it.line;
+                      }
+                      return out;
+                    })
+                    .filter((it) => Boolean(it.message));
+                }
               } catch (_) {}
-              const rawVerdict = (process.env.REVIEW_VERDICT || "").trim();
+              const rawVerdict = stripMentions(process.env.REVIEW_VERDICT || "").slice(0, 64);
               const verdict = rawVerdict === "REQUEST_CHANGES" || rawVerdict === "ERROR" ? rawVerdict : "ERROR";
               const defaultSummary =
                 verdict === "REQUEST_CHANGES"
                   ? "The AI Reviewer requested changes."
                   : "The Trimurti AI Reviewer pipeline failed closed before producing a review verdict.";
+              const prNumStr = /^\d+$/.test(process.env.PR_NUMBER || "") ? process.env.PR_NUMBER : "";
+              const safeUrl = (u) =>
+                typeof u === "string" && /^https:\/\/[^\s<>|"\x27`]+$/.test(u.trim()) ? u.trim() : "";
               const payload = {
                 schema: "trimurti.ai_review.v1",
+                ai_generated: true,
+                advisory: true,
+                notice: "AI-generated advisory output. Unverified model output; verify findings against the PR diff.",
                 verdict,
-                summary: (process.env.REVIEW_SUMMARY || "").trim() || defaultSummary,
+                summary: cleanSingleLine(process.env.REVIEW_SUMMARY || "", 500) || defaultSummary,
                 issues,
-                repository: process.env.REPO_FULL_NAME || "kapoorgalleries/metaplex",
+                repository: cleanSingleLine(process.env.REPO_FULL_NAME || "kapoorgalleries/metaplex", 200),
                 pull_request: {
-                  number: Number(process.env.PR_NUMBER) || process.env.PR_NUMBER || null,
-                  title: (process.env.PR_TITLE || "").trim(),
-                  url: process.env.PR_URL || "",
+                  number: prNumStr ? Number(prNumStr) : null,
+                  title: cleanSingleLine(process.env.PR_TITLE || "", 300),
+                  url: safeUrl(process.env.PR_URL),
                 },
-                workflow_run_url: process.env.RUN_URL || "",
+                workflow_run_url: safeUrl(process.env.RUN_URL),
               };
               fs.writeFileSync(process.env.TRIMURTI_BODY, JSON.stringify(payload), "utf8");
               fs.writeFileSync(
@@ -528,40 +703,87 @@ jobs:
             SLACK_BODY="$TMP_CURL_DIR/slack.json"
             SLACK_URL_CLEAN="$SLACK_URL_CLEAN" SLACK_CFG="$SLACK_CFG" SLACK_BODY="$SLACK_BODY" node -e '
               const fs = require("fs");
-              const num = process.env.PR_NUMBER || "?";
-              const title = (process.env.PR_TITLE || "").trim();
-              const repo = process.env.REPO_FULL_NAME || "kapoorgalleries/metaplex";
-              const prUrl = process.env.PR_URL || "";
-              const runUrl = process.env.RUN_URL || "";
-              const rawVerdict = (process.env.REVIEW_VERDICT || "").trim();
+              const safeSlice = (str, maxLen) => {
+                if (str.length <= maxLen) return str;
+                const cut = str.slice(0, maxLen);
+                const last = cut.charCodeAt(cut.length - 1);
+                return last >= 0xd800 && last <= 0xdbff ? cut.slice(0, -1) : cut;
+              };
+              const stripMentions = (val) => {
+                let cur = String(val ?? "").replace(
+                  /[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]+/g,
+                  " "
+                );
+                while (true) {
+                  const next = cur
+                    .replace(/<![^>]*>/g, "")
+                    .replace(/<[@#][^>]*>/g, "")
+                    .replace(/@(?:channel|here|everyone)\b/gi, "")
+                    .replace(/(^|[^A-Za-z0-9_.\/-])@[A-Za-z0-9_][A-Za-z0-9_.\/-]*/g, "$1")
+                    .replace(/^@[A-Za-z0-9_][A-Za-z0-9_.\/-]*/, "");
+                  if (next === cur) break;
+                  cur = next;
+                }
+                return cur.replace(/@(?=[A-Za-z0-9_])/g, "(at)").replace(/\s+/g, " ").trim();
+              };
+              const escSlackMrkdwn = (val, maxLen = 500) =>
+                safeSlice(stripMentions(val), maxLen)
+                  .replace(/&/g, "&amp;")
+                  .replace(/</g, "&lt;")
+                  .replace(/>/g, "&gt;");
+              const safeUrl = (u) =>
+                typeof u === "string" && /^https:\/\/[^\s<>|"\x27`]+$/.test(u.trim())
+                  ? u.trim().replace(/&/g, "&amp;")
+                  : "";
+              const num = /^[1-9][0-9]*$/.test(process.env.PR_NUMBER || "") ? process.env.PR_NUMBER : "?";
+              const title = escSlackMrkdwn(process.env.PR_TITLE || "", 300);
+              const repo = escSlackMrkdwn(process.env.REPO_FULL_NAME || "kapoorgalleries/metaplex", 200);
+              const prUrl = safeUrl(process.env.PR_URL);
+              const runUrl = safeUrl(process.env.RUN_URL);
+              const rawVerdict = stripMentions(process.env.REVIEW_VERDICT || "").slice(0, 64);
               const verdict = rawVerdict === "REQUEST_CHANGES" || rawVerdict === "ERROR" ? rawVerdict : "ERROR";
               const defaultSummary =
                 verdict === "REQUEST_CHANGES"
                   ? "The AI Reviewer requested changes."
                   : "The Trimurti AI Reviewer pipeline failed closed before producing a review verdict.";
-              const summary = (process.env.REVIEW_SUMMARY || "").trim() || defaultSummary;
+              const summary = escSlackMrkdwn(process.env.REVIEW_SUMMARY || "", 500) || defaultSummary;
               let issues = [];
               try {
                 const parsed = JSON.parse(process.env.REVIEW_ISSUES_JSON || "[]");
-                if (Array.isArray(parsed)) issues = parsed;
+                if (Array.isArray(parsed)) {
+                  issues = parsed.filter((it) => it && typeof it === "object" && !Array.isArray(it));
+                }
               } catch (_) {}
               const issueLines = issues.slice(0, 10).map((issue) => {
-                const loc = issue.line ? `${issue.file}:${issue.line}` : String(issue.file || "unknown");
-                return `• \`${loc}\`: ${issue.message}`;
+                const rawLoc = issue.line
+                  ? `${issue.file || "unknown"}:${issue.line}`
+                  : String(issue.file || "unknown");
+                const loc = escSlackMrkdwn(rawLoc, 520).replace(/`/g, "\x27");
+                const msg = escSlackMrkdwn(issue.message || "", 300);
+                return `• \`${loc}\`: ${msg}`;
               });
               if (issues.length > 10) {
                 issueLines.push(`• ...and ${issues.length - 10} additional issue(s)`);
               }
               const lines = [
                 `🚨 *AI PR Review Failed!* (${repo} #${num})`,
+                "_AI-generated advisory output; verify findings against the PR diff._",
                 title ? `PR: ${title}` : null,
                 `Verdict: \`${verdict}\``,
-                `Summary: ${summary}`,
-                issueLines.length > 0 ? `Issues:\n${issueLines.join("\n")}` : null,
+                `Summary (AI-generated): ${summary}`,
+                issueLines.length > 0 ? `Issues (AI-generated):\n${issueLines.join("\n")}` : null,
                 prUrl ? `View details here: ${prUrl}` : null,
                 runUrl ? `Workflow run: ${runUrl}` : null,
               ].filter(Boolean);
-              fs.writeFileSync(process.env.SLACK_BODY, JSON.stringify({ text: lines.join("\n") }), "utf8");
+              fs.writeFileSync(
+                process.env.SLACK_BODY,
+                JSON.stringify({
+                  text: lines.join("\n"),
+                  unfurl_links: false,
+                  unfurl_media: false,
+                }),
+                "utf8"
+              );
               fs.writeFileSync(
                 process.env.SLACK_CFG,
                 `url = ${JSON.stringify(process.env.SLACK_URL_CLEAN)}\nheader = "Content-Type: application/json"\n`,
@@ -588,18 +810,59 @@ jobs:
             EMAIL_BODY="$TMP_CURL_DIR/email.json"
             EMAIL_KEY_CLEAN="$EMAIL_KEY_CLEAN" SENDGRID_API_URL="$SENDGRID_API_URL" EMAIL_CFG="$EMAIL_CFG" EMAIL_BODY="$EMAIL_BODY" node -e '
               const fs = require("fs");
-              const num = process.env.PR_NUMBER || "?";
-              const title = (process.env.PR_TITLE || "").trim();
-              const repo = process.env.REPO_FULL_NAME || "kapoorgalleries/metaplex";
-              const prUrl = process.env.PR_URL || "";
-              const runUrl = process.env.RUN_URL || "";
-              const rawVerdict = (process.env.REVIEW_VERDICT || "").trim();
+              const safeSlice = (str, maxLen) => {
+                if (str.length <= maxLen) return str;
+                const cut = str.slice(0, maxLen);
+                const last = cut.charCodeAt(cut.length - 1);
+                return last >= 0xd800 && last <= 0xdbff ? cut.slice(0, -1) : cut;
+              };
+              const cleanRaw = (val, maxLen = 500) =>
+                safeSlice(
+                  String(val ?? "")
+                    .replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]+/g, " ")
+                    .trim(),
+                  maxLen
+                );
+              const stripEmailMentions = (val) => {
+                let cur = String(val ?? "").replace(
+                  /[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]+/g,
+                  " "
+                );
+                while (true) {
+                  const next = cur
+                    .replace(/<![^>]*>/g, "")
+                    .replace(/<[@#][^>]*>/g, "")
+                    .replace(/@(?:channel|here|everyone)\b/gi, "")
+                    .replace(/(^|[^A-Za-z0-9_.\/-])@[A-Za-z0-9_][A-Za-z0-9_.\/-]*/g, "$1")
+                    .replace(/^@[A-Za-z0-9_][A-Za-z0-9_.\/-]*/, "");
+                  if (next === cur) break;
+                  cur = next;
+                }
+                return cur
+                  .replace(/@(?=[A-Za-z0-9_])/g, "(at)")
+                  .replace(/\s+/g, " ")
+                  .trim();
+              };
+              const sanitizeEmailText = (val, maxLen = 500) =>
+                safeSlice(stripEmailMentions(val), maxLen)
+                  .replace(/&/g, "&amp;")
+                  .replace(/</g, "&lt;")
+                  .replace(/>/g, "&gt;");
+              const safeUrl = (u) =>
+                typeof u === "string" && /^https:\/\/[^\s<>|"\x27`]+$/.test(u.trim()) ? u.trim() : "";
+              const num = /^[1-9][0-9]*$/.test(process.env.PR_NUMBER || "") ? process.env.PR_NUMBER : "?";
+              const title = sanitizeEmailText(process.env.PR_TITLE || "", 300);
+              const subjectTitle = sanitizeEmailText(process.env.PR_TITLE || "", 80);
+              const repo = sanitizeEmailText(process.env.REPO_FULL_NAME || "kapoorgalleries/metaplex", 200);
+              const prUrl = safeUrl(process.env.PR_URL);
+              const runUrl = safeUrl(process.env.RUN_URL);
+              const rawVerdict = cleanRaw(process.env.REVIEW_VERDICT || "", 64);
               const verdict = rawVerdict === "REQUEST_CHANGES" || rawVerdict === "ERROR" ? rawVerdict : "ERROR";
               const defaultSummary =
                 verdict === "REQUEST_CHANGES"
                   ? "The AI Reviewer requested changes."
                   : "The Trimurti AI Reviewer pipeline failed closed before producing a review verdict.";
-              const summary = (process.env.REVIEW_SUMMARY || "").trim() || defaultSummary;
+              const summary = sanitizeEmailText(process.env.REVIEW_SUMMARY || "", 500) || defaultSummary;
               let issues = [];
               try {
                 const parsed = JSON.parse(process.env.REVIEW_ISSUES_JSON || "[]");
@@ -608,9 +871,11 @@ jobs:
               const seen = new Set();
               const toList = (process.env.EMAIL_TO || "sanjay@kapoors.com")
                 .split(",")
-                .map((s) => s.trim())
+                .map((s) => cleanRaw(s, 254))
                 .filter((s) => {
-                  if (!s) return false;
+                  if (!s || !/^[^\s@<>,;"\x27()\[\]\\]+@[^\s@<>,;"\x27()\[\]\\]+\.[^\s@<>,;"\x27()\[\]\\]+$/.test(s)) {
+                    return false;
+                  }
                   const low = s.toLowerCase();
                   if (seen.has(low)) return false;
                   seen.add(low);
@@ -620,19 +885,25 @@ jobs:
               if (toList.length === 0) {
                 toList.push({ email: "sanjay@kapoors.com" });
               }
-              const fromEmail = (process.env.EMAIL_FROM || "info@kapoors.com").trim() || "info@kapoors.com";
+              const rawFrom = cleanRaw(process.env.EMAIL_FROM || "info@kapoors.com", 254);
+              const fromEmail =
+                /^[^\s@<>,;"\x27()\[\]\\]+@[^\s@<>,;"\x27()\[\]\\]+\.[^\s@<>,;"\x27()\[\]\\]+$/.test(rawFrom)
+                  ? rawFrom
+                  : "info@kapoors.com";
               const bodyLines = [
                 `The Trimurti AI Reviewer failed on ${repo} Pull Request #${num}.`,
+                "AI-generated advisory output. Unverified model output; verify findings against the PR diff.",
                 title ? `Title: ${title}` : null,
                 `Verdict: ${verdict}`,
                 "",
-                `Summary: ${summary}`,
+                `Summary (AI-generated): ${summary}`,
               ];
               if (issues.length > 0) {
-                bodyLines.push("", "Issues:");
+                bodyLines.push("", "Issues (AI-generated, unverified):");
                 for (const issue of issues) {
-                  const loc = issue.line ? `${issue.file}:${issue.line}` : String(issue.file || "unknown");
-                  bodyLines.push(`- ${loc}: ${issue.message}`);
+                  if (!issue || typeof issue !== "object") continue;
+                  const rawLoc = issue.line ? `${issue.file || "unknown"}:${issue.line}` : String(issue.file || "unknown");
+                  bodyLines.push(`- ${sanitizeEmailText(rawLoc, 520)}: ${sanitizeEmailText(issue.message || "", 300)}`);
                 }
               }
               bodyLines.push(
@@ -645,7 +916,7 @@ jobs:
                 JSON.stringify({
                   personalizations: [{ to: toList }],
                   from: { email: fromEmail, name: "Kapoor Galleries CI" },
-                  subject: `Build Failed: PR #${num}${title ? " - " + title.slice(0, 80) : ""}`,
+                  subject: `Build Failed: PR #${num}${subjectTitle ? " - " + subjectTitle : ""}`,
                   content: [{ type: "text/plain", value: bodyLines.filter((v) => v !== null).join("\n") }],
                 }),
                 "utf8"
