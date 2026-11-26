@@ -5055,6 +5055,121 @@ async function main() {
               null,
               'Schema validation failure on exit-0 stdout must fail closed even if stderr mentions 429 or connection reset'
             );
+
+            // (e) Multi-model fallback where Model 1 fails schema validation and Model 2 fails network 503 MUST still fail closed
+            const schemaThen503Bin = makeFakeAgy(
+              advDir,
+              `
+              const mIdx = _argv.indexOf("--model");
+              const model = mIdx >= 0 ? _argv[mIdx + 1] : "";
+              process.stdin.resume();
+              process.stdin.on("end", () => {
+                if (model === "gemini-4-carbon-high") {
+                  process.stdout.write(JSON.stringify({
+                    conversation_id: "c-bad-schema",
+                    status: "SUCCESS",
+                    structured_output: { verdict: "INVALID_ENUM" }
+                  }) + "\\n");
+                  return;
+                }
+                process.stderr.write("ECONNRESET: upstream socket hang up\\n");
+                process.exit(1);
+              });
+              `,
+              { name: 'schema-then-503.js' }
+            );
+            let schemaThenNetErr = null;
+            try {
+              await reviewDiff(SAMPLE_DIFF, {
+                sourceHome: authHome,
+                agyBin: schemaThen503Bin,
+                models: ['gemini-4-carbon-high', 'gemini-4-argon-high'],
+                tempRoot: advDir,
+              });
+            } catch (err) {
+              schemaThenNetErr = err;
+            }
+            assert(schemaThenNetErr && schemaThenNetErr.schemaValidationFailed === true);
+            assert.strictEqual(
+              classifyReviewerUnavailable(schemaThenNetErr),
+              null,
+              'Schema failure on earlier model must not be downgraded to network outage by fallback error'
+            );
+
+            // (f) Non-spawn filesystem EACCES/ENOENT (e.g. unwritable output directory) MUST fail closed, while agySpawnFailed maps to agy-missing
+            const fsEacces = Object.assign(new Error('EACCES: permission denied, open /root/review.lock'), {
+              code: 'EACCES',
+            });
+            assert.strictEqual(
+              classifyReviewerUnavailable(fsEacces),
+              null,
+              'Filesystem EACCES without agySpawnFailed must fail closed (never classified as agy-missing)'
+            );
+            const spawnEacces = Object.assign(new Error('spawn /opt/agy EACCES'), {
+              code: 'EACCES',
+              agySpawnFailed: true,
+            });
+            assert.strictEqual(classifyReviewerUnavailable(spawnEacces), 'agy-missing');
+
+            // (g) resolveWslSafeTempDir returns null on non-existent WIN_USERNAME (never enumerating arbitrary other Windows profiles)
+            assert.strictEqual(
+              resolveWslSafeTempDir({ TRIMURTI_WIN_TEMP_ROOT: '', WIN_USERNAME: 'nonexistent_usr_999' }),
+              null,
+              'resolveWslSafeTempDir must return null when explicit WIN_USERNAME has no Temp dir rather than scanning other users'
+            );
+
+            // (h) scanPrePushHistorySecrets catches a secret leaked exclusively in a pushed commit message (with a clean file patch)
+            const msgLeakToken = ['hf', 'M'.repeat(28)].join('_');
+            fs.writeFileSync(path.join(mergeCleanRepo, 'clean-msg-test.txt'), 'harmless content\n', 'utf8');
+            assert.strictEqual(
+              spawnSync('git', ['add', 'clean-msg-test.txt'], { cwd: mergeCleanRepo, env: gitEnv }).status,
+              0
+            );
+            assert.strictEqual(
+              spawnSync(
+                'git',
+                ['commit', '-m', `chore: debug auth\n\naccidental token ${msgLeakToken} in commit body`],
+                { cwd: mergeCleanRepo, env: gitEnv }
+              ).status,
+              0
+            );
+            const msgLeakOid = spawnSync('git', ['rev-parse', 'HEAD'], {
+              cwd: mergeCleanRepo,
+              env: gitEnv,
+              encoding: 'utf8',
+            }).stdout.trim();
+            fs.writeFileSync(path.join(mergeCleanRepo, 'clean-msg-followup.txt'), 'clean tip\n', 'utf8');
+            assert.strictEqual(
+              spawnSync('git', ['add', 'clean-msg-followup.txt'], { cwd: mergeCleanRepo, env: gitEnv }).status,
+              0
+            );
+            assert.strictEqual(
+              spawnSync('git', ['commit', '-m', 'chore: clean tip commit on top of leaked message'], {
+                cwd: mergeCleanRepo,
+                env: gitEnv,
+              }).status,
+              0
+            );
+            const msgTipOid = spawnSync('git', ['rev-parse', 'HEAD'], {
+              cwd: mergeCleanRepo,
+              env: gitEnv,
+              encoding: 'utf8',
+            }).stdout.trim();
+            const msgLeakRanges = [];
+            computePrePushDiff(mergeCleanRepo, {
+              remoteName: 'origin',
+              stdinText: `refs/heads/feat-mc ${msgTipOid} refs/heads/feat-mc ${cleanMergeOid}\n`,
+              _commitRangesOut: msgLeakRanges,
+            });
+            const msgLeakFindings = scanPrePushHistorySecrets(mergeCleanRepo, msgLeakRanges, { env: gitEnv });
+            assert(
+              msgLeakFindings.some(
+                (f) =>
+                  f.file === `commit-message:${msgLeakOid.slice(0, 12)}` &&
+                  f.message.includes('Hugging Face token')
+              ),
+              `Expected non-tip pushed commit message secret to be blocked, got: ${JSON.stringify(msgLeakFindings)}`
+            );
           }
         }
 

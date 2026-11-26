@@ -1619,41 +1619,60 @@ function resolveWslSafeTempDir(env = process.env) {
   if (env && typeof env.TRIMURTI_WIN_TEMP_ROOT === 'string' && env.TRIMURTI_WIN_TEMP_ROOT.trim()) {
     return env.TRIMURTI_WIN_TEMP_ROOT.trim();
   }
-  const candidateNames = [];
-  if (env && typeof env.WIN_USERNAME === 'string' && env.WIN_USERNAME.trim()) {
-    candidateNames.push(env.WIN_USERNAME.trim());
-  }
-  try {
-    const posixUser = os.userInfo().username;
-    if (posixUser) candidateNames.push(posixUser);
-  } catch (_) {}
-  candidateNames.push('sanja');
-  try {
-    const systemUsers = new Set(['public', 'default', 'default user', 'all users', 'wdagutilityaccount']);
-    for (const ent of fs.readdirSync('/mnt/c/Users', { withFileTypes: true })) {
-      if (
-        ent &&
-        ent.isDirectory() &&
-        !ent.isSymbolicLink() &&
-        !systemUsers.has(ent.name.toLowerCase())
-      ) {
-        candidateNames.push(ent.name);
-      }
-    }
-  } catch (_) {}
 
-  const seen = new Set();
-  for (const name of candidateNames) {
-    if (!name || /[\\/\0]/.test(name) || name === '.' || name === '..') continue;
+  const checkUserTempDir = (rawName) => {
+    const name = typeof rawName === 'string' ? rawName.trim() : '';
+    if (!name || /[\\/\0]/.test(name) || name === '.' || name === '..') return null;
+    const systemUsers = new Set([
+      'public',
+      'default',
+      'default user',
+      'all users',
+      'wdagutilityaccount',
+    ]);
+    if (systemUsers.has(name.toLowerCase())) return null;
     const cand = `/mnt/c/Users/${name}/AppData/Local/Temp`;
-    if (seen.has(cand)) continue;
-    seen.add(cand);
     try {
       const lst = fs.lstatSync(cand);
       if (lst.isDirectory() && !lst.isSymbolicLink()) {
         return cand;
       }
     } catch (_) {}
+    return null;
+  };
+
+  if (env && typeof env.WIN_USERNAME === 'string' && env.WIN_USERNAME.trim()) {
+    return checkUserTempDir(env.WIN_USERNAME);
+  }
+
+  const candidateNames = [];
+  if (isExecutableFile(DEFAULT_CMD_EXE, 'linux')) {
+    try {
+      const res = spawnSync(DEFAULT_CMD_EXE, ['/d', '/c', 'echo %USERNAME%'], {
+        encoding: 'utf8',
+        timeout: 3000,
+        windowsHide: true,
+      });
+      if (res.status === 0 && typeof res.stdout === 'string') {
+        const winUser = res.stdout.replace(/[\r\n]+/g, '').trim();
+        if (winUser && winUser !== '%USERNAME%') {
+          candidateNames.push(winUser);
+        }
+      }
+    } catch (_) {}
+  }
+
+  try {
+    const posixUser = os.userInfo().username;
+    if (posixUser) candidateNames.push(posixUser);
+  } catch (_) {}
+
+  const seen = new Set();
+  for (const name of candidateNames) {
+    if (seen.has(name)) continue;
+    seen.add(name);
+    const resolved = checkUserTempDir(name);
+    if (resolved) return resolved;
   }
   return null;
 }
@@ -3381,6 +3400,9 @@ function spawnBoundedAgyProcess(
     });
 
     agyProcess.on('error', (err) => {
+      if (err && typeof err === 'object') {
+        err.agySpawnFailed = true;
+      }
       settleReject(err);
     });
 
@@ -3738,7 +3760,7 @@ function classifyReviewerUnavailable(err) {
     if (e.authRequired) return 'auth';
     if (e.quotaExhausted) return 'quota';
     if (e.timedOut || code === 'ETIMEDOUT') return 'timeout';
-    if (code === 'ENOENT' || code === 'EACCES') return 'agy-missing';
+    if (e.agySpawnFailed && (code === 'ENOENT' || code === 'EACCES')) return 'agy-missing';
     if (code === 'AGY_MODEL_UNAVAILABLE' || e.retryableModelError) return 'model-unavailable';
     if (typeof code === 'string' && REVIEWER_NETWORK_ERROR_CODES.has(code)) return 'network';
   }
@@ -5142,6 +5164,7 @@ async function reviewDiff(diffContent, options = {}) {
   let lastError = null;
   let bestPartialBlockingAttempt = null;
   let hardSecurityViolation = false;
+  let sawSchemaValidationFailure = false;
 
   outerLoop: for (const agyBin of binaries) {
     const workspace = createIsolatedRunWorkspace({
@@ -5331,6 +5354,9 @@ async function reviewDiff(diffContent, options = {}) {
           return verdictObj;
         } catch (error) {
           lastError = error;
+          if (error && error.schemaValidationFailed) {
+            sawSchemaValidationFailure = true;
+          }
           const isPolicyViolation = isHardPolicyOrSecurityError(error);
           if (isPolicyViolation) {
             hardSecurityViolation = true;
@@ -5520,6 +5546,9 @@ async function reviewDiff(diffContent, options = {}) {
       lastError ? `: ${lastError.message}` : ''
     }`
   );
+  if (sawSchemaValidationFailure) {
+    finalErr.schemaValidationFailed = true;
+  }
   finalErr.cause = lastError;
   throw finalErr;
 }

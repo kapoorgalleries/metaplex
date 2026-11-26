@@ -26,6 +26,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const { StringDecoder } = require('string_decoder');
 const tty = require('tty');
 const { spawnSync } = require('child_process');
 
@@ -35,6 +36,7 @@ const {
   assertSafeOutputTarget,
   classifyReviewerUnavailable,
   createStaticSecurityScanner,
+  detectAddedLineIssues,
   resolveEffectiveTimeoutMs,
   resolveEffectiveTotalTimeoutMs,
   resolveMaxReviewChunks,
@@ -823,9 +825,9 @@ function scanPrePushHistorySecrets(repoRoot, commitRanges = [], gitOptions = {})
       const revLabel = range.isFromEmptyTree
         ? range.localCommit
         : `${range.fromOid}..${range.localCommit}`;
-      const logArgs = ['log', '--cc', '--no-ext-diff', '--no-color', '--format=', '-p'];
+      const revRangeArgs = [];
       if (range.isFromEmptyTree) {
-        logArgs.push(range.localCommit, '--');
+        revRangeArgs.push(range.localCommit);
       } else {
         const notRevs = [range.fromOid];
         if (
@@ -836,8 +838,118 @@ function scanPrePushHistorySecrets(repoRoot, commitRanges = [], gitOptions = {})
         ) {
           notRevs.push(range.defaultBase);
         }
-        logArgs.push(range.localCommit, '--not', ...notRevs, '--');
+        revRangeArgs.push(range.localCommit, '--not', ...notRevs);
       }
+
+      // 1. Scan pushed commit messages (subjects + bodies) via NUL-delimited streaming output
+      const msgFile = path.join(histTmpDir, `range-${rangeIdx}.msgs`);
+      const msgOutFd = fs.openSync(msgFile, 'wx', 0o600);
+      let msgRes;
+      try {
+        msgRes = spawnSync(
+          'git',
+          buildGitArgs(
+            ['log', '-z', '--no-color', '--format=%H%x0a%B', ...revRangeArgs, '--'],
+            gitOptions
+          ),
+          {
+            cwd: repoRoot,
+            env: buildGitSubprocessEnv(gitOptions.env || process.env),
+            stdio: ['ignore', msgOutFd, 'pipe'],
+            encoding: 'utf8',
+            maxBuffer: 4 * 1024 * 1024,
+            windowsHide: true,
+          }
+        );
+      } finally {
+        try {
+          fs.closeSync(msgOutFd);
+        } catch (_) {}
+      }
+
+      try {
+        if (msgRes.error) {
+          throw new Error(
+            `git log commit-message scan failed for ${revLabel}: ${msgRes.error.message}`
+          );
+        }
+        if (msgRes.status !== 0) {
+          throw new Error(
+            `git log commit-message scan failed for ${revLabel}: ${(msgRes.stderr || '').trim()}`
+          );
+        }
+
+        const scanCommitRecord = (record) => {
+          if (!record) return;
+          const normalizedRec = record.replace(/^[\r\n]+/, '');
+          const nlIdx = normalizedRec.indexOf('\n');
+          if (nlIdx < 0) return;
+          const sha = normalizedRec.slice(0, nlIdx).trim();
+          const bodyText = normalizedRec.slice(nlIdx + 1);
+          if (!HEX_OID_RE.test(sha) || !bodyText) return;
+          const fileLabel = `commit-message:${sha.slice(0, 12)}`;
+          const msgState = { inConflictBlock: false, pendingSecretAssignment: false };
+          const msgLines = bodyText.split(/\r?\n/);
+          for (let lineIdx = 0; lineIdx < msgLines.length; lineIdx += 1) {
+            for (const message of detectAddedLineIssues(msgLines[lineIdx], msgState)) {
+              if (!message || message.includes('merge conflict marker')) continue;
+              const lineNo = lineIdx + 1;
+              const key = `${fileLabel}:${lineNo}:${message}`;
+              if (!seen.has(key)) {
+                seen.add(key);
+                found.push({ file: fileLabel, line: lineNo, message });
+              }
+            }
+          }
+        };
+
+        const msgDecoder = new StringDecoder('utf8');
+        let msgRemainder = '';
+        const msgReadFd = fs.openSync(msgFile, 'r');
+        try {
+          let offset = 0;
+          while (true) {
+            const bytesRead = fs.readSync(msgReadFd, readChunkBuf, 0, readChunkBuf.length, offset);
+            if (bytesRead <= 0) break;
+            offset += bytesRead;
+            const decoded = msgRemainder + msgDecoder.write(readChunkBuf.subarray(0, bytesRead));
+            let recStart = 0;
+            while (true) {
+              const nulIdx = decoded.indexOf('\0', recStart);
+              if (nulIdx < 0) break;
+              scanCommitRecord(decoded.slice(recStart, nulIdx));
+              recStart = nulIdx + 1;
+            }
+            msgRemainder = decoded.slice(recStart);
+          }
+          const tail = msgRemainder + msgDecoder.end();
+          if (tail) {
+            for (const rec of tail.split('\0')) {
+              scanCommitRecord(rec);
+            }
+          }
+        } finally {
+          try {
+            fs.closeSync(msgReadFd);
+          } catch (_) {}
+        }
+      } finally {
+        try {
+          fs.unlinkSync(msgFile);
+        } catch (_) {}
+      }
+
+      // 2. Scan pushed commit patches via streaming file-backed git log --cc -p
+      const logArgs = [
+        'log',
+        '--cc',
+        '--no-ext-diff',
+        '--no-color',
+        '--format=',
+        '-p',
+        ...revRangeArgs,
+        '--',
+      ];
 
       const patchFile = path.join(histTmpDir, `range-${rangeIdx}.patch`);
       const outFd = fs.openSync(patchFile, 'wx', 0o600);
