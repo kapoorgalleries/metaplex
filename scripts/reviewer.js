@@ -38,6 +38,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const { StringDecoder } = require('string_decoder');
 
 const POSIX_DEFAULT_DIFF_PATH = '/tmp/gemini/pr26.diff';
 const POSIX_DEFAULT_OUTPUT_PATH = '/tmp/gemini/review_result.json';
@@ -1232,41 +1233,48 @@ function unwrapAgyEnvelope(envelope) {
 }
 
 function parseAgyStdout(stdoutData) {
-  if (typeof stdoutData !== 'string') {
-    throw new Error('Response was empty');
-  }
-  const cleaned = stripTerminalSpinnerPrefixes(stdoutData);
-  if (cleaned === '') {
-    throw new Error('Response was empty');
-  }
-
-  let wholeParsedOk = false;
-  let wholeObj = null;
   try {
-    wholeObj = JSON.parse(cleaned);
-    wholeParsedOk = true;
-  } catch (_) {}
-
-  if (wholeParsedOk) {
-    if (isAgyEnvelope(wholeObj)) {
-      return unwrapAgyEnvelope(wholeObj);
+    if (typeof stdoutData !== 'string') {
+      throw new Error('Response was empty');
     }
-    const coercedWhole = coerceLlmVerdictCandidate(wholeObj);
-    return normalizeVerdict(coercedWhole, { rejectAdditionalKeys: true });
-  }
-
-  const topObjects = scanTopLevelJsonObjects(cleaned, {
-    failOnTruncatedEnvelope: true,
-  });
-
-  for (let idx = topObjects.length - 1; idx >= 0; idx--) {
-    const obj = topObjects[idx];
-    if (isAgyEnvelope(obj)) {
-      return unwrapAgyEnvelope(obj);
+    const cleaned = stripTerminalSpinnerPrefixes(stdoutData);
+    if (cleaned === '') {
+      throw new Error('Response was empty');
     }
-  }
 
-  throw new Error('Response did not contain a valid JSON verdict object');
+    let wholeParsedOk = false;
+    let wholeObj = null;
+    try {
+      wholeObj = JSON.parse(cleaned);
+      wholeParsedOk = true;
+    } catch (_) {}
+
+    if (wholeParsedOk) {
+      if (isAgyEnvelope(wholeObj)) {
+        return unwrapAgyEnvelope(wholeObj);
+      }
+      const coercedWhole = coerceLlmVerdictCandidate(wholeObj);
+      return normalizeVerdict(coercedWhole, { rejectAdditionalKeys: true });
+    }
+
+    const topObjects = scanTopLevelJsonObjects(cleaned, {
+      failOnTruncatedEnvelope: true,
+    });
+
+    for (let idx = topObjects.length - 1; idx >= 0; idx--) {
+      const obj = topObjects[idx];
+      if (isAgyEnvelope(obj)) {
+        return unwrapAgyEnvelope(obj);
+      }
+    }
+
+    throw new Error('Response did not contain a valid JSON verdict object');
+  } catch (err) {
+    if (!(err instanceof AgyEnvelopeStatusError) && err && typeof err === 'object') {
+      err.schemaValidationFailed = true;
+    }
+    throw err;
+  }
 }
 
 function verifyIsolatedPermissionsOutput(rawStdout) {
@@ -2372,9 +2380,19 @@ function sweepOrphanedRunWorkspaces(tempRoot, platform = process.platform) {
           meta = JSON.parse(fs.readFileSync(ownerPath, 'utf8'));
         } catch (_) {}
         if (meta && Number.isInteger(meta.pid) && meta.pid > 0) {
-          const ageMs = Number.isFinite(meta.createdAt) ? now - meta.createdAt : now - lst.mtimeMs;
-          if (!isPidAliveQuick(meta.pid) || ageMs > ORPHAN_WORKSPACE_MAX_AGE_MS) {
+          if (meta.pid !== process.pid && !isPidAliveQuick(meta.pid)) {
             shouldRemove = true;
+          } else if (
+            platform === 'linux' &&
+            typeof meta.procStartTicks === 'string' &&
+            meta.procStartTicks !== ''
+          ) {
+            const ownerProcMeta = readLinuxProcMeta(meta.pid);
+            if (ownerProcMeta && ownerProcMeta.startTicks) {
+              if (ownerProcMeta.startTicks !== meta.procStartTicks) {
+                shouldRemove = true;
+              }
+            }
           }
         } else if (now - lst.mtimeMs >= 5000) {
           shouldRemove = true;
@@ -2447,9 +2465,16 @@ function createIsolatedRunWorkspace({
       fs.chmodSync(runRoot, 0o700);
     } catch (_) {}
 
+    const ownerProcMeta = platform === 'linux' ? readLinuxProcMeta(process.pid) : null;
     fs.writeFileSync(
       path.join(runRoot, '.owner.json'),
-      JSON.stringify({ pid: process.pid, createdAt: Date.now() }) + '\n',
+      JSON.stringify({
+        pid: process.pid,
+        createdAt: Date.now(),
+        ...(ownerProcMeta && ownerProcMeta.startTicks
+          ? { procStartTicks: ownerProcMeta.startTicks }
+          : {}),
+      }) + '\n',
       { encoding: 'utf8', mode: 0o600 }
     );
 
@@ -3591,10 +3616,15 @@ async function runAgy(model, inputContent, options = {}) {
     try {
       const parsed = parseAgyStdout(stdoutData);
       if (!isValidVerdict(parsed, { rejectAdditionalKeys: true })) {
-        throw new Error('Parsed response failed verdict schema validation');
+        const schemaErr = new Error('Parsed response failed verdict schema validation');
+        schemaErr.schemaValidationFailed = true;
+        throw schemaErr;
       }
       return parsed;
     } catch (e) {
+      if (!(e instanceof AgyEnvelopeStatusError)) {
+        e.schemaValidationFailed = true;
+      }
       e.code = e.code || 1;
       e.stderr = stderrData.trim() || e.message;
       throw e;
@@ -3696,6 +3726,7 @@ function classifyReviewerUnavailable(err) {
 
   for (const e of chain) {
     if (!e) continue;
+    if (e.schemaValidationFailed) return null;
     if (e.partialVerdict && e.partialVerdict.verdict === 'REQUEST_CHANGES') return null;
     const msg = String(e.message || '');
     if (REVIEWER_SPEND_OR_POLICY_ERROR_PATTERN.test(msg)) return null;
@@ -4447,16 +4478,7 @@ function unquoteGitPath(rawPath, prefix) {
   return null;
 }
 
-function staticSecurityReview(diffContent) {
-  const text = String(diffContent || '').replace(/^\uFEFF/, '');
-  if (text.trim().length === 0) {
-    return {
-      verdict: 'APPROVE',
-      summary: 'Empty diff; no changes to review.',
-      issues: [],
-    };
-  }
-
+function createStaticSecurityScanner() {
   const issues = [];
   const filesChanged = new Set();
   let currentFile = 'unknown';
@@ -4467,9 +4489,20 @@ function staticSecurityReview(diffContent) {
   let parentOldRemaining = [];
   let newRemaining = 0;
   const conflictState = { inConflictBlock: false, pendingSecretAssignment: false };
+  const decoder = new StringDecoder('utf8');
+  let firstChunk = true;
+  let sawNonWhitespace = false;
+  let remainder = '';
+  let finished = false;
 
-  const lines = text.split(/\r?\n/);
-  for (const rawLine of lines) {
+  function processRawLine(lineWithOptionalCr) {
+    const rawLine = lineWithOptionalCr.endsWith('\r')
+      ? lineWithOptionalCr.slice(0, -1)
+      : lineWithOptionalCr;
+    if (!sawNonWhitespace && rawLine.trim().length > 0) {
+      sawNonWhitespace = true;
+    }
+
     if (rawLine.startsWith('diff --git ')) {
       inHunk = false;
       oldRemaining = 0;
@@ -4487,7 +4520,7 @@ function staticSecurityReview(diffContent) {
           filesChanged.add(currentFile);
         }
       }
-      continue;
+      return;
     }
     if (rawLine.startsWith('diff --cc ') || rawLine.startsWith('diff --combined ')) {
       inHunk = false;
@@ -4507,7 +4540,7 @@ function staticSecurityReview(diffContent) {
         currentFile = unquoted;
         filesChanged.add(currentFile);
       }
-      continue;
+      return;
     }
     const combinedPrefixActive =
       inHunk &&
@@ -4538,7 +4571,7 @@ function staticSecurityReview(diffContent) {
       newRemaining = 0;
       conflictState.inConflictBlock = false;
       conflictState.pendingSecretAssignment = false;
-      continue;
+      return;
     }
     if (!isInHunkRemovedDashDash && rawLine.startsWith('--- ')) {
       inHunk = false;
@@ -4552,7 +4585,7 @@ function staticSecurityReview(diffContent) {
         currentFile = fromPath;
         filesChanged.add(fromPath);
       }
-      continue;
+      return;
     }
     if (!isInHunkAddedPlusPlus && rawLine.startsWith('+++ ')) {
       inHunk = false;
@@ -4566,7 +4599,7 @@ function staticSecurityReview(diffContent) {
         currentFile = toPath;
         filesChanged.add(toPath);
       }
-      continue;
+      return;
     }
 
     const hunkMatch = rawLine.match(/^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/);
@@ -4579,7 +4612,7 @@ function staticSecurityReview(diffContent) {
       conflictState.inConflictBlock = false;
       conflictState.pendingSecretAssignment = false;
       currentLine = Math.max(0, parseInt(hunkMatch[3], 10) - 1);
-      continue;
+      return;
     }
 
     const combinedHunkMatch = rawLine.match(
@@ -4595,11 +4628,11 @@ function staticSecurityReview(diffContent) {
       conflictState.inConflictBlock = false;
       conflictState.pendingSecretAssignment = false;
       currentLine = Math.max(0, parseInt(combinedHunkMatch[3], 10) - 1);
-      continue;
+      return;
     }
 
     if (!inHunk || rawLine.startsWith('\\')) {
-      continue;
+      return;
     }
 
     if (hunkPrefixCols > 1) {
@@ -4616,7 +4649,7 @@ function staticSecurityReview(diffContent) {
           parentOldRemaining[pIdx] -= 1;
         }
       }
-      if (hasMinus) continue;
+      if (hasMinus) return;
       if (newRemaining > 0) newRemaining -= 1;
       if (prefix.includes('+')) {
         currentLine += 1;
@@ -4629,7 +4662,7 @@ function staticSecurityReview(diffContent) {
         if (/^<{7}(?:\s|$)/.test(body)) conflictState.inConflictBlock = true;
         else if (/^>{7}(?:\s|$)/.test(body)) conflictState.inConflictBlock = false;
       }
-      continue;
+      return;
     }
 
     if (rawLine.startsWith('+')) {
@@ -4657,17 +4690,65 @@ function staticSecurityReview(diffContent) {
     }
   }
 
-  const fileList = Array.from(filesChanged);
-  const shownFiles =
-    fileList.length <= 5
-      ? fileList.join(', ')
-      : `${fileList.slice(0, 5).join(', ')}, +${fileList.length - 5} more`;
-  const verdict = issues.length > 0 ? 'REQUEST_CHANGES' : 'APPROVE';
-  const summary =
-    issues.length > 0
-      ? `Static security review detected ${issues.length} issue(s) across ${fileList.length} file(s) (${shownFiles || 'unknown'}).`
-      : `Reviewed diff across ${fileList.length} file(s) (${shownFiles || 'no files'}). No hardcoded secrets, conflict markers, or blocking issues found.`;
-  return { verdict, summary, issues };
+  return {
+    pushChunk(chunk) {
+      if (finished || chunk === null || chunk === undefined) return;
+      let str = Buffer.isBuffer(chunk) ? decoder.write(chunk) : String(chunk);
+      if (!str) return;
+      if (firstChunk) {
+        firstChunk = false;
+        str = str.replace(/^\uFEFF/, '');
+      }
+      const combined = remainder + str;
+      let start = 0;
+      while (true) {
+        const nlIdx = combined.indexOf('\n', start);
+        if (nlIdx < 0) break;
+        processRawLine(combined.slice(start, nlIdx));
+        start = nlIdx + 1;
+      }
+      remainder = combined.slice(start);
+    },
+    finish() {
+      if (!finished) {
+        finished = true;
+        let tail = decoder.end();
+        if (firstChunk && tail) {
+          firstChunk = false;
+          tail = tail.replace(/^\uFEFF/, '');
+        }
+        const finalLine = remainder + tail;
+        remainder = '';
+        if (finalLine.length > 0) {
+          processRawLine(finalLine);
+        }
+      }
+      if (!sawNonWhitespace) {
+        return {
+          verdict: 'APPROVE',
+          summary: 'Empty diff; no changes to review.',
+          issues: [],
+        };
+      }
+      const fileList = Array.from(filesChanged);
+      const shownFiles =
+        fileList.length <= 5
+          ? fileList.join(', ')
+          : `${fileList.slice(0, 5).join(', ')}, +${fileList.length - 5} more`;
+      const verdict = issues.length > 0 ? 'REQUEST_CHANGES' : 'APPROVE';
+      const summary =
+        issues.length > 0
+          ? `Static security review detected ${issues.length} issue(s) across ${fileList.length} file(s) (${shownFiles || 'unknown'}).`
+          : `Reviewed diff across ${fileList.length} file(s) (${shownFiles || 'no files'}). No hardcoded secrets, conflict markers, or blocking issues found.`;
+      return { verdict, summary, issues };
+    },
+  };
+}
+
+function staticSecurityReview(diffContent) {
+  const scanner = createStaticSecurityScanner();
+  scanner.pushChunk(String(diffContent || ''));
+  return scanner.finish();
 }
 
 function mergeStaticSecurityFloor(verdictObj, diffContent) {
@@ -5639,6 +5720,7 @@ module.exports = {
   runIsolatedPreflight,
   runAgy,
   detectAddedLineIssues,
+  createStaticSecurityScanner,
   staticSecurityReview,
   staticFallbackReview: staticSecurityReview,
   mergeStaticSecurityFloor,

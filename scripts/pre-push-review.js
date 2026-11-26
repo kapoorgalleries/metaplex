@@ -34,6 +34,7 @@ const {
   assertAllowedReviewerModel,
   assertSafeOutputTarget,
   classifyReviewerUnavailable,
+  createStaticSecurityScanner,
   resolveEffectiveTimeoutMs,
   resolveEffectiveTotalTimeoutMs,
   resolveMaxReviewChunks,
@@ -808,53 +809,108 @@ function scanPrePushHistorySecrets(repoRoot, commitRanges = [], gitOptions = {})
   }
   const found = [];
   const seen = new Set();
+  const histTmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'trimurti-hist-'));
+  try {
+    fs.chmodSync(histTmpDir, 0o700);
+  } catch (_) {}
 
-  for (const range of commitRanges) {
-    if (!range || !range.localCommit) continue;
-    const revLabel = range.isFromEmptyTree
-      ? range.localCommit
-      : `${range.fromOid}..${range.localCommit}`;
-    const logArgs = ['log', '--cc', '--no-ext-diff', '--no-color', '--format=', '-p'];
-    if (range.isFromEmptyTree) {
-      logArgs.push(range.localCommit, '--');
-    } else {
-      const notRevs = [range.fromOid];
-      if (
-        range.isFastForward &&
-        range.defaultBase &&
-        range.defaultBase !== range.localCommit &&
-        range.defaultBase !== range.fromOid
-      ) {
-        notRevs.push(range.defaultBase);
+  const readChunkBuf = Buffer.allocUnsafe(1024 * 1024);
+
+  try {
+    for (let rangeIdx = 0; rangeIdx < commitRanges.length; rangeIdx += 1) {
+      const range = commitRanges[rangeIdx];
+      if (!range || !range.localCommit) continue;
+      const revLabel = range.isFromEmptyTree
+        ? range.localCommit
+        : `${range.fromOid}..${range.localCommit}`;
+      const logArgs = ['log', '--cc', '--no-ext-diff', '--no-color', '--format=', '-p'];
+      if (range.isFromEmptyTree) {
+        logArgs.push(range.localCommit, '--');
+      } else {
+        const notRevs = [range.fromOid];
+        if (
+          range.isFastForward &&
+          range.defaultBase &&
+          range.defaultBase !== range.localCommit &&
+          range.defaultBase !== range.fromOid
+        ) {
+          notRevs.push(range.defaultBase);
+        }
+        logArgs.push(range.localCommit, '--not', ...notRevs, '--');
       }
-      logArgs.push(range.localCommit, '--not', ...notRevs, '--');
-    }
-    const logRes = runGit(repoRoot, logArgs, gitOptions);
-    if (logRes.status !== 0) {
-      throw new Error(
-        `git log secret scan failed for ${revLabel}: ${(logRes.stderr || '').trim()}`
-      );
-    }
-    if (!logRes.stdout || logRes.stdout.trim() === '') {
-      continue;
-    }
-    const historyStatic = staticSecurityReview(logRes.stdout);
-    for (const issue of historyStatic.issues || []) {
-      if (!issue || typeof issue.message !== 'string') continue;
-      // Resolved merge conflict markers in intermediate commits do not leak secrets if
-      // the pushed tip tree is clean; credentials/keys in intermediate commits DO leak.
-      if (issue.message.includes('merge conflict marker')) continue;
-      const key = `${issue.file}:${issue.line || 1}:${issue.message}`;
-      if (!seen.has(key)) {
-        seen.add(key);
-        found.push({
-          file: issue.file,
-          line: issue.line || 1,
-          message: issue.message,
+
+      const patchFile = path.join(histTmpDir, `range-${rangeIdx}.patch`);
+      const outFd = fs.openSync(patchFile, 'wx', 0o600);
+      let logRes;
+      try {
+        logRes = spawnSync('git', buildGitArgs(logArgs, gitOptions), {
+          cwd: repoRoot,
+          env: buildGitSubprocessEnv(gitOptions.env || process.env),
+          stdio: ['ignore', outFd, 'pipe'],
+          encoding: 'utf8',
+          maxBuffer: 4 * 1024 * 1024,
+          windowsHide: true,
         });
+      } finally {
+        try {
+          fs.closeSync(outFd);
+        } catch (_) {}
+      }
+
+      try {
+        if (logRes.error) {
+          throw new Error(`git log secret scan failed for ${revLabel}: ${logRes.error.message}`);
+        }
+        if (logRes.status !== 0) {
+          throw new Error(
+            `git log secret scan failed for ${revLabel}: ${(logRes.stderr || '').trim()}`
+          );
+        }
+
+        const scanner = createStaticSecurityScanner();
+        const readFd = fs.openSync(patchFile, 'r');
+        try {
+          let offset = 0;
+          while (true) {
+            const bytesRead = fs.readSync(readFd, readChunkBuf, 0, readChunkBuf.length, offset);
+            if (bytesRead <= 0) break;
+            offset += bytesRead;
+            scanner.pushChunk(readChunkBuf.subarray(0, bytesRead));
+          }
+        } finally {
+          try {
+            fs.closeSync(readFd);
+          } catch (_) {}
+        }
+
+        const historyStatic = scanner.finish();
+        for (const issue of historyStatic.issues || []) {
+          if (!issue || typeof issue.message !== 'string') continue;
+          // Resolved merge conflict markers in intermediate commits do not leak secrets if
+          // the pushed tip tree is clean; credentials/keys in intermediate commits DO leak.
+          if (issue.message.includes('merge conflict marker')) continue;
+          const key = `${issue.file}:${issue.line || 1}:${issue.message}`;
+          if (!seen.has(key)) {
+            seen.add(key);
+            found.push({
+              file: issue.file,
+              line: issue.line || 1,
+              message: issue.message,
+            });
+          }
+        }
+      } finally {
+        try {
+          fs.unlinkSync(patchFile);
+        } catch (_) {}
       }
     }
+  } finally {
+    try {
+      fs.rmSync(histTmpDir, { recursive: true, force: true });
+    } catch (_) {}
   }
+
   return found;
 }
 

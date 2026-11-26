@@ -5018,6 +5018,43 @@ async function main() {
                 mergedPartial.issues.some((i) => i.message === 'Bin2 bug in chunk 2'),
               `Expected equal-coverage partial binary attempts to retain both Bin1 and Bin2 issues, got: ${JSON.stringify(mergedPartial.issues)}`
             );
+
+            // (c) sweepOrphanedRunWorkspaces must NOT delete >1h workspace owned by a live process
+            const sweepRoot = fs.mkdtempSync(path.join(tmpRoot, 'sweep-live-2h-'));
+            const liveWsDir = path.join(sweepRoot, 'trimurti-agy-run-live2h');
+            fs.mkdirSync(path.join(liveWsDir, 'work'), { recursive: true, mode: 0o700 });
+            fs.writeFileSync(
+              path.join(liveWsDir, '.owner.json'),
+              JSON.stringify({
+                pid: process.ppid,
+                createdAt: Date.now() - 2 * 60 * 60 * 1000,
+                ...(ppidStartTicks ? { procStartTicks: ppidStartTicks } : {}),
+              }) + '\n',
+              { encoding: 'utf8', mode: 0o600 }
+            );
+            assert.strictEqual(
+              sweepOrphanedRunWorkspaces(sweepRoot, process.platform),
+              0,
+              'sweepOrphanedRunWorkspaces must preserve >1h workspace owned by a live process'
+            );
+            assert(fs.existsSync(liveWsDir), 'Live >1h workspace directory must remain intact');
+
+            // (d) Exit-0 malformed verdict with "429" or "connection reset" on stderr MUST fail closed (null unavailable class)
+            let schemaErrWith429Stderr = null;
+            try {
+              parseAgyStdout('{"conversation_id":"bad","status":"SUCCESS","structured_output":{"verdict":"MAYBE"}}');
+            } catch (err) {
+              err.stderr = 'warning: upstream saw transient 429 and connection reset earlier';
+              const wrapped = new Error(`All genuine agy review attempts failed: ${err.message}`);
+              wrapped.cause = err;
+              schemaErrWith429Stderr = wrapped;
+            }
+            assert(schemaErrWith429Stderr, 'Expected malformed verdict to throw');
+            assert.strictEqual(
+              classifyReviewerUnavailable(schemaErrWith429Stderr),
+              null,
+              'Schema validation failure on exit-0 stdout must fail closed even if stderr mentions 429 or connection reset'
+            );
           }
         }
 
