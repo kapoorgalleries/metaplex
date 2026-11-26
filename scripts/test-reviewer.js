@@ -3819,6 +3819,7 @@ async function main() {
               platform: 'linux',
               env: {
                 ...process.env,
+                TRIMURTI_WIN_TEMP_ROOT: wsCheckRoot,
                 UNLISTED_SECRET_VAR: 'never-inherit',
                 REVIEWER_AGY_ENV_ALLOW: 'CUSTOM_KEEP',
                 WSLENV: 'HOME/u:XDG_CONFIG_HOME/p:UNLISTED_SECRET_VAR/u:CUSTOM_KEEP/u',
@@ -3827,6 +3828,10 @@ async function main() {
               tempRoot: wsCheckRoot,
               requireAuthFiles: true,
             });
+            assert(
+              ws.runRoot.startsWith(wsCheckRoot),
+              `Expected WSL interop workspace to honor TRIMURTI_WIN_TEMP_ROOT on Linux runners without /mnt/c, got: ${ws.runRoot}`
+            );
             assert(
               !ws.childEnv.WSLENV.includes('HOME/u') &&
                 !ws.childEnv.WSLENV.includes('XDG_CONFIG_HOME/p') &&
@@ -4480,18 +4485,42 @@ async function main() {
             const sigExit = new Promise((resolve) => sigRunner.on('close', (code, sig) => resolve({ code, sig })));
             sigRunner.kill('SIGTERM');
             await sigExit;
-            await new Promise((r) => setTimeout(r, 100));
+
+            const isNonZombieAlive = (pid) => {
+              try {
+                process.kill(pid, 0);
+              } catch (_) {
+                return false;
+              }
+              if (process.platform === 'linux') {
+                try {
+                  const statRaw = fs.readFileSync(`/proc/${pid}/stat`, 'utf8');
+                  const closeParen = statRaw.lastIndexOf(')');
+                  if (closeParen >= 0) {
+                    const state = statRaw.slice(closeParen + 2).trim().split(/\s+/)[0];
+                    if (state === 'Z') return false;
+                  }
+                } catch (_) {
+                  return false;
+                }
+              }
+              return true;
+            };
+
+            const gcDeadline = Date.now() + 3000;
+            while (isNonZombieAlive(gcPid) && Date.now() < gcDeadline) {
+              await new Promise((r) => setTimeout(r, 40));
+            }
 
             const runDirsAfter = fs
               .readdirSync(sigDir)
               .filter((n) => n.startsWith('trimurti-agy-run-'));
             assert.deepStrictEqual(runDirsAfter, [], 'SIGTERM must remove active isolated OAuth runRoot');
-            let gcAlive = false;
-            try {
-              process.kill(gcPid, 0);
-              gcAlive = true;
-            } catch (_) {}
-            assert.strictEqual(gcAlive, false, 'SIGTERM must terminate detached agy process group');
+            assert.strictEqual(
+              isNonZombieAlive(gcPid),
+              false,
+              'SIGTERM must terminate detached agy process group'
+            );
           }
         }
 
@@ -4799,6 +4828,195 @@ async function main() {
             assert(
               sendJson5k.subject.endsWith('AA&amp;B'),
               `Email subject must slice before HTML entity escaping (never cutting &amp; into &a), got: ${sendJson5k.subject}`
+            );
+          }
+
+          // 6. PR #44 Codex review regressions:
+          //    (a) withOutputLock must NOT age-evict a lock owned by a live reviewer at 38m (default mode)
+          //    (b) Equal-coverage partial chunk attempts across multiple agy binaries merge blocking issues instead of overwriting
+          {
+            const liveLockDir = fs.mkdtempSync(path.join(tmpRoot, 'live-lock-38m-'));
+            const liveLockTarget = path.join(liveLockDir, 'review_result.json');
+            let ppidStartTicks = '';
+            if (process.platform === 'linux') {
+              try {
+                const st = fs.readFileSync(`/proc/${process.ppid}/stat`, 'utf8');
+                const cp = st.lastIndexOf(')');
+                if (cp >= 0) {
+                  ppidStartTicks = st.slice(cp + 2).trim().split(/\s+/)[19] || '';
+                }
+              } catch (_) {}
+            }
+            fs.writeFileSync(
+              path.join(liveLockDir, '.review_result.json.lock'),
+              JSON.stringify({
+                pid: process.ppid,
+                token: 'live-six-chunk-run',
+                startedAt: Date.now() - 38 * 60 * 1000,
+                ...(ppidStartTicks ? { procStartTicks: ppidStartTicks } : {}),
+              }),
+              'utf8'
+            );
+            await assert.rejects(
+              () => withOutputLock(liveLockTarget, async () => 'must-not-steal', 150),
+              (err) => err.code === REVIEW_LOCK_TIMEOUT_CODE,
+              'Default withOutputLock must never evict a lock owned by a live 38-minute multi-chunk reviewer'
+            );
+
+            // Fallback without procStartTicks (macOS/Windows/hidepid/legacy): still protects 38m (< 50m),
+            // evicts after >= 50m (60m), and evicts same-PID container restart when procStartTicks mismatches.
+            fs.writeFileSync(
+              path.join(liveLockDir, '.review_result.json.lock'),
+              JSON.stringify({
+                pid: process.ppid,
+                token: 'legacy-no-ticks-38m',
+                startedAt: Date.now() - 38 * 60 * 1000,
+              }),
+              'utf8'
+            );
+            await assert.rejects(
+              () => withOutputLock(liveLockTarget, async () => 'must-not-steal-38m', 150),
+              (err) => err.code === REVIEW_LOCK_TIMEOUT_CODE,
+              'Fallback stale age (50m) must protect a 38m lock even when procStartTicks is unavailable'
+            );
+
+            fs.writeFileSync(
+              path.join(liveLockDir, '.review_result.json.lock'),
+              JSON.stringify({
+                pid: process.ppid,
+                token: 'legacy-no-ticks-60m',
+                startedAt: Date.now() - 60 * 60 * 1000,
+              }),
+              'utf8'
+            );
+            assert.strictEqual(
+              await withOutputLock(liveLockTarget, async () => 'evicted-60m-fallback', 2000),
+              'evicted-60m-fallback',
+              'Fallback stale age must recover locks >= 50m when procStartTicks is unavailable'
+            );
+
+            if (process.platform === 'linux') {
+              fs.writeFileSync(
+                path.join(liveLockDir, '.review_result.json.lock'),
+                JSON.stringify({
+                  pid: process.pid,
+                  token: 'container-pid1-restart',
+                  startedAt: Date.now() - 1000,
+                  procStartTicks: '0',
+                }),
+                'utf8'
+              );
+              assert.strictEqual(
+                await withOutputLock(liveLockTarget, async () => 'evicted-same-pid-restart', 2000),
+                'evicted-same-pid-restart',
+                'Mismatched procStartTicks must evict even when lockMeta.pid === process.pid across container restarts'
+              );
+            }
+
+            const multiBinDiff = [
+              'diff --git a/a.js b/a.js',
+              '--- a/a.js',
+              '+++ b/a.js',
+              '@@ -0,0 +1,45 @@',
+              ...Array.from({ length: 45 }, (_, i) => `+const a_${i} = "${'a'.repeat(55)}";`),
+              'diff --git a/b.js b/b.js',
+              '--- a/b.js',
+              '+++ b/b.js',
+              '@@ -0,0 +1,45 @@',
+              ...Array.from({ length: 45 }, (_, i) => `+const b_${i} = "${'b'.repeat(55)}";`),
+              'diff --git a/c.js b/c.js',
+              '--- a/c.js',
+              '+++ b/c.js',
+              '@@ -0,0 +1,45 @@',
+              ...Array.from({ length: 45 }, (_, i) => `+const c_${i} = "${'c'.repeat(55)}";`),
+              '',
+            ].join('\n');
+
+            const bin1Counter = path.join(advDir, 'bin1-cnt.txt');
+            const bin2Counter = path.join(advDir, 'bin2-cnt.txt');
+            fs.writeFileSync(bin1Counter, '0', 'utf8');
+            fs.writeFileSync(bin2Counter, '0', 'utf8');
+
+            const partialBin1 = makeFakeAgy(
+              advDir,
+              `
+              process.stdin.resume();
+              process.stdin.on("end", () => {
+                const n = Number(_fs.readFileSync(${JSON.stringify(bin1Counter)}, "utf8")) + 1;
+                _fs.writeFileSync(${JSON.stringify(bin1Counter)}, String(n), "utf8");
+                if (n === 1) {
+                  process.stdout.write(JSON.stringify({
+                    conversation_id: "c-bin1-1",
+                    status: "SUCCESS",
+                    structured_output: {
+                      verdict: "REQUEST_CHANGES",
+                      summary: "Bin1 chunk1 issue",
+                      issues: [{ file: "a.js", line: 1, message: "Bin1 bug in chunk 1" }]
+                    }
+                  }) + "\\n");
+                  return;
+                }
+                if (n === 2) {
+                  process.stdout.write(JSON.stringify({
+                    conversation_id: "c-bin1-2",
+                    status: "SUCCESS",
+                    structured_output: { verdict: "APPROVE", summary: "Bin1 chunk2 ok", issues: [] }
+                  }) + "\\n");
+                  return;
+                }
+                process.stderr.write("503 Service Unavailable on chunk 3 (bin1)\\n");
+                process.exit(1);
+              });
+              `,
+              { name: 'partial-bin1.js' }
+            );
+            const partialBin2 = makeFakeAgy(
+              advDir,
+              `
+              process.stdin.resume();
+              process.stdin.on("end", () => {
+                const n = Number(_fs.readFileSync(${JSON.stringify(bin2Counter)}, "utf8")) + 1;
+                _fs.writeFileSync(${JSON.stringify(bin2Counter)}, String(n), "utf8");
+                if (n === 1) {
+                  process.stdout.write(JSON.stringify({
+                    conversation_id: "c-bin2-1",
+                    status: "SUCCESS",
+                    structured_output: { verdict: "APPROVE", summary: "Bin2 chunk1 ok", issues: [] }
+                  }) + "\\n");
+                  return;
+                }
+                if (n === 2) {
+                  process.stdout.write(JSON.stringify({
+                    conversation_id: "c-bin2-2",
+                    status: "SUCCESS",
+                    structured_output: {
+                      verdict: "REQUEST_CHANGES",
+                      summary: "Bin2 chunk2 issue",
+                      issues: [{ file: "b.js", line: 2, message: "Bin2 bug in chunk 2" }]
+                    }
+                  }) + "\\n");
+                  return;
+                }
+                process.stderr.write("503 Service Unavailable on chunk 3 (bin2)\\n");
+                process.exit(1);
+              });
+              `,
+              { name: 'partial-bin2.js' }
+            );
+
+            const mergedPartial = await reviewDiff(multiBinDiff, {
+              sourceHome: authHome,
+              agyBins: [partialBin1, partialBin2],
+              models: ['gemini-4-carbon-high'],
+              maxDiffChars: 3500,
+              tempRoot: advDir,
+            });
+            assert.strictEqual(mergedPartial.verdict, 'REQUEST_CHANGES');
+            assert.strictEqual(mergedPartial._meta.partial, true);
+            assert(
+              mergedPartial.issues.some((i) => i.message === 'Bin1 bug in chunk 1') &&
+                mergedPartial.issues.some((i) => i.message === 'Bin2 bug in chunk 2'),
+              `Expected equal-coverage partial binary attempts to retain both Bin1 and Bin2 issues, got: ${JSON.stringify(mergedPartial.issues)}`
             );
           }
         }

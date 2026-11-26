@@ -72,7 +72,7 @@ const DEFAULT_LOCK_TIMEOUT_MS = 420000;
 const MAX_TIMEOUT_MS = 2147483647;
 const MAX_STDIO_BYTES = 16 * 1024 * 1024;
 const ORPHAN_WORKSPACE_MAX_AGE_MS = 60 * 60 * 1000;
-const STALE_LOCK_MIN_AGE_MS = 30 * 60 * 1000;
+const STALE_LOCK_MIN_AGE_MS = 50 * 60 * 1000;
 const REVIEW_LOCK_TIMEOUT_CODE = 'REVIEW_LOCK_TIMEOUT';
 
 const SYSTEM_PROMPT =
@@ -2304,14 +2304,40 @@ function syncLifecycleCleanupHandlers() {
   }
 }
 
+function readLinuxProcMeta(pid) {
+  if (process.platform !== 'linux' || !Number.isInteger(pid) || pid <= 0) {
+    return null;
+  }
+  try {
+    const statRaw = fs.readFileSync(`/proc/${pid}/stat`, 'utf8');
+    const closeParen = statRaw.lastIndexOf(')');
+    if (closeParen < 0) return null;
+    const fields = statRaw.slice(closeParen + 2).trim().split(/\s+/);
+    if (fields.length < 20) return null;
+    return {
+      state: fields[0] || '',
+      startTicks: fields[19] || '',
+    };
+  } catch (_) {
+    return null;
+  }
+}
+
 function isPidAliveQuick(pid) {
   if (!Number.isInteger(pid) || pid <= 0) return false;
+  let alive = false;
   try {
     process.kill(pid, 0);
-    return true;
+    alive = true;
   } catch (err) {
-    return Boolean(err && err.code === 'EPERM');
+    alive = Boolean(err && err.code === 'EPERM');
   }
+  if (!alive) return false;
+  const procMeta = readLinuxProcMeta(pid);
+  if (procMeta && procMeta.state === 'Z') {
+    return false;
+  }
+  return true;
 }
 
 function sweepOrphanedRunWorkspaces(tempRoot, platform = process.platform) {
@@ -4739,13 +4765,7 @@ function writeOutputAtomically(outputPath, payloadObj) {
 const inProcessOutputLocks = new Set();
 
 function isProcessAlive(pid) {
-  if (!Number.isInteger(pid) || pid <= 0) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (err) {
-    return Boolean(err && err.code === 'EPERM');
-  }
+  return isPidAliveQuick(pid);
 }
 
 function sleepMs(ms) {
@@ -4758,14 +4778,16 @@ async function withOutputLock(
   lockTimeoutMs = DEFAULT_LOCK_TIMEOUT_MS,
   lockOptions = {}
 ) {
-  const staleLockMaxAgeMs =
-    Number.isFinite(lockOptions.staleLockMaxAgeMs) && lockOptions.staleLockMaxAgeMs > 0
-      ? lockOptions.staleLockMaxAgeMs
-      : Math.max(STALE_LOCK_MIN_AGE_MS, lockTimeoutMs * 2);
+  const hasExplicitStaleMaxAge =
+    Number.isFinite(lockOptions.staleLockMaxAgeMs) && lockOptions.staleLockMaxAgeMs > 0;
+  const staleLockMaxAgeMs = hasExplicitStaleMaxAge
+    ? lockOptions.staleLockMaxAgeMs
+    : Math.max(STALE_LOCK_MIN_AGE_MS, lockTimeoutMs * 2);
   const { resolved: resolvedOutput, dir } = assertSafeOutputTarget(outputPath);
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   const lockPath = path.join(dir, `.${path.basename(resolvedOutput)}.lock`);
   const token = `${process.pid}:${Date.now()}:${crypto.randomBytes(6).toString('hex')}`;
+  const selfProcMeta = readLinuxProcMeta(process.pid);
   const deadline = Date.now() + lockTimeoutMs;
 
   let acquired = false;
@@ -4776,7 +4798,15 @@ async function withOutputLock(
         try {
           fs.writeFileSync(
             fd,
-            JSON.stringify({ pid: process.pid, token, startedAt: Date.now() }),
+            JSON.stringify({
+              pid: process.pid,
+              token,
+              startedAt: Date.now(),
+              leaseMs: staleLockMaxAgeMs,
+              ...(selfProcMeta && selfProcMeta.startTicks
+                ? { procStartTicks: selfProcMeta.startTicks }
+                : {}),
+            }),
             'utf8'
           );
         } finally {
@@ -4810,13 +4840,39 @@ async function withOutputLock(
             Number.isInteger(lockMeta.pid) &&
             lockMeta.pid > 0
           ) {
+            const startedAt = Number.isFinite(lockMeta.startedAt)
+              ? lockMeta.startedAt
+              : statBefore.mtimeMs;
+            const effectiveStaleMaxAgeMs = hasExplicitStaleMaxAge
+              ? staleLockMaxAgeMs
+              : Math.max(
+                  staleLockMaxAgeMs,
+                  Number.isFinite(lockMeta.leaseMs) && lockMeta.leaseMs > 0
+                    ? lockMeta.leaseMs
+                    : 0
+                );
+
             if (lockMeta.pid !== process.pid && !isProcessAlive(lockMeta.pid)) {
               shouldEvict = true;
+            } else if (hasExplicitStaleMaxAge && Date.now() - startedAt >= staleLockMaxAgeMs) {
+              shouldEvict = true;
             } else {
-              const startedAt = Number.isFinite(lockMeta.startedAt)
-                ? lockMeta.startedAt
-                : statBefore.mtimeMs;
-              if (Date.now() - startedAt >= staleLockMaxAgeMs) {
+              const hasRecordedStartTicks =
+                typeof lockMeta.procStartTicks === 'string' && lockMeta.procStartTicks !== '';
+              const ownerProcMeta = hasRecordedStartTicks
+                ? readLinuxProcMeta(lockMeta.pid)
+                : null;
+              if (ownerProcMeta && ownerProcMeta.startTicks) {
+                // On Linux when /proc/<pid>/stat is readable, compare startTicks (including when
+                // lockMeta.pid === process.pid across container restarts) so PID reuse evicts
+                // immediately while a confirmed original live holder is never evicted prematurely.
+                if (ownerProcMeta.startTicks !== lockMeta.procStartTicks) {
+                  shouldEvict = true;
+                }
+              } else if (Date.now() - startedAt >= effectiveStaleMaxAgeMs) {
+                // Fallback when procStartTicks is unavailable (macOS/Windows, Linux hidepid, or
+                // legacy lock files): honor both STALE_LOCK_MIN_AGE_MS (50m > 40m 6-chunk ceiling)
+                // and the holder's recorded leaseMs so locks neither evict early nor wedge forever.
                 shouldEvict = true;
               }
             }
@@ -4954,7 +5010,18 @@ async function reviewDiff(diffContent, options = {}) {
   const reviewDeadline = Date.now() + totalTimeoutMs;
 
   let binaries;
-  if (options.agyBin) {
+  if (Array.isArray(options.agyBins) && options.agyBins.length > 0) {
+    const wslAllowed = isWslInteropAllowed({ allowWslInterop: options.allowWslInterop, env });
+    binaries = options.agyBins.map((bin) => {
+      if (!wslAllowed) {
+        assertNonWindowsInteropBinaryOnPosix(bin, effectivePlatform);
+      }
+      if (!isExecutableFile(bin, effectivePlatform)) {
+        throw new Error(`Configured agyBins entry is not an executable file: ${bin}`);
+      }
+      return bin;
+    });
+  } else if (options.agyBin) {
     const wslAllowed = isWslInteropAllowed({ allowWslInterop: options.allowWslInterop, env });
     if (!wslAllowed) {
       assertNonWindowsInteropBinaryOnPosix(options.agyBin, effectivePlatform);
@@ -5197,17 +5264,80 @@ async function reviewDiff(diffContent, options = {}) {
                   (Array.isArray(v.issues) && v.issues.length > 0))
             )
           ) {
-            if (
-              !bestPartialBlockingAttempt ||
-              completedChunkVerdicts.length >= bestPartialBlockingAttempt.chunkVerdicts.length
-            ) {
+            const candidateAttempt = {
+              chunkVerdicts: completedChunkVerdicts.slice(),
+              model,
+              policy: preflight.resolvedModels.policy,
+              agyBin,
+              latestQuota,
+              error,
+            };
+            if (!bestPartialBlockingAttempt) {
+              bestPartialBlockingAttempt = candidateAttempt;
+            } else {
+              const prevChunks = bestPartialBlockingAttempt.chunkVerdicts;
+              const nextChunks = candidateAttempt.chunkVerdicts;
+              const maxLen = Math.max(prevChunks.length, nextChunks.length);
+              const combinedChunks = [];
+              for (let idx = 0; idx < maxLen; idx += 1) {
+                const a = prevChunks[idx];
+                const b = nextChunks[idx];
+                if (!a) {
+                  combinedChunks.push(b);
+                } else if (!b) {
+                  combinedChunks.push(a);
+                } else {
+                  const mergedIssues = Array.isArray(a.issues) ? a.issues.slice() : [];
+                  if (Array.isArray(b.issues)) {
+                    for (const iss of b.issues) {
+                      const dup = mergedIssues.some(
+                        (ex) =>
+                          ex.file === iss.file &&
+                          ex.line === iss.line &&
+                          ex.message === iss.message
+                      );
+                      if (!dup) mergedIssues.push(iss);
+                    }
+                  }
+                  const blocking =
+                    a.verdict === 'REQUEST_CHANGES' ||
+                    b.verdict === 'REQUEST_CHANGES' ||
+                    mergedIssues.length > 0;
+                  const summaries = [];
+                  for (const item of [a, b]) {
+                    if (
+                      item &&
+                      typeof item.summary === 'string' &&
+                      item.summary.trim() &&
+                      (blocking
+                        ? item.verdict === 'REQUEST_CHANGES' ||
+                          (Array.isArray(item.issues) && item.issues.length > 0)
+                        : true) &&
+                      !summaries.includes(item.summary.trim())
+                    ) {
+                      summaries.push(item.summary.trim());
+                    }
+                  }
+                  combinedChunks.push({
+                    verdict: blocking ? 'REQUEST_CHANGES' : 'APPROVE',
+                    summary:
+                      summaries.join(' | ') ||
+                      (typeof b.summary === 'string' && b.summary.trim()) ||
+                      (typeof a.summary === 'string' && a.summary.trim()) ||
+                      (blocking ? 'Blocking issues detected.' : 'Approved.'),
+                    issues: mergedIssues,
+                  });
+                }
+              }
+              const preferCandidateMeta = nextChunks.length >= prevChunks.length;
+              const metaSource = preferCandidateMeta ? candidateAttempt : bestPartialBlockingAttempt;
               bestPartialBlockingAttempt = {
-                chunkVerdicts: completedChunkVerdicts.slice(),
-                model,
-                policy: preflight.resolvedModels.policy,
-                agyBin,
-                latestQuota,
-                error,
+                chunkVerdicts: combinedChunks,
+                model: metaSource.model,
+                policy: metaSource.policy,
+                agyBin: metaSource.agyBin,
+                latestQuota: metaSource.latestQuota,
+                error: metaSource.error,
               };
             }
           }
