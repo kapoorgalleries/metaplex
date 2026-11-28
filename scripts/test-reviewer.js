@@ -5304,8 +5304,40 @@ async function main() {
         assert(!wslXdgWs.childEnv.WSLENV.includes('XDG_RUNTIME_DIR'));
         assert(!wslXdgWs.childEnv.WSLENV.includes('XDG_CUSTOM_FOO'));
         assert(wslXdgWs.childEnv.WSLENV.includes('SAFE_CUSTOM_FLAG/u'));
+        assert.strictEqual(wslXdgWs.childEnv.NO_GCE_CHECK, 'true');
+        assert.strictEqual(wslXdgWs.childEnv.METADATA_SERVER_DETECTION, 'none');
+        assert.strictEqual(wslXdgWs.childEnv.GCE_METADATA_HOST, '127.0.0.1:1');
+        assert.strictEqual(wslXdgWs.childEnv.GCE_METADATA_IP, '127.0.0.1:1');
+        assert.strictEqual(wslXdgWs.childEnv.GCE_METADATA_ROOT, '127.0.0.1:1');
+        assert(wslXdgWs.childEnv.WSLENV.includes('NO_GCE_CHECK/u'));
+        assert(wslXdgWs.childEnv.WSLENV.includes('METADATA_SERVER_DETECTION/u'));
+        assert(wslXdgWs.childEnv.WSLENV.includes('GCE_METADATA_HOST/u'));
+        assert(wslXdgWs.childEnv.WSLENV.includes('GCE_METADATA_IP/u'));
+        assert(wslXdgWs.childEnv.WSLENV.includes('GCE_METADATA_ROOT/u'));
       } finally {
         wslXdgWs.cleanup();
+      }
+
+      const posixGceWs = createIsolatedRunWorkspace({
+        sourceHome: wslXdgAuthHome,
+        agyBin: '/usr/local/bin/agy',
+        env: {
+          PATH: '/usr/bin:/bin',
+          GCE_METADATA_HOST: '169.254.169.254',
+          GCE_METADATA_IP: '169.254.169.254',
+        },
+        platform: 'linux',
+        tempRoot: wslXdgCheckRoot,
+        requireAuthFiles: true,
+      });
+      try {
+        assert.strictEqual(posixGceWs.childEnv.NO_GCE_CHECK, 'true');
+        assert.strictEqual(posixGceWs.childEnv.METADATA_SERVER_DETECTION, 'none');
+        assert.strictEqual(posixGceWs.childEnv.GCE_METADATA_HOST, '127.0.0.1:1');
+        assert.strictEqual(posixGceWs.childEnv.GCE_METADATA_IP, '127.0.0.1:1');
+        assert.strictEqual(posixGceWs.childEnv.GCE_METADATA_ROOT, '127.0.0.1:1');
+      } finally {
+        posixGceWs.cleanup();
       }
 
       // Benign desktop IDE vars pass on Windows host while GCE_METADATA_* and agy 1.5.16+ ADC/project/paygo vars fail closed
@@ -5365,6 +5397,35 @@ async function main() {
             `Whitespace-only PR_NUMBER and padded refs must succeed cleanly: ${wsDiffRes.stdout}\n${wsDiffRes.stderr}`
           );
           assert.strictEqual(fs.existsSync(path.join(wsDiffWorkDir, 'pr26.diff')), true);
+
+          for (const badEnvCase of [
+            { PR_NUMBER: '12\n3', BASE_REF: 'HEAD', HEAD_REF: 'HEAD' },
+            { PR_NUMBER: '12\r3', BASE_REF: 'HEAD', HEAD_REF: 'HEAD' },
+            { PR_NUMBER: '', BASE_REF: 'HE\nAD', HEAD_REF: 'HEAD' },
+            { PR_NUMBER: '', BASE_REF: 'HEAD', HEAD_REF: 'HE\rAD' },
+          ]) {
+            const crlfWorkDir = fs.mkdtempSync(path.join(tmpRoot, 'crlf-diff-work-'));
+            const crlfRes = spawnSync('bash', ['-c', diffGenRunBlock], {
+              cwd: path.resolve(__dirname, '..'),
+              encoding: 'utf8',
+              env: {
+                ...cleanGitEnv(),
+                PATH: process.env.PATH,
+                HOME: tmpRoot,
+                REVIEW_DIR: crlfWorkDir,
+                ...badEnvCase,
+              },
+            });
+            assert.notStrictEqual(
+              crlfRes.status,
+              0,
+              `Embedded CR/LF in workflow_dispatch inputs must be rejected instead of concatenated: ${JSON.stringify(badEnvCase)}`
+            );
+            assert(
+              crlfRes.stdout.includes('embedded CR/LF characters are forbidden'),
+              `Expected explicit CR/LF error diagnostic, got: ${crlfRes.stdout}\n${crlfRes.stderr}`
+            );
+          }
         }
 
         const certFile = path.join(tmpRoot, 'no-pr-cert.pem');
@@ -5627,6 +5688,38 @@ async function main() {
           const trim4040 = JSON.parse(capturedReqs.find((r) => r.url === '/trimurti').body);
           assert.strictEqual(trim4040.pull_request.number, 4040);
           assert.strictEqual(trim4040.pull_request.url, 'https://github.com/kapoorgalleries/metaplex/pull/4040');
+
+          // Embedded newline in PR_NUMBER ("12\n3") must NOT concatenate to PR #123 in Send Notifications
+          capturedReqs.length = 0;
+          const resCrlfPr = await runBashAsync(notifyRunBlock, {
+            PATH: process.env.PATH,
+            HOME: tmpRoot,
+            CURL_CA_BUNDLE: certFile,
+            GITHUB_API_URL: `https://127.0.0.1:${httpsPort}`,
+            GITHUB_SERVER_URL: 'https://github.com',
+            GITHUB_TOKEN: 'test-gh-tok',
+            TRIMURTI_WEBHOOK_URL: `https://127.0.0.1:${httpsPort}/trimurti`,
+            SLACK_WEBHOOK_URL: `https://127.0.0.1:${httpsPort}/slack`,
+            EMAIL_API_KEY: 'test-sg-tok',
+            SENDGRID_API_URL: `https://127.0.0.1:${httpsPort}/v3/mail/send`,
+            PR_NUMBER: '12\n3',
+            PR_TITLE: '',
+            PR_URL: 'https://github.com/kapoorgalleries/metaplex/pull/12\n3',
+            REPO_FULL_NAME: 'kapoorgalleries/metaplex',
+            RUN_URL: 'https://github.com/kapoorgalleries/metaplex/actions/runs/1004',
+            REVIEW_VERDICT: 'ERROR',
+            REVIEW_SUMMARY: 'Invalid PR_NUMBER rejected.',
+            REVIEW_ISSUES_JSON: '[]',
+          });
+          assert.strictEqual(resCrlfPr.status, 0, `${resCrlfPr.stdout}\n${resCrlfPr.stderr}`);
+          assert.strictEqual(
+            capturedReqs.some((r) => r.url.startsWith('/repos/')),
+            false,
+            'Send Notifications must not concatenate 12\\n3 into /repos/.../pulls/123'
+          );
+          const trimCrlf = JSON.parse(capturedReqs.find((r) => r.url === '/trimurti').body);
+          assert.strictEqual(trimCrlf.pull_request.number, null);
+          assert.strictEqual(trimCrlf.pull_request.url, '');
         } finally {
           await closeServer(httpsSrv);
         }

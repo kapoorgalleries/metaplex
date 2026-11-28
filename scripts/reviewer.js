@@ -2614,6 +2614,11 @@ function createIsolatedRunWorkspace({
         'XDG_STATE_HOME',
         'AGY_CLI_MODEL_API_MAX_RETRIES',
         'NO_COLOR',
+        'NO_GCE_CHECK',
+        'METADATA_SERVER_DETECTION',
+        'GCE_METADATA_HOST',
+        'GCE_METADATA_IP',
+        'GCE_METADATA_ROOT',
       ]);
       const keptEntries = existingEntries.filter((entry) => {
         const upperVar = entry.split('/')[0].toUpperCase();
@@ -2624,11 +2629,19 @@ function createIsolatedRunWorkspace({
         'APPDATA/p',
         'LOCALAPPDATA/p',
         'AGY_CLI_MODEL_API_MAX_RETRIES/u',
-        'NO_COLOR/u'
+        'NO_COLOR/u',
+        'NO_GCE_CHECK/u',
+        'METADATA_SERVER_DETECTION/u',
+        'GCE_METADATA_HOST/u',
+        'GCE_METADATA_IP/u',
+        'GCE_METADATA_ROOT/u'
       );
       cleanedBaseEnv.WSLENV = keptEntries.join(':');
     }
 
+    // Explicitly disable GCE metadata-server ADC and blackhole metadata endpoints
+    // to closed loopback port 1 so unset GCE_METADATA_* cannot fall back to
+    // 169.254.169.254 / metadata.google.internal on GCE self-hosted runners.
     const childEnv = {
       ...cleanedBaseEnv,
       ...posixXdgEnv,
@@ -2639,6 +2652,11 @@ function createIsolatedRunWorkspace({
       AGY_DISABLE_AUTO_UPDATE: '1',
       ANTIGRAVITY_DISABLE_UPDATE_CHECK: '1',
       NO_COLOR: '1',
+      NO_GCE_CHECK: 'true',
+      METADATA_SERVER_DETECTION: 'none',
+      GCE_METADATA_HOST: '127.0.0.1:1',
+      GCE_METADATA_IP: '127.0.0.1:1',
+      GCE_METADATA_ROOT: '127.0.0.1:1',
     };
 
     const cliWorkDir = wslWindowsInterop ? wslPathToWinPath(workDir) : workDir;

@@ -234,9 +234,18 @@ jobs:
             exit 1
           }
 
-          PR_NUMBER="$(printf '%s' "${PR_NUMBER:-}" | tr -d '\r\n' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
-          BASE_REF="$(printf '%s' "${BASE_REF:-}" | tr -d '\r\n' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
-          HEAD_REF="$(printf '%s' "${HEAD_REF:-}" | tr -d '\r\n' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+          for dispatch_var in PR_NUMBER BASE_REF HEAD_REF; do
+            raw_dispatch_val="${!dispatch_var:-}"
+            case "$raw_dispatch_val" in
+              *$'\r'*|*$'\n'*)
+                echo "::error::Invalid ${dispatch_var}: embedded CR/LF characters are forbidden"
+                exit 1
+                ;;
+            esac
+          done
+          PR_NUMBER="$(printf '%s' "${PR_NUMBER:-}" | sed -e 's/^[[:blank:]]*//' -e 's/[[:blank:]]*$//')"
+          BASE_REF="$(printf '%s' "${BASE_REF:-}" | sed -e 's/^[[:blank:]]*//' -e 's/[[:blank:]]*$//')"
+          HEAD_REF="$(printf '%s' "${HEAD_REF:-}" | sed -e 's/^[[:blank:]]*//' -e 's/[[:blank:]]*$//')"
 
           if [ -n "${PR_NUMBER:-}" ]; then
             if ! printf '%s' "$PR_NUMBER" | grep -Eq '^[1-9][0-9]*$'; then
@@ -541,8 +550,16 @@ jobs:
           SENDGRID_API_URL="${SENDGRID_API_URL:-https://api.sendgrid.com/v3/mail/send}"
 
           # Strictly validate PR_NUMBER and PR_URL so malformed workflow_dispatch inputs
-          # that failed diff generation cannot inject newlines, Slack mentions, or bad URLs.
-          RAW_PR_NUM="$(printf '%s' "${PR_NUMBER:-}" | tr -d '\r\n' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+          # that failed diff generation cannot concatenate CR/LF (e.g. 12\n3 -> 123),
+          # inject newlines, emit Slack mentions, or construct bad URLs.
+          case "${PR_NUMBER:-}" in
+            *$'\r'*|*$'\n'*)
+              RAW_PR_NUM=""
+              ;;
+            *)
+              RAW_PR_NUM="$(printf '%s' "${PR_NUMBER:-}" | sed -e 's/^[[:blank:]]*//' -e 's/[[:blank:]]*$//')"
+              ;;
+          esac
           if printf '%s' "$RAW_PR_NUM" | grep -Eq '^[1-9][0-9]*$'; then
             export PR_NUMBER="$RAW_PR_NUM"
           else
