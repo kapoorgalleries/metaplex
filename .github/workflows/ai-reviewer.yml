@@ -234,6 +234,19 @@ jobs:
             exit 1
           }
 
+          for dispatch_var in PR_NUMBER BASE_REF HEAD_REF; do
+            raw_dispatch_val="${!dispatch_var:-}"
+            case "$raw_dispatch_val" in
+              *$'\r'*|*$'\n'*)
+                echo "::error::Invalid ${dispatch_var}: embedded CR/LF characters are forbidden"
+                exit 1
+                ;;
+            esac
+          done
+          PR_NUMBER="$(printf '%s' "${PR_NUMBER:-}" | sed -e 's/^[[:blank:]]*//' -e 's/[[:blank:]]*$//')"
+          BASE_REF="$(printf '%s' "${BASE_REF:-}" | sed -e 's/^[[:blank:]]*//' -e 's/[[:blank:]]*$//')"
+          HEAD_REF="$(printf '%s' "${HEAD_REF:-}" | sed -e 's/^[[:blank:]]*//' -e 's/[[:blank:]]*$//')"
+
           if [ -n "${PR_NUMBER:-}" ]; then
             if ! printf '%s' "$PR_NUMBER" | grep -Eq '^[1-9][0-9]*$'; then
               echo "::error::Invalid pr_number '${PR_NUMBER}' (expected positive integer)"
@@ -305,8 +318,23 @@ jobs:
                 .replace(/,/g, "%2C");
             }
 
+            function stripLoneSurrogates(val) {
+              return String(val ?? "").replace(
+                /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g,
+                ""
+              );
+            }
+
+            function safeSlice(str, maxLen) {
+              const wellFormed = stripLoneSurrogates(str);
+              if (wellFormed.length <= maxLen) return wellFormed;
+              const cut = wellFormed.slice(0, maxLen);
+              const last = cut.charCodeAt(cut.length - 1);
+              return last >= 0xd800 && last <= 0xdbff ? cut.slice(0, -1) : cut;
+            }
+
             function singleLine(val) {
-              return String(val ?? "")
+              return stripLoneSurrogates(val)
                 .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b\[[0-9;?]*[ -/]*[@-~]/g, "")
                 .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]+/g, " ")
                 .replace(/[\r\n]+/g, " ")
@@ -335,16 +363,16 @@ jobs:
             let totalIssuesCount = 0;
 
             if (data && typeof data === "object" && !Array.isArray(data)) {
-              const rawVerdict = singleLine(data.verdict || "");
-              const rawSummary = typeof data.summary === "string" ? singleLine(data.summary).slice(0, 500) : "";
+              const rawVerdict = safeSlice(singleLine(data.verdict || ""), 64);
+              const rawSummary = typeof data.summary === "string" ? safeSlice(singleLine(data.summary), 500) : "";
               const hasIssuesArray = Array.isArray(data.issues);
 
               if (hasIssuesArray) {
                 totalIssuesCount = data.issues.length;
                 for (const item of data.issues.slice(0, 25)) {
                   if (!item || typeof item !== "object" || Array.isArray(item)) continue;
-                  const file = typeof item.file === "string" ? singleLine(item.file).slice(0, 500) : "";
-                  const message = typeof item.message === "string" ? singleLine(item.message).slice(0, 300) : "";
+                  const file = typeof item.file === "string" ? safeSlice(singleLine(item.file), 500) : "";
+                  const message = typeof item.message === "string" ? safeSlice(singleLine(item.message), 300) : "";
                   if (!file || !message) continue;
                   const entry = { file, message };
                   if (typeof item.line === "number" && Number.isInteger(item.line) && item.line >= 1) {
@@ -361,8 +389,8 @@ jobs:
               ) {
                 verdict = "ERROR";
                 summary = rawSummary
-                  ? `Invalid review_result.json schema (verdict="${rawVerdict || "missing"}"): ${rawSummary}`.slice(0, 500)
-                  : `Invalid review_result.json schema (verdict="${rawVerdict || "missing"}", missing summary or issues array).`;
+                  ? safeSlice(`Invalid review_result.json schema (verdict="${rawVerdict || "missing"}"): ${rawSummary}`, 500)
+                  : safeSlice(`Invalid review_result.json schema (verdict="${rawVerdict || "missing"}", missing summary or issues array).`, 500);
               } else {
                 verdict = rawVerdict;
                 summary = rawSummary;
@@ -371,17 +399,17 @@ jobs:
                 }
                 if (verdict === "REQUEST_CHANGES" && cleanIssues.length === 0) {
                   verdict = "ERROR";
-                  summary = `Invalid REQUEST_CHANGES payload without valid issues: ${summary}`.slice(0, 500);
+                  summary = safeSlice(`Invalid REQUEST_CHANGES payload without valid issues: ${summary}`, 500);
                 }
                 if (verdict === "APPROVE" && outcome !== "success") {
                   verdict = "ERROR";
                   const shownOutcome = outcome || "missing";
-                  summary = `${summary} (reviewer step outcome was "${shownOutcome}", expected "success")`.slice(0, 500);
+                  summary = safeSlice(`${summary} (reviewer step outcome was "${shownOutcome}", expected "success")`, 500);
                 }
               }
             } else if (parseErr) {
               verdict = "ERROR";
-              summary = `Invalid JSON in ${resultPath}: ${singleLine(parseErr.message)}`.slice(0, 500);
+              summary = safeSlice(`Invalid JSON in ${resultPath}: ${singleLine(parseErr.message)}`, 500);
             } else {
               verdict = "ERROR";
               summary =
@@ -401,12 +429,6 @@ jobs:
             }
 
             if (process.env.GITHUB_STEP_SUMMARY) {
-              const safeSlice = (str, maxLen) => {
-                if (str.length <= maxLen) return str;
-                const cut = str.slice(0, maxLen);
-                const last = cut.charCodeAt(cut.length - 1);
-                return last >= 0xd800 && last <= 0xdbff ? cut.slice(0, -1) : cut;
-              };
               const stripMentions = (val) => {
                 let cur = String(val ?? "").replace(
                   /[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]+/g,
@@ -502,6 +524,7 @@ jobs:
           EMAIL_FROM: ${{ secrets.EMAIL_FROM || vars.EMAIL_FROM || 'info@kapoors.com' }}
           GITHUB_TOKEN: ${{ github.token }}
           GITHUB_API_URL: ${{ github.api_url }}
+          GITHUB_SERVER_URL: ${{ github.server_url }}
           PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number || '' }}
           PR_URL: ${{ github.event.pull_request.html_url || (inputs.pr_number && format('{0}/{1}/pull/{2}', github.server_url, github.repository, inputs.pr_number)) || '' }}
           PR_TITLE: ${{ github.event.pull_request.title || '' }}
@@ -523,11 +546,20 @@ jobs:
           EMAIL_KEY_CLEAN="$(printf '%s' "${EMAIL_API_KEY:-}" | tr -d '\r\n' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
           GH_TOKEN_CLEAN="$(printf '%s' "${GITHUB_TOKEN:-}" | tr -d '\r\n' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
           GH_API_CLEAN="$(printf '%s' "${GITHUB_API_URL:-}" | tr -d '\r\n' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's|/*$||')"
+          GH_SERVER_CLEAN="$(printf '%s' "${GITHUB_SERVER_URL:-https://github.com}" | tr -d '\r\n' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's|/*$||')"
           SENDGRID_API_URL="${SENDGRID_API_URL:-https://api.sendgrid.com/v3/mail/send}"
 
           # Strictly validate PR_NUMBER and PR_URL so malformed workflow_dispatch inputs
-          # that failed diff generation cannot inject newlines, Slack mentions, or bad URLs.
-          RAW_PR_NUM="$(printf '%s' "${PR_NUMBER:-}" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+          # that failed diff generation cannot concatenate CR/LF (e.g. 12\n3 -> 123),
+          # inject newlines, emit Slack mentions, or construct bad URLs.
+          case "${PR_NUMBER:-}" in
+            *$'\r'*|*$'\n'*)
+              RAW_PR_NUM=""
+              ;;
+            *)
+              RAW_PR_NUM="$(printf '%s' "${PR_NUMBER:-}" | sed -e 's/^[[:blank:]]*//' -e 's/[[:blank:]]*$//')"
+              ;;
+          esac
           if printf '%s' "$RAW_PR_NUM" | grep -Eq '^[1-9][0-9]*$'; then
             export PR_NUMBER="$RAW_PR_NUM"
           else
@@ -569,12 +601,26 @@ jobs:
                 const fs = require("fs");
                 try {
                   const data = JSON.parse(fs.readFileSync(process.env.PR_META_JSON, "utf8"));
+                  const stripLoneSurrogates = (val) =>
+                    String(val ?? "").replace(
+                      /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g,
+                      ""
+                    );
+                  const safeSlice = (str, maxLen) => {
+                    const wellFormed = stripLoneSurrogates(str);
+                    if (wellFormed.length <= maxLen) return wellFormed;
+                    const cut = wellFormed.slice(0, maxLen);
+                    const last = cut.charCodeAt(cut.length - 1);
+                    return last >= 0xd800 && last <= 0xdbff ? cut.slice(0, -1) : cut;
+                  };
                   const cleanLine = (v) =>
                     typeof v === "string"
-                      ? v
-                          .replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]+/g, " ")
-                          .trim()
-                          .slice(0, 300)
+                      ? safeSlice(
+                          stripLoneSurrogates(v)
+                            .replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]+/g, " ")
+                            .trim(),
+                          300
+                        )
                       : "";
                   const title = cleanLine(data && data.title);
                   const htmlUrl =
@@ -594,6 +640,11 @@ jobs:
               fi
             fi
           fi
+          if [ -z "${PR_URL:-}" ] && [ -n "${PR_NUMBER:-}" ] && \
+             printf '%s' "$GH_SERVER_CLEAN" | grep -Eq '^https://[^[:space:]<>|"`'\'']+$' && \
+             printf '%s' "${REPO_FULL_NAME:-}" | grep -Eq '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$'; then
+            export PR_URL="${GH_SERVER_CLEAN}/${REPO_FULL_NAME}/pull/${PR_NUMBER}"
+          fi
 
           notify_rc=0
           configured_count=0
@@ -605,14 +656,20 @@ jobs:
             TRIMURTI_BODY="$TMP_CURL_DIR/trimurti.json"
             TRIMURTI_URL_CLEAN="$TRIMURTI_URL_CLEAN" TRIMURTI_CFG="$TRIMURTI_CFG" TRIMURTI_BODY="$TRIMURTI_BODY" node -e '
               const fs = require("fs");
+              const stripLoneSurrogates = (val) =>
+                String(val ?? "").replace(
+                  /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g,
+                  ""
+                );
               const safeSlice = (str, maxLen) => {
-                if (str.length <= maxLen) return str;
-                const cut = str.slice(0, maxLen);
+                const wellFormed = stripLoneSurrogates(str);
+                if (wellFormed.length <= maxLen) return wellFormed;
+                const cut = wellFormed.slice(0, maxLen);
                 const last = cut.charCodeAt(cut.length - 1);
                 return last >= 0xd800 && last <= 0xdbff ? cut.slice(0, -1) : cut;
               };
               const stripMentions = (val) => {
-                let cur = String(val ?? "").replace(
+                let cur = stripLoneSurrogates(val).replace(
                   /[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]+/g,
                   " "
                 );
@@ -653,13 +710,13 @@ jobs:
                     .filter((it) => Boolean(it.message));
                 }
               } catch (_) {}
-              const rawVerdict = stripMentions(process.env.REVIEW_VERDICT || "").slice(0, 64);
+              const rawVerdict = safeSlice(stripMentions(process.env.REVIEW_VERDICT || ""), 64);
               const verdict = rawVerdict === "REQUEST_CHANGES" || rawVerdict === "ERROR" ? rawVerdict : "ERROR";
               const defaultSummary =
                 verdict === "REQUEST_CHANGES"
                   ? "The AI Reviewer requested changes."
                   : "The Trimurti AI Reviewer pipeline failed closed before producing a review verdict.";
-              const prNumStr = /^\d+$/.test(process.env.PR_NUMBER || "") ? process.env.PR_NUMBER : "";
+              const prNumStr = /^[1-9][0-9]*$/.test(process.env.PR_NUMBER || "") ? process.env.PR_NUMBER : "";
               const safeUrl = (u) =>
                 typeof u === "string" && /^https:\/\/[^\s<>|"\x27`]+$/.test(u.trim()) ? u.trim() : "";
               const payload = {
@@ -703,14 +760,20 @@ jobs:
             SLACK_BODY="$TMP_CURL_DIR/slack.json"
             SLACK_URL_CLEAN="$SLACK_URL_CLEAN" SLACK_CFG="$SLACK_CFG" SLACK_BODY="$SLACK_BODY" node -e '
               const fs = require("fs");
+              const stripLoneSurrogates = (val) =>
+                String(val ?? "").replace(
+                  /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g,
+                  ""
+                );
               const safeSlice = (str, maxLen) => {
-                if (str.length <= maxLen) return str;
-                const cut = str.slice(0, maxLen);
+                const wellFormed = stripLoneSurrogates(str);
+                if (wellFormed.length <= maxLen) return wellFormed;
+                const cut = wellFormed.slice(0, maxLen);
                 const last = cut.charCodeAt(cut.length - 1);
                 return last >= 0xd800 && last <= 0xdbff ? cut.slice(0, -1) : cut;
               };
               const stripMentions = (val) => {
-                let cur = String(val ?? "").replace(
+                let cur = stripLoneSurrogates(val).replace(
                   /[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]+/g,
                   " "
                 );
@@ -735,12 +798,13 @@ jobs:
                 typeof u === "string" && /^https:\/\/[^\s<>|"\x27`]+$/.test(u.trim())
                   ? u.trim().replace(/&/g, "&amp;")
                   : "";
-              const num = /^[1-9][0-9]*$/.test(process.env.PR_NUMBER || "") ? process.env.PR_NUMBER : "?";
+              const num = /^[1-9][0-9]*$/.test(process.env.PR_NUMBER || "") ? process.env.PR_NUMBER : "";
               const title = escSlackMrkdwn(process.env.PR_TITLE || "", 300);
               const repo = escSlackMrkdwn(process.env.REPO_FULL_NAME || "kapoorgalleries/metaplex", 200);
+              const targetLabel = num ? `${repo} #${num}` : repo;
               const prUrl = safeUrl(process.env.PR_URL);
               const runUrl = safeUrl(process.env.RUN_URL);
-              const rawVerdict = stripMentions(process.env.REVIEW_VERDICT || "").slice(0, 64);
+              const rawVerdict = safeSlice(stripMentions(process.env.REVIEW_VERDICT || ""), 64);
               const verdict = rawVerdict === "REQUEST_CHANGES" || rawVerdict === "ERROR" ? rawVerdict : "ERROR";
               const defaultSummary =
                 verdict === "REQUEST_CHANGES"
@@ -766,9 +830,9 @@ jobs:
                 issueLines.push(`• ...and ${issues.length - 10} additional issue(s)`);
               }
               const lines = [
-                `🚨 *AI PR Review Failed!* (${repo} #${num})`,
+                `🚨 *AI ${num ? "PR " : ""}Review Failed!* (${targetLabel})`,
                 "_AI-generated advisory output; verify findings against the PR diff._",
-                title ? `PR: ${title}` : null,
+                title ? `${num ? "PR" : "Title"}: ${title}` : null,
                 `Verdict: \`${verdict}\``,
                 `Summary (AI-generated): ${summary}`,
                 issueLines.length > 0 ? `Issues (AI-generated):\n${issueLines.join("\n")}` : null,
@@ -810,21 +874,27 @@ jobs:
             EMAIL_BODY="$TMP_CURL_DIR/email.json"
             EMAIL_KEY_CLEAN="$EMAIL_KEY_CLEAN" SENDGRID_API_URL="$SENDGRID_API_URL" EMAIL_CFG="$EMAIL_CFG" EMAIL_BODY="$EMAIL_BODY" node -e '
               const fs = require("fs");
+              const stripLoneSurrogates = (val) =>
+                String(val ?? "").replace(
+                  /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g,
+                  ""
+                );
               const safeSlice = (str, maxLen) => {
-                if (str.length <= maxLen) return str;
-                const cut = str.slice(0, maxLen);
+                const wellFormed = stripLoneSurrogates(str);
+                if (wellFormed.length <= maxLen) return wellFormed;
+                const cut = wellFormed.slice(0, maxLen);
                 const last = cut.charCodeAt(cut.length - 1);
                 return last >= 0xd800 && last <= 0xdbff ? cut.slice(0, -1) : cut;
               };
               const cleanRaw = (val, maxLen = 500) =>
                 safeSlice(
-                  String(val ?? "")
+                  stripLoneSurrogates(val)
                     .replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]+/g, " ")
                     .trim(),
                   maxLen
                 );
               const stripEmailMentions = (val) => {
-                let cur = String(val ?? "").replace(
+                let cur = stripLoneSurrogates(val).replace(
                   /[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]+/g,
                   " "
                 );
@@ -850,7 +920,7 @@ jobs:
                   .replace(/>/g, "&gt;");
               const safeUrl = (u) =>
                 typeof u === "string" && /^https:\/\/[^\s<>|"\x27`]+$/.test(u.trim()) ? u.trim() : "";
-              const num = /^[1-9][0-9]*$/.test(process.env.PR_NUMBER || "") ? process.env.PR_NUMBER : "?";
+              const num = /^[1-9][0-9]*$/.test(process.env.PR_NUMBER || "") ? process.env.PR_NUMBER : "";
               const title = sanitizeEmailText(process.env.PR_TITLE || "", 300);
               const subjectTitle = sanitizeEmailText(process.env.PR_TITLE || "", 80);
               const repo = sanitizeEmailText(process.env.REPO_FULL_NAME || "kapoorgalleries/metaplex", 200);
@@ -891,7 +961,9 @@ jobs:
                   ? rawFrom
                   : "info@kapoors.com";
               const bodyLines = [
-                `The Trimurti AI Reviewer failed on ${repo} Pull Request #${num}.`,
+                num
+                  ? `The Trimurti AI Reviewer failed on ${repo} Pull Request #${num}.`
+                  : `The Trimurti AI Reviewer failed on ${repo}.`,
                 "AI-generated advisory output. Unverified model output; verify findings against the PR diff.",
                 title ? `Title: ${title}` : null,
                 `Verdict: ${verdict}`,
@@ -916,7 +988,7 @@ jobs:
                 JSON.stringify({
                   personalizations: [{ to: toList }],
                   from: { email: fromEmail, name: "Kapoor Galleries CI" },
-                  subject: `Build Failed: PR #${num}${subjectTitle ? " - " + subjectTitle : ""}`,
+                  subject: `Build Failed: ${num ? `PR #${num}` : repo}${subjectTitle ? " - " + subjectTitle : ""}`,
                   content: [{ type: "text/plain", value: bodyLines.filter((v) => v !== null).join("\n") }],
                 }),
                 "utf8"

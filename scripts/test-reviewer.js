@@ -60,6 +60,8 @@ const {
   SESSION_SETTINGS,
   TRIMURTI_TEXT_AGENT_NAME,
   DENY_ENV_PATTERN,
+  WINDOWS_FORBIDDEN_PAID_ENV_PATTERN,
+  TIER_RANK,
   RM_SYNC_RETRY_OPTIONS,
   resolveWslSafeTempDir,
   stripTerminalSpinnerPrefixes,
@@ -5187,6 +5189,557 @@ async function main() {
             'APPROVE',
             `Expected zero static false positives on metaplex branch diff, got: ${JSON.stringify(
               selfStatic.issues
+            )}`
+          );
+        }
+      }
+    });
+
+    await checkAsync('agy 1.5.16+ neon:37 tier ranking, GCE_METADATA_/Windows ADC env guards, and omitted pr_number alert formatting without #?', async () => {
+      // 1. TIER_RANK.neon === 37 & full agy 1.5.18 catalog ranking + fallback selection
+      assert.strictEqual(TIER_RANK.neon, 37);
+      assert.throws(
+        () => assertAllowedReviewerModel('gemini-pro-orchestrator-neon'),
+        /Forbidden reviewer model/
+      );
+
+      const agy1518Catalog =
+        '\r⠋ Fetching available models...\r\x1b[K' +
+        [
+          'gemini-4-neon-high\tGemini 4 Neon (High)',
+          'gemini-4-neon-xhigh\tGemini 4 Neon (XHigh)',
+          'gemini-4-neon-medium\tGemini 4 Neon (Medium)',
+          'gemini-4-neon-low\tGemini 4 Neon (Low)',
+          'gemini-4-neon-preview-high\tGemini 4 Neon Preview (High)',
+          'gemini-4-carbon-medium\tGemini 4 Carbon (Medium)',
+          'gemini-4-carbon-high\tGemini 4 Carbon (High)',
+          'gemini-4-carbon-low\tGemini 4 Carbon (Low)',
+          'gemini-4-argon-medium\tGemini 4 Argon (Medium)',
+          'gemini-4-argon-high\tGemini 4 Argon (High)',
+          'gemini-4-argon-low\tGemini 4 Argon (Low)',
+          'gemini-4-hydrogen-xhigh\tGemini 4 Hydrogen (XHigh)',
+          'gemini-pro-orchestrator-neon\tOrchestrator (Neon)',
+          'gemini-pro-orchestrator\tOrchestrator (Carbon)',
+          'gemini-3.8-flash-high\tGemini 3.8 Flash (High)',
+          'claude-opus-5-5-high\tClaude Opus 5.5 (High)',
+          'gpt-oss-120b-medium\tGPT-OSS 120B (Medium)',
+        ].join('\n');
+
+      const ranked1518 = parseAvailableGeminiModels(agy1518Catalog);
+      assert.deepStrictEqual(
+        ranked1518.map((m) => m.slug),
+        [
+          'gemini-4-carbon-high',
+          'gemini-4-carbon-medium',
+          'gemini-4-carbon-low',
+          'gemini-4-neon-xhigh',
+          'gemini-4-neon-high',
+          'gemini-4-neon-medium',
+          'gemini-4-neon-low',
+          'gemini-4-neon-preview-high',
+          'gemini-4-argon-high',
+          'gemini-4-argon-medium',
+          'gemini-4-argon-low',
+          'gemini-4-hydrogen-xhigh',
+          'gemini-3.8-flash-high',
+        ]
+      );
+      assert.deepStrictEqual(resolveCandidateModels({ availableModels: ranked1518 }).candidates, [
+        'gemini-4-carbon-high',
+      ]);
+      assert.deepStrictEqual(
+        resolveCandidateModels({ availableModels: ranked1518, allowModelFallback: true }).candidates,
+        ['gemini-4-carbon-high', 'gemini-4-neon-xhigh']
+      );
+      assert.deepStrictEqual(
+        resolveCandidateModels({
+          availableModels: [
+            'gemini-4-neon-xhigh',
+            'gemini-4-neon-preview-high',
+            'gemini-4-argon-high',
+          ],
+          allowModelFallback: true,
+        }).candidates,
+        ['gemini-4-neon-xhigh', 'gemini-4-argon-high']
+      );
+
+      // 2. GCE_METADATA_ in DENY_ENV_PATTERN (overrides REVIEWER_AGY_ENV_ALLOW & WSLENV), XDG_* WSLENV scrubbing, + Windows ADC/Billing guards
+      assert(DENY_ENV_PATTERN.test('GCE_METADATA_HOST'));
+      assert(DENY_ENV_PATTERN.test('GCE_METADATA_IP'));
+      assert(WINDOWS_FORBIDDEN_PAID_ENV_PATTERN.test('GCE_METADATA_HOST'));
+      const scrubbedGce = cleanEnvironment({
+        PATH: '/usr/bin:/bin',
+        GCE_METADATA_HOST: '169.254.169.254',
+        GCE_METADATA_IP: '169.254.169.254',
+        GCE_METADATA_ROOT: '169.254.169.254',
+        REVIEWER_AGY_ENV_ALLOW: 'GCE_METADATA_HOST,GCE_METADATA_IP,SAFE_CUSTOM_FLAG',
+        SAFE_CUSTOM_FLAG: 'enabled',
+        WSLENV: 'GCE_METADATA_HOST/u:GCE_METADATA_IP/u:SAFE_CUSTOM_FLAG/u',
+      });
+      assert.strictEqual('GCE_METADATA_HOST' in scrubbedGce, false);
+      assert.strictEqual('GCE_METADATA_IP' in scrubbedGce, false);
+      assert.strictEqual('GCE_METADATA_ROOT' in scrubbedGce, false);
+      assert.strictEqual(scrubbedGce.SAFE_CUSTOM_FLAG, 'enabled');
+      assert.strictEqual(scrubbedGce.WSLENV, 'SAFE_CUSTOM_FLAG/u');
+
+      const wslXdgCheckRoot = fs.mkdtempSync(path.join(tmpRoot, 'wsl-xdg-'));
+      const wslXdgAuthHome = createAuthHome(tmpRoot, 'wsl-xdg-auth');
+      const wslXdgWs = createIsolatedRunWorkspace({
+        sourceHome: wslXdgAuthHome,
+        agyBin: '/mnt/c/Users/sanja/AppData/Local/agy/bin/agy.exe',
+        env: {
+          PATH: '/usr/bin:/bin',
+          TRIMURTI_WIN_TEMP_ROOT: wslXdgCheckRoot,
+          REVIEWER_AGY_ENV_ALLOW: 'XDG_RUNTIME_DIR,XDG_CUSTOM_FOO,SAFE_CUSTOM_FLAG',
+          XDG_RUNTIME_DIR: '/run/user/1000',
+          XDG_CUSTOM_FOO: '/tmp/xdg-foo',
+          SAFE_CUSTOM_FLAG: '1',
+          WSLENV: 'XDG_RUNTIME_DIR/p:XDG_CUSTOM_FOO/p:SAFE_CUSTOM_FLAG/u',
+        },
+        platform: 'linux',
+        tempRoot: wslXdgCheckRoot,
+        requireAuthFiles: true,
+      });
+      try {
+        assert(!wslXdgWs.childEnv.WSLENV.includes('XDG_RUNTIME_DIR'));
+        assert(!wslXdgWs.childEnv.WSLENV.includes('XDG_CUSTOM_FOO'));
+        assert(wslXdgWs.childEnv.WSLENV.includes('SAFE_CUSTOM_FLAG/u'));
+        assert.strictEqual(wslXdgWs.childEnv.NO_GCE_CHECK, 'true');
+        assert.strictEqual(wslXdgWs.childEnv.METADATA_SERVER_DETECTION, 'none');
+        assert.strictEqual(wslXdgWs.childEnv.GCE_METADATA_HOST, '127.0.0.1:1');
+        assert.strictEqual(wslXdgWs.childEnv.GCE_METADATA_IP, '127.0.0.1:1');
+        assert.strictEqual(wslXdgWs.childEnv.GCE_METADATA_ROOT, '127.0.0.1:1');
+        assert(wslXdgWs.childEnv.WSLENV.includes('NO_GCE_CHECK/u'));
+        assert(wslXdgWs.childEnv.WSLENV.includes('METADATA_SERVER_DETECTION/u'));
+        assert(wslXdgWs.childEnv.WSLENV.includes('GCE_METADATA_HOST/u'));
+        assert(wslXdgWs.childEnv.WSLENV.includes('GCE_METADATA_IP/u'));
+        assert(wslXdgWs.childEnv.WSLENV.includes('GCE_METADATA_ROOT/u'));
+      } finally {
+        wslXdgWs.cleanup();
+      }
+
+      const posixGceWs = createIsolatedRunWorkspace({
+        sourceHome: wslXdgAuthHome,
+        agyBin: '/usr/local/bin/agy',
+        env: {
+          PATH: '/usr/bin:/bin',
+          GCE_METADATA_HOST: '169.254.169.254',
+          GCE_METADATA_IP: '169.254.169.254',
+        },
+        platform: 'linux',
+        tempRoot: wslXdgCheckRoot,
+        requireAuthFiles: true,
+      });
+      try {
+        assert.strictEqual(posixGceWs.childEnv.NO_GCE_CHECK, 'true');
+        assert.strictEqual(posixGceWs.childEnv.METADATA_SERVER_DETECTION, 'none');
+        assert.strictEqual(posixGceWs.childEnv.GCE_METADATA_HOST, '127.0.0.1:1');
+        assert.strictEqual(posixGceWs.childEnv.GCE_METADATA_IP, '127.0.0.1:1');
+        assert.strictEqual(posixGceWs.childEnv.GCE_METADATA_ROOT, '127.0.0.1:1');
+      } finally {
+        posixGceWs.cleanup();
+      }
+
+      // Benign desktop IDE vars pass on Windows host while GCE_METADATA_* and agy 1.5.16+ ADC/project/paygo vars fail closed
+      verifyWindowsPaidEnvAbsent({
+        windowsEnvText:
+          'Path=C:\\Windows\r\nAGY_REQUIRE_AUTHENTICATED_UI_BOOTSTRAP=1\r\nANTIGRAVITY_SERVER_CSRF_TOKEN=csrf_ok\r\nANTIGRAVITY_MODEL_PROVIDER=antigravity\r\n',
+      });
+      for (const forbiddenWinPair of [
+        'GCE_METADATA_HOST=169.254.169.254',
+        'GCE_METADATA_IP=169.254.169.254',
+        'ANTIGRAVITY_ADC=1',
+        'ANTIGRAVITY_ADC_AUTH=true',
+        'ANTIGRAVITY_PROJECT=billing-proj',
+        'ANTIGRAVITY_LOCATION=us-central1',
+        'ANTIGRAVITY_BUSINESS_PAYGO_TIER=1',
+        'ANTIGRAVITY_GATEWAY_URL=https://gw.invalid',
+        'ANTIGRAVITY_LLM_GATEWAY_URL=https://gw.invalid',
+      ]) {
+        assert.throws(
+          () => verifyWindowsPaidEnvAbsent({ windowsEnvText: `Path=C:\\Windows\r\n${forbiddenWinPair}\r\n` }),
+          /Paid API Windows environment variable/
+        );
+      }
+
+      // 3. ai-reviewer.yml: whitespace-padded workflow_dispatch inputs, omitted/invalid pr_number formatting (zero #?),
+      //    and end-to-end surrogate-pair safety across Record review summary -> GITHUB_OUTPUT -> Send Notifications
+      if (
+        process.platform !== 'win32' &&
+        haveCmd('bash', '--version') &&
+        haveCmd('curl', '--version') &&
+        haveCmd('openssl', 'version')
+      ) {
+        const wfText = fs.readFileSync(WORKFLOW_PATH, 'utf8');
+        const diffGenRunBlock = extractYamlRunBlock(wfText, 'Generate pull request diff');
+        const recordRunBlock = extractYamlRunBlock(wfText, 'Record review summary');
+        const notifyRunBlock = extractYamlRunBlock(wfText, 'Send Notifications');
+
+        // Whitespace-only PR_NUMBER and padded HEAD_REF/BASE_REF in Generate pull request diff
+        if (haveCmd('git', '--version')) {
+          const wsDiffWorkDir = fs.mkdtempSync(path.join(tmpRoot, 'ws-diff-work-'));
+          const wsDiffRes = spawnSync('bash', ['-c', diffGenRunBlock], {
+            cwd: path.resolve(__dirname, '..'),
+            encoding: 'utf8',
+            env: {
+              ...cleanGitEnv(),
+              PATH: process.env.PATH,
+              HOME: tmpRoot,
+              REVIEW_DIR: wsDiffWorkDir,
+              PR_NUMBER: '   ',
+              BASE_REF: ' HEAD ',
+              HEAD_REF: ' HEAD ',
+            },
+          });
+          assert.strictEqual(
+            wsDiffRes.status,
+            0,
+            `Whitespace-only PR_NUMBER and padded refs must succeed cleanly: ${wsDiffRes.stdout}\n${wsDiffRes.stderr}`
+          );
+          assert.strictEqual(fs.existsSync(path.join(wsDiffWorkDir, 'pr26.diff')), true);
+
+          for (const badEnvCase of [
+            { PR_NUMBER: '12\n3', BASE_REF: 'HEAD', HEAD_REF: 'HEAD' },
+            { PR_NUMBER: '12\r3', BASE_REF: 'HEAD', HEAD_REF: 'HEAD' },
+            { PR_NUMBER: '', BASE_REF: 'HE\nAD', HEAD_REF: 'HEAD' },
+            { PR_NUMBER: '', BASE_REF: 'HEAD', HEAD_REF: 'HE\rAD' },
+          ]) {
+            const crlfWorkDir = fs.mkdtempSync(path.join(tmpRoot, 'crlf-diff-work-'));
+            const crlfRes = spawnSync('bash', ['-c', diffGenRunBlock], {
+              cwd: path.resolve(__dirname, '..'),
+              encoding: 'utf8',
+              env: {
+                ...cleanGitEnv(),
+                PATH: process.env.PATH,
+                HOME: tmpRoot,
+                REVIEW_DIR: crlfWorkDir,
+                ...badEnvCase,
+              },
+            });
+            assert.notStrictEqual(
+              crlfRes.status,
+              0,
+              `Embedded CR/LF in workflow_dispatch inputs must be rejected instead of concatenated: ${JSON.stringify(badEnvCase)}`
+            );
+            assert(
+              crlfRes.stdout.includes('embedded CR/LF characters are forbidden'),
+              `Expected explicit CR/LF error diagnostic, got: ${crlfRes.stdout}\n${crlfRes.stderr}`
+            );
+          }
+        }
+
+        const certFile = path.join(tmpRoot, 'no-pr-cert.pem');
+        const keyFile = path.join(tmpRoot, 'no-pr-key.pem');
+        const certGen = spawnSync(
+          'openssl',
+          [
+            'req',
+            '-x509',
+            '-newkey',
+            'rsa:2048',
+            '-nodes',
+            '-keyout',
+            keyFile,
+            '-out',
+            certFile,
+            '-days',
+            '1',
+            '-subj',
+            '/CN=127.0.0.1',
+            '-addext',
+            'subjectAltName=IP:127.0.0.1',
+          ],
+          { encoding: 'utf8' }
+        );
+        assert.strictEqual(certGen.status, 0, certGen.stderr);
+
+        const capturedReqs = [];
+        const surrogateTitle = `${'T'.repeat(299)}\uD83D\uDD12suffix`;
+        const { server: httpsSrv, port: httpsPort } = await listenHttpsServer(
+          fs.readFileSync(certFile, 'utf8'),
+          fs.readFileSync(keyFile, 'utf8'),
+          (req, res) => {
+            let body = '';
+            req.on('data', (c) => {
+              body += c.toString();
+            });
+            req.on('end', () => {
+              capturedReqs.push({ url: req.url, method: req.method, body });
+              if (req.url === '/repos/kapoorgalleries/metaplex/pulls/77') {
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(
+                  JSON.stringify({
+                    title: surrogateTitle,
+                    html_url: 'https://github.com/kapoorgalleries/metaplex/pull/77',
+                  })
+                );
+                return;
+              }
+              if (req.url === '/repos/kapoorgalleries/metaplex/pulls/4040') {
+                res.writeHead(404, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ message: 'Not Found' }));
+                return;
+              }
+              res.writeHead(req.url === '/v3/mail/send' ? 202 : 200, {
+                'Content-Type': 'application/json',
+              });
+              res.end(req.url === '/v3/mail/send' ? '' : '{"ok":true}');
+            });
+          }
+        );
+
+        const loneSurrogateRe =
+          /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+        const assertNoLoneSurrogatesInParsed = (node, ctx) => {
+          if (typeof node === 'string') {
+            assert.strictEqual(
+              loneSurrogateRe.test(node),
+              false,
+              `Parsed JSON string in ${ctx} contained lone UTF-16 surrogate`
+            );
+            assert.strictEqual(
+              node.includes('\uFFFD'),
+              false,
+              `Parsed JSON string in ${ctx} contained U+FFFD replacement char`
+            );
+            return;
+          }
+          if (Array.isArray(node)) {
+            node.forEach((v, idx) => assertNoLoneSurrogatesInParsed(v, `${ctx}[${idx}]`));
+            return;
+          }
+          if (node && typeof node === 'object') {
+            for (const [k, v] of Object.entries(node)) {
+              assertNoLoneSurrogatesInParsed(v, `${ctx}.${k}`);
+            }
+          }
+        };
+
+        try {
+          for (const omittedPrVal of ['', '   ', '0', 'not-a-number']) {
+            capturedReqs.length = 0;
+            const resNoPr = await runBashAsync(notifyRunBlock, {
+              PATH: process.env.PATH,
+              HOME: tmpRoot,
+              CURL_CA_BUNDLE: certFile,
+              GITHUB_API_URL: `https://127.0.0.1:${httpsPort}`,
+              GITHUB_SERVER_URL: 'https://github.com',
+              GITHUB_TOKEN: 'test-gh-tok',
+              TRIMURTI_WEBHOOK_URL: `https://127.0.0.1:${httpsPort}/trimurti`,
+              SLACK_WEBHOOK_URL: `https://127.0.0.1:${httpsPort}/slack`,
+              EMAIL_API_KEY: 'test-sg-tok',
+              SENDGRID_API_URL: `https://127.0.0.1:${httpsPort}/v3/mail/send`,
+              PR_NUMBER: omittedPrVal,
+              PR_TITLE: omittedPrVal === '' ? 'Manual branch audit' : '',
+              PR_URL: '',
+              REPO_FULL_NAME: 'kapoorgalleries/metaplex',
+              RUN_URL: 'https://github.com/kapoorgalleries/metaplex/actions/runs/1001',
+              REVIEW_VERDICT: 'REQUEST_CHANGES',
+              REVIEW_SUMMARY: 'Found issue on branch diff.',
+              REVIEW_ISSUES_JSON: JSON.stringify([{ file: 'scripts/a.js', line: 3, message: 'Check null' }]),
+            });
+            assert.strictEqual(resNoPr.status, 0, `${resNoPr.stdout}\n${resNoPr.stderr}`);
+            assert.strictEqual(
+              capturedReqs.some((r) => r.url.startsWith('/repos/')),
+              false,
+              `Must not query pulls REST API when PR_NUMBER="${omittedPrVal}"`
+            );
+
+            const slackPayload = JSON.parse(capturedReqs.find((r) => r.url === '/slack').body);
+            assert(
+              slackPayload.text.includes('🚨 *AI Review Failed!* (kapoorgalleries/metaplex)'),
+              `Expected clean Slack header without #?, got: ${slackPayload.text}`
+            );
+            assert(!/#\?/.test(slackPayload.text), `Slack alert must never emit #?: ${slackPayload.text}`);
+            assert(!slackPayload.text.includes('View details here:'));
+
+            const emailPayload = JSON.parse(capturedReqs.find((r) => r.url === '/v3/mail/send').body);
+            const emailBodyText = emailPayload.content[0].value;
+            assert(
+              !/#\?|Pull Request #\?|PR #\?/.test(`${emailPayload.subject}\n${emailBodyText}`),
+              `Email subject/body must never emit #? or PR #?: ${emailPayload.subject} / ${emailBodyText}`
+            );
+            assert.strictEqual(
+              emailPayload.subject,
+              omittedPrVal === ''
+                ? 'Build Failed: kapoorgalleries/metaplex - Manual branch audit'
+                : 'Build Failed: kapoorgalleries/metaplex'
+            );
+            assert(
+              emailBodyText.startsWith('The Trimurti AI Reviewer failed on kapoorgalleries/metaplex.\n'),
+              `Unexpected email opening line: ${emailBodyText}`
+            );
+
+            const trimPayload = JSON.parse(capturedReqs.find((r) => r.url === '/trimurti').body);
+            assert.strictEqual(trimPayload.pull_request.number, null);
+            assert.strictEqual(trimPayload.pull_request.url, '');
+          }
+
+          // End-to-end Record review summary -> GITHUB_OUTPUT / GITHUB_STEP_SUMMARY -> Send Notifications
+          // with astral emoji straddling 500/300 UTF-16 slice boundaries + pre-existing lone surrogates
+          const e2eSurrDir = fs.mkdtempSync(path.join(tmpRoot, 'e2e-surr-'));
+          const e2eResFile = path.join(e2eSurrDir, 'review_result.json');
+          const e2eOutFile = path.join(e2eSurrDir, 'gh_output.txt');
+          const e2eSumFile = path.join(e2eSurrDir, 'gh_summary.md');
+          fs.writeFileSync(
+            e2eResFile,
+            JSON.stringify({
+              verdict: 'REQUEST_CHANGES',
+              summary: `${'S'.repeat(499)}\uD83D\uDD12overflow`,
+              issues: [
+                {
+                  file: `${'F'.repeat(499)}\uD83D\uDD12.js`,
+                  line: 7,
+                  message: `${'M'.repeat(299)}\uD83D\uDD12overflow`,
+                },
+                {
+                  file: 'src/lone.js',
+                  line: 9,
+                  message: 'lone\uD800high and \uDC00\uDC00low',
+                },
+              ],
+            }),
+            'utf8'
+          );
+          const recSurrRes = spawnSync('bash', ['-c', recordRunBlock], {
+            encoding: 'utf8',
+            env: {
+              PATH: process.env.PATH,
+              HOME: tmpRoot,
+              REVIEW_DIR: e2eSurrDir,
+              REVIEW_OUTPUT_PATH: e2eResFile,
+              REVIEWER_OUTCOME: 'failure',
+              GITHUB_OUTPUT: e2eOutFile,
+              GITHUB_STEP_SUMMARY: e2eSumFile,
+            },
+          });
+          assert.strictEqual(recSurrRes.status, 1, 'REQUEST_CHANGES must exit 1 in Record review summary');
+          const ghOutText = fs.readFileSync(e2eOutFile, 'utf8');
+          const ghSumText = fs.readFileSync(e2eSumFile, 'utf8');
+          assert.strictEqual(ghOutText.includes('\uFFFD'), false, 'GITHUB_OUTPUT must not contain U+FFFD');
+          assert.strictEqual(/\\ud[89ab][0-9a-f]{2}/i.test(ghOutText), false, 'GITHUB_OUTPUT must not contain \\ud800..\\udbff escapes');
+          assert.strictEqual(ghSumText.includes('\uFFFD'), false, 'GITHUB_STEP_SUMMARY must not contain U+FFFD');
+          assert.strictEqual(loneSurrogateRe.test(ghSumText), false);
+
+          const outMap = {};
+          for (const line of ghOutText.trim().split('\n')) {
+            const eq = line.indexOf('=');
+            if (eq > 0) outMap[line.slice(0, eq)] = line.slice(eq + 1);
+          }
+
+          capturedReqs.length = 0;
+          const resSurrogate = await runBashAsync(notifyRunBlock, {
+            PATH: process.env.PATH,
+            HOME: tmpRoot,
+            CURL_CA_BUNDLE: certFile,
+            GITHUB_API_URL: `https://127.0.0.1:${httpsPort}`,
+            GITHUB_SERVER_URL: 'https://github.com',
+            GITHUB_TOKEN: 'test-gh-tok',
+            TRIMURTI_WEBHOOK_URL: `https://127.0.0.1:${httpsPort}/trimurti`,
+            SLACK_WEBHOOK_URL: `https://127.0.0.1:${httpsPort}/slack`,
+            EMAIL_API_KEY: 'test-sg-tok',
+            SENDGRID_API_URL: `https://127.0.0.1:${httpsPort}/v3/mail/send`,
+            PR_NUMBER: '77',
+            PR_TITLE: '',
+            PR_URL: '',
+            REPO_FULL_NAME: 'kapoorgalleries/metaplex',
+            RUN_URL: 'https://github.com/kapoorgalleries/metaplex/actions/runs/1002',
+            REVIEW_VERDICT: outMap.verdict,
+            REVIEW_SUMMARY: outMap.summary,
+            REVIEW_ISSUES_JSON: outMap.issues_json,
+          });
+          assert.strictEqual(resSurrogate.status, 0, `${resSurrogate.stdout}\n${resSurrogate.stderr}`);
+          for (const reqItem of capturedReqs.filter((r) => r.method === 'POST')) {
+            assert.strictEqual(reqItem.body.includes('\uFFFD'), false);
+            assertNoLoneSurrogatesInParsed(JSON.parse(reqItem.body), reqItem.url);
+          }
+          const trim77 = JSON.parse(capturedReqs.find((r) => r.url === '/trimurti').body);
+          assert.strictEqual(trim77.pull_request.number, 77);
+          assert.strictEqual(trim77.pull_request.title, 'T'.repeat(299));
+          assert.strictEqual(trim77.pull_request.url, 'https://github.com/kapoorgalleries/metaplex/pull/77');
+          assert.strictEqual(trim77.summary, 'S'.repeat(499));
+          assert.strictEqual(trim77.issues[0].file, 'F'.repeat(499));
+          assert.strictEqual(trim77.issues[0].message, 'M'.repeat(299));
+          assert.strictEqual(trim77.issues[1].message, 'lonehigh and low');
+
+          // Whitespace-padded PR_NUMBER (" 4040 ") reconstructs canonical PR_URL even when REST API 404s
+          capturedReqs.length = 0;
+          const resPaddedPr = await runBashAsync(notifyRunBlock, {
+            PATH: process.env.PATH,
+            HOME: tmpRoot,
+            CURL_CA_BUNDLE: certFile,
+            GITHUB_API_URL: `https://127.0.0.1:${httpsPort}`,
+            GITHUB_SERVER_URL: 'https://github.com',
+            GITHUB_TOKEN: 'test-gh-tok',
+            TRIMURTI_WEBHOOK_URL: `https://127.0.0.1:${httpsPort}/trimurti`,
+            SLACK_WEBHOOK_URL: `https://127.0.0.1:${httpsPort}/slack`,
+            EMAIL_API_KEY: 'test-sg-tok',
+            SENDGRID_API_URL: `https://127.0.0.1:${httpsPort}/v3/mail/send`,
+            PR_NUMBER: ' 4040 ',
+            PR_TITLE: '',
+            PR_URL: 'https://github.com/kapoorgalleries/metaplex/pull/ 4040 ',
+            REPO_FULL_NAME: 'kapoorgalleries/metaplex',
+            RUN_URL: 'https://github.com/kapoorgalleries/metaplex/actions/runs/1003',
+            REVIEW_VERDICT: 'ERROR',
+            REVIEW_SUMMARY: 'Diff fetch failed.',
+            REVIEW_ISSUES_JSON: '[]',
+          });
+          assert.strictEqual(resPaddedPr.status, 0, `${resPaddedPr.stdout}\n${resPaddedPr.stderr}`);
+          const trim4040 = JSON.parse(capturedReqs.find((r) => r.url === '/trimurti').body);
+          assert.strictEqual(trim4040.pull_request.number, 4040);
+          assert.strictEqual(trim4040.pull_request.url, 'https://github.com/kapoorgalleries/metaplex/pull/4040');
+
+          // Embedded newline in PR_NUMBER ("12\n3") must NOT concatenate to PR #123 in Send Notifications
+          capturedReqs.length = 0;
+          const resCrlfPr = await runBashAsync(notifyRunBlock, {
+            PATH: process.env.PATH,
+            HOME: tmpRoot,
+            CURL_CA_BUNDLE: certFile,
+            GITHUB_API_URL: `https://127.0.0.1:${httpsPort}`,
+            GITHUB_SERVER_URL: 'https://github.com',
+            GITHUB_TOKEN: 'test-gh-tok',
+            TRIMURTI_WEBHOOK_URL: `https://127.0.0.1:${httpsPort}/trimurti`,
+            SLACK_WEBHOOK_URL: `https://127.0.0.1:${httpsPort}/slack`,
+            EMAIL_API_KEY: 'test-sg-tok',
+            SENDGRID_API_URL: `https://127.0.0.1:${httpsPort}/v3/mail/send`,
+            PR_NUMBER: '12\n3',
+            PR_TITLE: '',
+            PR_URL: 'https://github.com/kapoorgalleries/metaplex/pull/12\n3',
+            REPO_FULL_NAME: 'kapoorgalleries/metaplex',
+            RUN_URL: 'https://github.com/kapoorgalleries/metaplex/actions/runs/1004',
+            REVIEW_VERDICT: 'ERROR',
+            REVIEW_SUMMARY: 'Invalid PR_NUMBER rejected.',
+            REVIEW_ISSUES_JSON: '[]',
+          });
+          assert.strictEqual(resCrlfPr.status, 0, `${resCrlfPr.stdout}\n${resCrlfPr.stderr}`);
+          assert.strictEqual(
+            capturedReqs.some((r) => r.url.startsWith('/repos/')),
+            false,
+            'Send Notifications must not concatenate 12\\n3 into /repos/.../pulls/123'
+          );
+          const trimCrlf = JSON.parse(capturedReqs.find((r) => r.url === '/trimurti').body);
+          assert.strictEqual(trimCrlf.pull_request.number, null);
+          assert.strictEqual(trimCrlf.pull_request.url, '');
+        } finally {
+          await closeServer(httpsSrv);
+        }
+      }
+
+      // Final self-diff guard covering all tracked edits in this workspace against origin/master
+      if (haveCmd('git', '--version')) {
+        const finalDiffRes = spawnSync('git', ['diff', 'origin/master', '--'], {
+          cwd: path.resolve(__dirname, '..'),
+          env: cleanGitEnv(),
+          encoding: 'utf8',
+          maxBuffer: 64 * 1024 * 1024,
+        });
+        if (finalDiffRes.status === 0 && finalDiffRes.stdout.trim() !== '') {
+          const finalStatic = staticSecurityReview(finalDiffRes.stdout);
+          assert.strictEqual(
+            finalStatic.verdict,
+            'APPROVE',
+            `Expected zero static false positives on full branch diff, got: ${JSON.stringify(
+              finalStatic.issues
             )}`
           );
         }
